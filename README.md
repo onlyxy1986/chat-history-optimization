@@ -1,34 +1,42 @@
 # Chat History Optimization Extension for SillyTavern
 
-This extension streamlines chat history management in SillyTavern by minimizing token usage during lengthy conversations. It is ideal for users who engage in large or ongoing chats and want smoother performance.
+本扩展用于优化 SillyTavern 的聊天历史，减少长对话时的字符/Token消耗，并支持灵活的正则表达式摘要与正文提取。
 
-## Features
+---
 
-- Reduces token count efficiently for extended conversations
-- Integrates seamlessly with SillyTavern’s chat interface
-- Preserves all chat data and context
-- Simple to enable or disable as needed
+## 功能亮点
 
-## Installation and Usage
+- **自定义正则摘要与正文提取**  
+  支持多行正则表达式，灵活控制哪些内容保留、哪些内容移除。
+- **节省字符统计**  
+  实时显示已节省的字符数。
+- **预览功能**  
+  可一键展开预览“摘要”或“正文”处理效果。
+- **可视化设置界面**  
+  所有设置均可在 SillyTavern 扩展设置页中直观操作。
 
-### Installation
+---
 
-1. Open SillyTavern.
-2. Navigate to the Extensions tab.
-3. Click "Install" and enter: https://github.com/onlyxy1986/chat-history-optimization
+## 使用说明
 
-### Usage
+> **界面说明：**
+> - **启用功能**：一键开关本扩展。
+> - **正文深度**：控制保留多少条完整正文，其余用摘要。
+> - **摘要内容/正文内容**：多行正则表达式，`+` 开头为保留，`-` 开头为移除。
+> - **字符统计**：显示累计节省的字符数。
+> - **摘要预览/正文预览**：点击可展开，实时查看正则处理效果。
 
-Manage or disable the extension anytime from the Extensions settings page. No further configuration is required.
+---
 
-## Prerequisites
+## 正则表达式规则
 
-- SillyTavern version 1.10.0 or newer is recommended for optimal compatibility.
+- 每行一个正则表达式。
+- 以 `+` 开头：匹配后保留，所有匹配内容用空行拼接。
+- 以 `-` 开头：在所有 `+` 处理后，移除匹配到的内容。
+- 支持标准 JS 正则语法（无需 `/` 包裹）。
 
-## Support and Contributions
-
-Contributions are encouraged! Submit pull requests or suggestions on GitHub.
-
-## License
-
-Distributed under the MIT License. See the LICENSE file for details.
+**示例：**
+```regex
++<details>((?:(?!<details>)[\s\S])*?)</details>
+-[\s\S]*?<\/think.*>
+```
