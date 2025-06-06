@@ -1,33 +1,34 @@
-# SillyTavern Extension Example
+# Chat History Optimization Extension for SillyTavern
 
-*Provide a brief description of how your extension works, what problem it aims to solve.*
+This extension streamlines chat history management in SillyTavern by minimizing token usage during lengthy conversations. It is ideal for users who engage in large or ongoing chats and want smoother performance.
 
 ## Features
 
-*Describe some of the main selling points of your extension.*
+- Reduces token count efficiently for extended conversations
+- Integrates seamlessly with SillyTavern’s chat interface
+- Preserves all chat data and context
+- Simple to enable or disable as needed
 
 ## Installation and Usage
 
 ### Installation
 
-*In most cases, this should just be using ST's inbuilt extension installer.* 
+1. Open SillyTavern.
+2. Navigate to the Extensions tab.
+3. Click "Install" and enter: https://github.com/onlyxy1986/chat-history-optimization
 
 ### Usage
 
-*Explain how to use this extension.*
+Manage or disable the extension anytime from the Extensions settings page. No further configuration is required.
 
 ## Prerequisites
 
-*Specify the version of ST necessary here.*
+- SillyTavern version 1.10.0 or newer is recommended for optimal compatibility.
 
 ## Support and Contributions
 
-*Where should someone ask for support?*
-
-*Consider including your own contact info for help/questions.*
-
-*How can people help add to this extension?*
+Contributions are encouraged! Submit pull requests or suggestions on GitHub.
 
 ## License
 
-*Be cool, use an open source license.*
+Distributed under the MIT License. See the LICENSE file for details.
