@@ -195,7 +195,12 @@ function extractByRegexList(content, regexStr) {
         }
     }
 
-    let result = includeMatches.join('\n\n');
+    let result;
+    if (includeMatches.length > 0) {
+        result = includeMatches.join('\n\n');
+    } else {
+        result = content;
+    }
     for (const ex of excludeRegexes) {
         result = result.replace(ex, '');
     }
