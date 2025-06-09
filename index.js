@@ -207,6 +207,77 @@ function extractByRegexList(content, regexStr) {
     return result;
 }
 
+function mergeSummaryPairsByDate(chat) {
+    const dateSummaryMap = {};
+    const dateUserMsgMap = {};
+    const mergedChat = [];
+    let skippedCount = 0;
+    let i = 0;
+    // 保留第一条
+    if (chat.length > 0) {
+        mergedChat.push(chat[0]);
+        i = 1;
+    }
+    // 收集摘要信息对（允许连续assistant）
+    while (i < chat.length - 1) {
+        const userMsg = chat[i];
+        if (!userMsg || !userMsg['is_user']) {
+            i++;
+            continue;
+        }
+        let j = i + 1;
+        let found = false;
+        while (
+            j < chat.length &&
+            !chat[j]['is_user'] &&
+            chat[j]['mes']
+        ) {
+            // 用正则 /日期:(.*)时间/ 提取日期
+            const match = chat[j]['mes'].match(/日期:(.*)时间/);
+            if (match) {
+                const date = match[1].trim();
+                if (!dateSummaryMap[date]) dateSummaryMap[date] = [];
+                dateSummaryMap[date].push(chat[j]['mes']);
+                if (!dateUserMsgMap[date]) dateUserMsgMap[date] = userMsg;
+                found = true;
+                j++;
+            } else {
+                // 如果assistant没有匹配到日期，移除（不加入mergedChat）
+                skippedCount++;
+                j++;
+            }
+        }
+        if (found) {
+            i = j;
+        } else {
+            i++; // 跳过没有配对的user
+        }
+    }
+    if (skippedCount > (chat.length - 2) / 2 / 10) {
+        return chat;
+    }
+    // 合并摘要信息对，只替换mes字段
+    for (const date of Object.keys(dateSummaryMap)) {
+        const userMsg = { ...dateUserMsgMap[date], mes: `下一条assistant消息为日期:${date}的分时间段剧情` };
+        const firstAssistantIdx = chat.findIndex(item =>
+            !item.is_user && item.mes && item.mes.includes(`日期:${date}`)
+        );
+        let assistantMsg;
+        if (firstAssistantIdx !== -1) {
+            assistantMsg = { ...chat[firstAssistantIdx], mes: dateSummaryMap[date].join('\n\n') };
+        } else {
+            assistantMsg = { is_user: false, mes: dateSummaryMap[date].join('\n\n') };
+        }
+        mergedChat.push(userMsg);
+        mergedChat.push(assistantMsg);
+    }
+    // 保留最后一条
+    if (chat.length > 1) {
+        mergedChat.push(chat[chat.length - 1]);
+    }
+    return mergedChat;
+}
+
 globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, abort, type) {
     if (!extension_settings[extensionName].extensionToggle) {
         console.info("[Chat History Optimization] extension is disabled.")
@@ -233,7 +304,7 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
         if (role === 'assistant' && chat[j]['swipes'] && chat[j]['swipes'][chat[j]['swipe_id']]) {
             currentAssistantCount += 1;
             const content = chat[j]['swipes'][chat[j]['swipe_id']];
-            charsSaved += content.length;
+            charsSaved += chat[j]['mes'].length;
             if (assistantCount - currentAssistantCount > extension_settings[extensionName].keepCount) {
                 const result = extractByRegexList(content, extension_settings[extensionName].detailsRegex);
                 if (result) chat[j]['mes'] = result;
@@ -244,6 +315,12 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
             charsSaved -= chat[j]['mes']?.length || 0;
         }
     }
+    const mergedChat = mergeSummaryPairsByDate(chat);
+    chat.length = 0;
+    for (const item of mergedChat) {
+        chat.push(item);
+    }
+    console.log("[Chat History Optimization] new chat history:", mergedChat);
     totalCharsSaved += charsSaved;
     $("#saved-chars").prop("textContent", totalCharsSaved.toLocaleString());
     console.log(`[Chat History Optimization] Compression saved ${charsSaved} chars (cumulative: ${totalCharsSaved} chars since server startup`);
