@@ -14,42 +14,16 @@
             <div class="marginTop5">
                 <label for="keep_count">
                     <span>正文深度</span>
-                    <small>（深度内发送正文内容,深度外发送摘要内容）</small>
+                    <small>（会保留的AI最后回复的完整消息的数量）</small>
                 </label>
                 <input step="1" value="3" max="100" min="0" class="text_pole" type="number" id="keep_count">
             </div>
-            <label title="字符统计">
-                <span>已节省字符数(not token): </span>
-                <span id="saved-chars">0</span>
+            <label title="错误统计">
+                <span>人物总结失败的楼层: </span>
+                <span id="chars-failed">无</span>
             </label>
-            <div class="marginTop5">
-                <label for="details_regex" id="details_regex_label">
-                    <span>摘要内容(一行一个正则表达式,以'+'开始为匹配后保留,以'-'开始为匹配后移除)</span>
-                </label>
-                <textarea id="details_regex" rows="4" style="width:100%;"></textarea>
-            </div>
-            <div class="marginTop5">
-                <label for="content_regex" id="content_regex_label">
-                    <span>正文内容(一行一个正则表达式,以'+'开始为匹配后保留,以'-'开始为匹配后移除)</span>
-                </label>
-                <textarea id="content_regex" rows="4" style="width:100%;"></textarea>
-            </div>
-            <div class="marginTop5">
-                <div id="details-preview-toggle" style="cursor:pointer;display:flex;align-items:center;">
-                    <span id="details-preview-arrow" style="font-size:18px;transition:transform 0.2s;">&#9660;</span>
-                    <span style="margin-left:8px;">摘要预览</span>
-                </div>
-                <textarea id="details-preview-textarea" rows="4" style="width:100%;display:none;margin-top:8px;"
-                    readonly></textarea>
-            </div>
-            <div class="marginTop5">
-                <div id="content-preview-toggle" style="cursor:pointer;display:flex;align-items:center;">
-                    <span id="content-preview-arrow" style="font-size:18px;transition:transform 0.2s;">&#9660;</span>
-                    <span style="margin-left:8px;">正文预览</span>
-                </div>
-                <textarea id="content-preview-textarea" rows="4" style="width:100%;display:none;margin-top:8px;"
-                    readonly></textarea>
-            </div>
+            <br />
+            <br />
         </div>
     </div>
 </div>

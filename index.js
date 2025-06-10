@@ -14,12 +14,9 @@ const extensionName = "chat-history-optimization";
 const extensionFolderPath = `scripts/extensions/third-party/${extensionName}`;
 const defaultSettings = {
     extensionToggle: false,
-    keepCount: 3,
-    detailsRegex: "+<details>((?:(?!<details>)[\\s\\S])*?)<\\/details>",
-    contentRegex: "+<content[\\s\\S]*?<\\/content>"
+    keepCount: 3
 };
 
-let totalCharsSaved = 0;
 // Loads the extension settings if they exist, otherwise initializes them to the defaults.
 async function loadSettings() {
     //Create the settings if they don't exist
@@ -31,8 +28,6 @@ async function loadSettings() {
     // Updating settings in the UI
     $("#extension_toggle").prop("checked", extension_settings[extensionName].extensionToggle).trigger("input");
     $("#keep_count").prop("value", extension_settings[extensionName].keepCount).trigger("input");
-    $("#details_regex").prop("value", extension_settings[extensionName].detailsRegex).trigger("input");
-    $("#content_regex").prop("value", extension_settings[extensionName].contentRegex).trigger("input");
 }
 
 function onToggleInput(event) {
@@ -47,235 +42,139 @@ function onKeepCountInput(event) {
     saveSettingsDebounced();
 }
 
-function validateRegexList(regexStr) {
-    const lines = regexStr.split('\n').map(line => line.trim()).filter(line => line.length > 0);
-    for (const line of lines) {
-        let pattern = line;
-        if (line.startsWith('+') || line.startsWith('-')) {
-            pattern = line.slice(1).trim();
-        }
-        if (!pattern) continue;
-        try {
-            new RegExp(pattern, 'gi');
-        } catch (e) {
-            return false;
-        }
-    }
-    return true;
-}
+function mergeCharsInfo(chat) {
+    // 记录解析失败或未找到的消息索引
+    let failedChars = [];
+    // 合并角色信息，不返回mergedChat，只返回合并好的json
+    // characterMap: { character_name: { pet_names: Set, [record_date]: { events: [] } } }
+    const characterMap = {};
 
-function updateRegexStatusLabels() {
-    // detailsRegex
-    const detailsValue = $("#details_regex").val();
-    const detailsValid = validateRegexList(detailsValue);
-    $("#details_regex_status").text(detailsValid ? "valid regex(s)" : "invalid regex(s)")
-        .css("color", detailsValid ? "green" : "red");
-
-    // contentRegex
-    const contentValue = $("#content_regex").val();
-    const contentValid = validateRegexList(contentValue);
-    $("#content_regex_status").text(contentValid ? "valid regex(s)" : "invalid regex(s)")
-        .css("color", contentValid ? "green" : "red");
-}
-
-
-function onDetailsRegexInput(event) {
-    const value = $(event.target).prop("value");
-    extension_settings[extensionName].detailsRegex = value;
-    updateRegexStatusLabels();
-    onDetailsPreviewToggle(false);
-    saveSettingsDebounced();
-}
-
-function onContentRegexInput(event) {
-    const value = $(event.target).prop("value");
-    extension_settings[extensionName].contentRegex = value;
-    updateRegexStatusLabels();
-    onContentPreviewToggle(false);
-    saveSettingsDebounced();
-}
-
-function findlastAssistantMessage(chat) {
-    for (let i = chat.length - 1; i >= 0; i--) {
-        if (!chat[i]['is_user'] && chat[i]['mes']) {
-            return chat[i]['mes'];
-        }
-    }
-    return null;
-}
-
-function onDetailsPreviewToggle(changeStatus = true) {
-    const $textarea = $("#details-preview-textarea");
-    const $arrow = $("#details-preview-arrow");
-    const lastAssistantMessage = findlastAssistantMessage(context.chat);
-    let previewContent = "未找到摘要内容";
-    if (lastAssistantMessage) {
-        previewContent = extractByRegexList(lastAssistantMessage, $("#details_regex").val());
-    }
-    $textarea.val(previewContent);
-    if (changeStatus) {
-        if ($textarea.is(":visible")) {
-            $textarea.hide();
-            $arrow.css("transform", "rotate(0deg)");
-        } else {
-            $textarea.show();
-            $arrow.css("transform", "rotate(180deg)");
-        }
-    }
-}
-
-function onContentPreviewToggle(changeStatus = true) {
-    const $textarea = $("#content-preview-textarea");
-    const $arrow = $("#content-preview-arrow");
-    const lastAssistantMessage = findlastAssistantMessage(context.chat);
-    let previewContent = "未找到正文内容";
-    if (lastAssistantMessage) {
-        previewContent = extractByRegexList(lastAssistantMessage, $("#content_regex").val());
-    }
-    $textarea.val(previewContent);
-    if (changeStatus) {
-        // Toggle visibility and arrow rotation
-        if ($textarea.is(":visible")) {
-            $textarea.hide();
-            $arrow.css("transform", "rotate(0deg)");
-        } else {
-
-            $textarea.show();
-            $arrow.css("transform", "rotate(180deg)");
-        }
-    }
-}
-
-function countAssistantCount(chat) {
-    let count = 0;
-    for (let i = chat.length - 1; i >= 0; i--) {
-        let role = chat[i]['is_user'] ? 'user' : 'assistant';
-        if (role === 'assistant') {
-            count += 1;
-        }
-    }
-    return count;
-}
-
-/**
- * 通用正则处理函数
- * @param {string} content - 要处理的文本
- * @param {string} regexStr - 多行正则字符串，每行一个正则
- * 以+开头的正则为保留内容（匹配后用空行拼接），以-开头的正则为排除内容（在所有+处理后移除匹配内容）
- * @returns {string} 匹配结果拼接字符串
- */
-function extractByRegexList(content, regexStr) {
-    const regexLines = regexStr
-        .split('\n')
-        .map(line => line.trim())
-        .filter(line => line.length > 0);
-
-    let includeMatches = [];
-    let excludeRegexes = [];
-
-    for (const line of regexLines) {
-        if (line.startsWith('+')) {
-            const pattern = line.slice(1).trim();
-            if (!pattern) continue;
-            try {
-                const regex = new RegExp(pattern, 'gi');
-                const matches = [...content.matchAll(regex)].map(m => m[0]);
-                includeMatches.push(...matches);
-            } catch (e) {
-                console.warn(`[Chat History Optimization] Invalid include regex: ${pattern}`);
-            }
-        } else if (line.startsWith('-')) {
-            const pattern = line.slice(1).trim();
-            if (!pattern) continue;
-            try {
-                excludeRegexes.push(new RegExp(pattern, 'gi'));
-            } catch (e) {
-                console.warn(`[Chat History Optimization] Invalid exclude regex: ${pattern}`);
-            }
-        }
-    }
-
-    let result;
-    if (includeMatches.length > 0) {
-        result = includeMatches.join('\n\n');
-    } else {
-        result = content;
-    }
-    for (const ex of excludeRegexes) {
-        result = result.replace(ex, '');
-    }
-    return result;
-}
-
-function mergeSummaryPairsByDate(chat) {
-    const dateSummaryMap = {};
-    const dateUserMsgMap = {};
-    const mergedChat = [];
-    let skippedCount = 0;
-    let i = 0;
-    // 保留第一条
-    if (chat.length > 0) {
-        mergedChat.push(chat[0]);
-        i = 1;
-    }
-    // 收集摘要信息对（允许连续assistant）
-    while (i < chat.length - 1) {
-        const userMsg = chat[i];
-        if (!userMsg || !userMsg['is_user']) {
-            i++;
-            continue;
-        }
-        let j = i + 1;
-        let found = false;
-        while (
-            j < chat.length &&
-            !chat[j]['is_user'] &&
-            chat[j]['mes']
-        ) {
-            // 用正则 /日期:(.*)时间/ 提取日期
-            const match = chat[j]['mes'].match(/日期:(.*)时间/);
-            if (match) {
-                const date = match[1].trim();
-                if (!dateSummaryMap[date]) dateSummaryMap[date] = [];
-                dateSummaryMap[date].push(chat[j]['mes']);
-                if (!dateUserMsgMap[date]) dateUserMsgMap[date] = userMsg;
-                found = true;
-                j++;
+    for (let j = 1; j < chat.length; j++) {
+        const item = chat[j];
+        if (item && !item.is_user && item.swipes && item.swipes[item.swipe_id]) {
+            const swipeContent = item.swipes[item.swipe_id];
+            // 提取 <characters>...</characters> 标签内容
+            const charMatch = swipeContent.replace(/\/\/.*$/gm, '').match(/<characters>([\s\S]*?)<\/characters>/i);
+            if (charMatch) {
+                let jsonStr = charMatch[1].trim();
+                try {
+                    // 只提取第一个{...}对象
+                    const objMatch = jsonStr.match(/\{[\s\S]*\}/);
+                    if (!objMatch) {
+                        failedChars.push(j);
+                        continue;
+                    }
+                    const obj = JSON.parse(objMatch[0]);
+                    if (Array.isArray(obj.characters)) {
+                        for (const char of obj.characters) {
+                            if (!char.character_name || !char.record_date) continue;
+                            const name = char.character_name;
+                            const date = char.record_date;
+                            // 直接在characterMap[name]上维护pet_names合集
+                            if (!characterMap[name]) {
+                                characterMap[name] = { pet_names: new Set() };
+                            }
+                            if (!characterMap[name][date]) {
+                                characterMap[name][date] = { events: [] };
+                            }
+                            // 合并pet_names到characterMap[name].pet_names（去重）
+                            if (Array.isArray(char.pet_names)) {
+                                char.pet_names.forEach(n => characterMap[name].pet_names.add(n));
+                            }
+                            // 合并event
+                            if (char.event) {
+                                characterMap[name][date].events.push(char.event);
+                            }
+                        }
+                    }
+                } catch (e) {
+                    // 非法json直接丢弃并记录
+                    failedChars.push(j);
+                }
             } else {
-                // 如果assistant没有匹配到日期，移除（不加入mergedChat）
-                skippedCount++;
-                j++;
+                // 没有找到<characters>标签，记录
+                failedChars.push(j);
             }
         }
-        if (found) {
-            i = j;
-        } else {
-            i++; // 跳过没有配对的user
+    }
+
+    // 构建最终json，pet_names去重转为数组
+    for (const name of Object.keys(characterMap)) {
+        characterMap[name].pet_names = Array.from(characterMap[name].pet_names);
+    }
+
+    // 打印log并显示在failed-chars里
+    if (failedChars.length > 0) {
+        console.warn(`[Chat History Optimization] Failed to parse or missing <characters> at chat indexes: ${failedChars.join(', ')}`);
+        $("#chars-failed").prop("textContent", failedChars.join(', '));
+    } else {
+        $("#chars-failed").prop("textContent", "无");
+    }
+
+    return characterMap;
+}
+
+const charPrompt = `
+额外要求:在回复末尾生成characters信息,用注释包裹:
+<!--
+// 对出场角色(包括{{user}})的总结(JSON格式)
+<characters>
+{
+    "characters": [ // 使用数组，方便增删和遍历角色
+        {
+            "character_name": "角色名", // 角色唯一标识名称
+            "pet_names": ["称呼1", "称呼2", etc…], // {{user}}对角色的常用称呼
+            "record_date": "世界观当前日期", // 记录世界观下当前日期
+            "event": {
+                "timestamp": "HH:mm (可选)", // 事件发生时间（可选）
+                "description": "角色事件描述,保留关键信息,确保简洁无歧义"
+            }
+        },
+        // ... يمكن إضافة المزيد من الشخصيات هنا
+    ]
+}
+</characters>
+-->
+`;
+
+function filterCharsInfoByRecent(chat, charsInfo, keepCount) {
+    // 统计最近keepCount*2+1条消息中出现过的pet_names或charName
+    const recentPetNames = new Set();
+    const recentCount = keepCount * 2 + 1;
+    const startIdx = Math.max(chat.length - recentCount, 0);
+    for (let i = startIdx; i < chat.length; i++) {
+        const item = chat[i];
+        if (!item || !item.mes) continue;
+        // 遍历charsInfo所有pet_names和charName，若出现在消息文本中则记录
+        for (const charName in charsInfo) {
+            if (!charsInfo.hasOwnProperty(charName)) continue;
+            // 检查角色名
+            if (item.mes.includes(charName)) {
+                recentPetNames.add(charName);
+            }
+            // 检查pet_names
+            const petNames = Array.isArray(charsInfo[charName].pet_names) ? charsInfo[charName].pet_names : [];
+            petNames.forEach(pet => {
+                if (typeof pet === "string" && item.mes.includes(pet)) {
+                    recentPetNames.add(pet);
+                }
+            });
         }
     }
-    if (skippedCount > (chat.length - 2) / 2 / 10) {
-        return chat;
-    }
-    // 合并摘要信息对，只替换mes字段
-    for (const date of Object.keys(dateSummaryMap)) {
-        const userMsg = { ...dateUserMsgMap[date], mes: `下一条assistant消息为日期:${date}的分时间段剧情` };
-        const firstAssistantIdx = chat.findIndex(item =>
-            !item.is_user && item.mes && item.mes.includes(`日期:${date}`)
-        );
-        let assistantMsg;
-        if (firstAssistantIdx !== -1) {
-            assistantMsg = { ...chat[firstAssistantIdx], mes: dateSummaryMap[date].join('\n\n') };
-        } else {
-            assistantMsg = { is_user: false, mes: dateSummaryMap[date].join('\n\n') };
+
+    // 过滤charsInfo对象
+    const filtered = {};
+    for (const charName in charsInfo) {
+        if (!charsInfo.hasOwnProperty(charName)) continue;
+        const charObj = charsInfo[charName];
+        const petNames = Array.isArray(charObj.pet_names) ? charObj.pet_names : [];
+        // 只要有一个pet_name或charName在recentPetNames中就保留
+        const hasRecent = petNames.some(n => recentPetNames.has(n)) || recentPetNames.has(charName);
+        if (hasRecent) {
+            filtered[charName] = charObj;
         }
-        mergedChat.push(userMsg);
-        mergedChat.push(assistantMsg);
     }
-    // 保留最后一条
-    if (chat.length > 1) {
-        mergedChat.push(chat[chat.length - 1]);
-    }
-    return mergedChat;
+    return filtered;
 }
 
 globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, abort, type) {
@@ -284,46 +183,87 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
         return;
     }
 
-    // 校验正则有效性
-    const detailsValid = validateRegexList(extension_settings[extensionName].detailsRegex);
-    const contentValid = validateRegexList(extension_settings[extensionName].contentRegex);
+    chat[chat.length - 1]['mes'] = "用户输入:" + chat[chat.length - 1]['mes'] + "\n\n" + charPrompt;
+    const charsInfo = mergeCharsInfo(chat);
+    console.log("[Chat History Optimization] characters info:", charsInfo);
 
-    if (!detailsValid || !contentValid) {
-        console.error("[Chat History Optimization] Invalid regex detected in " +
-            (!detailsValid && !contentValid
-                ? "detailsRegex and contentRegex."
-                : (!detailsValid ? "detailsRegex." : "contentRegex.")));
-        return;
+    const mergedChat = [];
+
+    // 保留第一条assistant消息
+    let firstAssistantIdx = chat.findIndex(item => !item.is_user);
+    const assistantName = chat[firstAssistantIdx].name || "Unknown";
+    if (firstAssistantIdx !== -1) {
+        mergedChat.push(chat[firstAssistantIdx]);
     }
 
-    const assistantCount = countAssistantCount(chat);
-    let currentAssistantCount = 0;
-    let charsSaved = 0;
-    for (let j = 0; j < chat.length; j++) {
-        let role = chat[j]['is_user'] ? 'user' : 'assistant';
-        if (role === 'assistant' && chat[j]['swipes'] && chat[j]['swipes'][chat[j]['swipe_id']]) {
-            currentAssistantCount += 1;
-            const content = chat[j]['swipes'][chat[j]['swipe_id']];
-            charsSaved += chat[j]['mes'].length;
-            if (assistantCount - currentAssistantCount > extension_settings[extensionName].keepCount) {
-                const result = extractByRegexList(content, extension_settings[extensionName].detailsRegex);
-                if (result) chat[j]['mes'] = result;
-            } else {
-                const result = extractByRegexList(content, extension_settings[extensionName].contentRegex);
-                if (result) chat[j]['mes'] = result;
-            }
-            charsSaved -= chat[j]['mes']?.length || 0;
-        }
+    // charsInfo 转为 json 文本，作为一条 assistant 消息加入
+    if (charsInfo && Object.keys(charsInfo).length > 0) {
+        const charsInfoNotify = {
+            is_user: false,
+            name: assistantName,
+            send_date: Date.now(),
+            mes: `下一条消息将是包含角色行动记录的JSON数据.数据结构为:{"角色名": "日期": "行动记录"}.请严格按照此格式解析并处理信息.`
+        };
+        mergedChat.push(charsInfoNotify);
+        mergedChat.push({
+            is_user: false,
+            name: assistantName,
+            send_date: Date.now(),
+            mes: `\n${JSON.stringify(filterCharsInfoByRecent(chat, charsInfo, extension_settings[extensionName].keepCount), null, 2)}\n`
+        });
     }
-    const mergedChat = mergeSummaryPairsByDate(chat);
+
+    // 保留倒数第 keepCount 条 assistant 消息及其后的所有信息
+    let assistantIdxArr = [];
+    for (let i = 1; i < chat.length; i++) {
+        if (!chat[i].is_user) assistantIdxArr.push(i);
+    }
+    const keepCount = extension_settings[extensionName].keepCount || 3;
+    const firstUserIdx = chat.findIndex(item => item.is_user);
+    let startIdx;
+    if (assistantIdxArr.length === 0) {
+        startIdx = chat.length;
+    } else if (assistantIdxArr.length >= keepCount) {
+        startIdx = assistantIdxArr[assistantIdxArr.length - keepCount];
+    } else {
+        startIdx = assistantIdxArr[0];
+    }
+    if (firstUserIdx > 0) {
+        startIdx = Math.max(startIdx, firstUserIdx + 1);
+    }
+    let tail = [];
+    if (startIdx >= chat.length) {
+        // 只保留最后一条消息
+        tail = [chat[chat.length - 1]];
+    } else {
+        // 从startIdx-1开始保留到结尾
+        tail = chat.slice(startIdx - 1);
+        const historyInfoNotify = {
+            is_user: false,
+            name: assistantName,
+            send_date: Date.now(),
+            mes: `后续消息是最近的消息记录.`
+        };
+        mergedChat.push(historyInfoNotify);
+    }
+    mergedChat.push(...tail);
+
+
+    const userInfoNotify = {
+        is_user: false,
+        name: assistantName,
+        send_date: Date.now(),
+        mes: `下一条消息是用户输入的内容.`
+    };
+    mergedChat.splice(mergedChat.length - 1, 0, userInfoNotify);
+
+    // 用 mergedChat 替换 chat 的内容
     chat.length = 0;
     for (const item of mergedChat) {
         chat.push(item);
     }
-    console.log("[Chat History Optimization] new chat history:", mergedChat);
-    totalCharsSaved += charsSaved;
-    $("#saved-chars").prop("textContent", totalCharsSaved.toLocaleString());
-    console.log(`[Chat History Optimization] Compression saved ${charsSaved} chars (cumulative: ${totalCharsSaved} chars since server startup`);
+
+    console.log("[Chat History Optimization] new chat history:", chat);
 }
 
 // This function is called when the extension is loaded
@@ -336,17 +276,8 @@ jQuery(async () => {
     // Left should be extensions that deal with system functions and right should be visual/UI related
     $("#extensions_settings").append(settingsHtml);
 
-    $("#details_regex_label").after('<label id="details_regex_status" style="margin-left:10px;"></label>');
-    $("#content_regex_label").after('<label id="content_regex_status" style="margin-left:10px;"></label>');
-
     $("#extension_toggle").on("input", onToggleInput);
     $("#keep_count").on("input", onKeepCountInput);
-    $("#details_regex").on("input", onDetailsRegexInput);
-    $("#content_regex").on("input", onContentRegexInput);
-
-    // 绑定预览展开/折叠事件
-    $("#details-preview-toggle").on("click", onDetailsPreviewToggle);
-    $("#content-preview-toggle").on("click", onContentPreviewToggle);
 
     // Load settings when starting things up (if you have any)
     loadSettings();
