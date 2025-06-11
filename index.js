@@ -17,6 +17,13 @@ const defaultSettings = {
     keepCount: 3
 };
 
+const removedSections = [
+    "think",
+    "reason",
+    "challenge_to_censorship",
+    "guifan"
+];
+
 // Loads the extension settings if they exist, otherwise initializes them to the defaults.
 async function loadSettings() {
     //Create the settings if they don't exist
@@ -45,16 +52,17 @@ function onKeepCountInput(event) {
 function mergeCharsInfo(chat) {
     // 记录解析失败或未找到的消息索引
     let failedChars = [];
-    // 合并角色信息，不返回mergedChat，只返回合并好的json
-    // characterMap: { character_name: { pet_names: Set, [record_date]: { events: [] } } }
+    // characterMap: { character_name: { pet_names: Set, tasks: [], items: [], [record_date]: { events: [] } } }
     const characterMap = {};
 
     for (let j = 1; j < chat.length; j++) {
         const item = chat[j];
         if (item && !item.is_user && item.swipes && item.swipes[item.swipe_id]) {
             const swipeContent = item.swipes[item.swipe_id];
-            // 提取 <characters>...</characters> 标签内容
-            const charMatch = swipeContent.replace(/\/\/.*$/gm, '').match(/<characters>([\s\S]*?)<\/characters>/i);
+            // 去除注释并提取 <characters>...</characters> 标签内容（不捕获标签本身，忽略嵌套错误）
+            const charMatch = swipeContent
+                .replace(/\/\/.*$/gm, '')
+                .match(/<characters>((?:(?!<characters>)[\s\S])*?)<\/characters>/i);
             if (charMatch) {
                 let jsonStr = charMatch[1].trim();
                 try {
@@ -70,9 +78,13 @@ function mergeCharsInfo(chat) {
                             if (!char.character_name || !char.record_date) continue;
                             const name = char.character_name;
                             const date = char.record_date;
-                            // 直接在characterMap[name]上维护pet_names合集
+                            // 初始化结构
                             if (!characterMap[name]) {
-                                characterMap[name] = { pet_names: new Set() };
+                                characterMap[name] = {
+                                    pet_names: new Set(),
+                                    tasks: [],
+                                    items: []
+                                };
                             }
                             if (!characterMap[name][date]) {
                                 characterMap[name][date] = { events: [] };
@@ -80,6 +92,13 @@ function mergeCharsInfo(chat) {
                             // 合并pet_names到characterMap[name].pet_names（去重）
                             if (Array.isArray(char.pet_names)) {
                                 char.pet_names.forEach(n => characterMap[name].pet_names.add(n));
+                            }
+                            // tasks和items直接覆盖为最新记录
+                            if (Array.isArray(char.tasks)) {
+                                characterMap[name].tasks = char.tasks;
+                            }
+                            if (Array.isArray(char.items)) {
+                                characterMap[name].items = char.items;
                             }
                             // 合并event
                             if (char.event) {
@@ -98,7 +117,7 @@ function mergeCharsInfo(chat) {
         }
     }
 
-    // 构建最终json，pet_names去重转为数组
+    // 构建最终json，pet_names去重转为数组，tasks/items提升到与pet_names同级
     for (const name of Object.keys(characterMap)) {
         characterMap[name].pet_names = Array.from(characterMap[name].pet_names);
     }
@@ -117,7 +136,7 @@ function mergeCharsInfo(chat) {
 const charPrompt = `
 额外要求:在回复末尾生成characters信息,用注释包裹:
 <!--
-// 对出场角色(包括{{user}})的总结(JSON格式)
+// 对本条消息出场角色(包括{{user}})的总结(JSON格式)
 <characters>
 {
     "characters": [ // 使用数组，方便增删和遍历角色
@@ -127,8 +146,14 @@ const charPrompt = `
             "record_date": "世界观当前日期", // 记录世界观下当前日期
             "event": {
                 "timestamp": "HH:mm (可选)", // 事件发生时间（可选）
-                "description": "角色事件描述,保留关键信息,确保简洁无歧义"
-            }
+                "description": "角色事件描述,保留关键信息,涉及到数据的要准确保留,其余部分确保简洁无歧义"
+            },
+            "tasks": [ // {{user}}收到的系统任务记录，随完成情况增减
+                // { "task_name": "任务名", "status": "进行中/已完成", "desc": "任务描述" }
+            ],
+            "items": [ // 道具记录，随获得/消耗增减
+                // { "item_name": "道具名", "count": 1, "desc": "道具描述" }
+            ]
         },
         // ... يمكن إضافة المزيد من الشخصيات هنا
     ]
@@ -196,13 +221,13 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
         mergedChat.push(chat[firstAssistantIdx]);
     }
 
-    // charsInfo 转为 json 文本，作为一条 assistant 消息加入
+    // charsInfo 转为 json 文本，作为一条 assistant 消消息加入
     if (charsInfo && Object.keys(charsInfo).length > 0) {
         const charsInfoNotify = {
             is_user: false,
             name: assistantName,
             send_date: Date.now(),
-            mes: `下一条消息将是包含角色行动记录的JSON数据.数据结构为:{"角色名": "日期": "行动记录"}.请严格按照此格式解析并处理信息.`
+            mes: `下一条消息将是一个包含**角色行为记录**的JSON对象.在生成你的回复时,**必须严格遵循并深度融入**该角色记录中的信息.`
         };
         mergedChat.push(charsInfoNotify);
         mergedChat.push({
@@ -238,6 +263,16 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     } else {
         // 从startIdx-1开始保留到结尾
         tail = chat.slice(startIdx - 1);
+        tail = tail.map(item => {
+            if (item && typeof item.mes === "string" && item.swipes && item.swipe_id !== undefined && item.swipes[item.swipe_id]) {
+                return {
+                    ...item, mes: removedSections.reduce((mes, section) => {
+                        return mes.replace(new RegExp(`<${section}[\\s\\S]*?${section}.*?>`, "g"), '');
+                    }, item.swipes[item.swipe_id])
+                };
+            }
+            return item;
+        });
         const historyInfoNotify = {
             is_user: false,
             name: assistantName,
