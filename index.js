@@ -3,7 +3,7 @@
 
 //You'll likely need to import extension_settings, getContext, and loadExtensionSettings from extensions.js
 import { extension_settings, getContext, loadExtensionSettings } from "../../../extensions.js";
-
+import { getTokenCountAsync } from '../../../tokenizers.js';
 //You'll likely need to import some other functions from the main script
 import { saveSettingsDebounced } from "../../../../script.js";
 
@@ -148,7 +148,7 @@ const charPrompt = `
                 "timestamp": "HH:mm (可选)", // 事件发生时间（可选）
                 "description": "角色事件描述,保留关键信息,涉及到数据的要准确保留,其余部分确保简洁无歧义"
             },
-            "tasks": [ // {{user}}收到的系统任务记录，随完成情况增减
+            "tasks": [ // {{user}}收到的系统任务记录，收到任务新增条目，完成任务删除条目
                 // { "task_name": "任务名", "status": "进行中/已完成", "desc": "任务描述" }
             ],
             "items": [ // 道具记录，随获得/消耗增减
@@ -223,19 +223,35 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
 
     // charsInfo 转为 json 文本，作为一条 assistant 消消息加入
     if (charsInfo && Object.keys(charsInfo).length > 0) {
+        const charsInfoJsonStr = JSON.stringify(filterCharsInfoByRecent(chat, charsInfo, extension_settings[extensionName].keepCount), null, 2);
         const charsInfoNotify = {
-            is_user: false,
-            name: assistantName,
+            is_user: true,
+            name: chat[chat.length - 1].name,
             send_date: Date.now(),
-            mes: `下一条消息将是一个包含**角色行为记录**的JSON对象.在生成你的回复时,**必须严格遵循并深度融入**该角色记录中的信息.`
+            mes: `
+<ROLE_DATA_UPDATE>
+# 指令
+全量载入下方角色行为记录JSON对象（覆盖历史缓存）
+---
+${charsInfoJsonStr}
+</ROLE_DATA_UPDATE>
+`
         };
         mergedChat.push(charsInfoNotify);
-        mergedChat.push({
+        const charsInfoNotifyConfirm = {
             is_user: false,
             name: assistantName,
             send_date: Date.now(),
-            mes: `\n${JSON.stringify(filterCharsInfoByRecent(chat, charsInfo, extension_settings[extensionName].keepCount), null, 2)}\n`
-        });
+            mes: `
+<DIRECTIVE_CONFIRM>
+执行状态: SUCCESS
+操作日志:
+- 已载入角色行为记录JSON对象·
+</DIRECTIVE_CONFIRM>
+角色行为记录已更新。请继续与我对话，我会根据最新的角色信息进行回复。
+`
+        };
+        mergedChat.push(charsInfoNotifyConfirm);
     }
 
     // 保留倒数第 keepCount 条 assistant 消息及其后的所有信息
@@ -294,9 +310,16 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
 
     // 用 mergedChat 替换 chat 的内容
     chat.length = 0;
+    let chatHistory = "";
     for (const item of mergedChat) {
         chat.push(item);
+        chatHistory += item.mes + "\n";
     }
+
+    // 计算 token 数量
+    const tokenCount = await getTokenCountAsync(chatHistory);
+    $("#token-count").prop("textContent", `${tokenCount}`);
+    console.log("[Chat History Optimization] token count:", tokenCount);
 
     console.log("[Chat History Optimization] new chat history:", chat);
 }
