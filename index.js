@@ -231,7 +231,9 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
             mes: `
 <ROLE_DATA_UPDATE>
 # 指令
-全量载入下方角色行为记录JSON对象（覆盖历史缓存）
+全量载入下方角色行为记录JSON对象（覆盖历史缓存）。
+【重要】生成最新回复时，角色的言行必须与其行为记录（events,tasks,items）完全一致，绝不允许出现与行为记录矛盾的内容。
+如有矛盾，请优先以行为记录为准，并在回复中合理体现角色的真实状态和历史。
 ---
 ${charsInfoJsonStr}
 </ROLE_DATA_UPDATE>
