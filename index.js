@@ -6,6 +6,7 @@ import { extension_settings, getContext, loadExtensionSettings } from "../../../
 import { getTokenCountAsync } from '../../../tokenizers.js';
 //You'll likely need to import some other functions from the main script
 import { saveSettingsDebounced } from "../../../../script.js";
+import { getRegexedString, regex_placement } from '../../../extensions/regex/engine.js';
 
 const context = SillyTavern.getContext();
 
@@ -16,14 +17,6 @@ const defaultSettings = {
     extensionToggle: false,
     keepCount: 3
 };
-
-const removedSections = [
-    "think",
-    "reason",
-    "challenge_to_censorship",
-    "guifan",
-    "internal_process"
-];
 
 // Loads the extension settings if they exist, otherwise initializes them to the defaults.
 async function loadSettings() {
@@ -63,11 +56,11 @@ function mergeSummaryInfo(chat) {
         if (item && !item.is_user && item.swipes && item.swipes[item.swipe_id]) {
             const swipeContent = item.swipes[item.swipe_id];
             // 去除注释并提取 <message_summary>...</message_summary> 标签内容（不捕获标签本身，忽略嵌套错误）
-            const charMatch = swipeContent
+            const matches = [...swipeContent
                 .replace(/\/\/.*$/gm, '')
-                .match(/<message_summary>((?:(?!<message_summary>)[\s\S])*?)<\/message_summary>/i);
-            if (charMatch) {
-                let jsonStr = charMatch[1].trim();
+                .matchAll(/<message_summary>((?:(?!<message_summary>)[\s\S])*?)<\/message_summary>/gi)];
+            if (matches.length > 0) {
+                let jsonStr = matches[matches.length - 1][1].trim();
                 try {
                     // 只提取第一个{...}对象
                     const objMatch = jsonStr.match(/\{[\s\S]*\}/);
@@ -221,9 +214,9 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
             mes: `
 <ROLE_DATA_UPDATE>
 # 指令
-全量载入下方角色/任务/事件记录JSON对象（覆盖历史缓存）。
-【重要】生成最新回复时，绝不允许出现与角色/任务/事件记录矛盾的内容。
-如有矛盾，请优先以角色/任务/事件记录为准，并在回复中合理体现角色的真实状态和历史。
+全量载入下方角色&任务&事件记录JSON对象（覆盖历史缓存）。
+【重要】生成最新回复时，绝不允许出现与角色&任务&事件记录矛盾的内容。
+如有矛盾，请优先以角色&任务&事件记录为准，并在回复中合理体现角色的真实状态和历史。
 ---
 ${charsInfoJsonStr}
 </ROLE_DATA_UPDATE>
@@ -238,9 +231,9 @@ ${charsInfoJsonStr}
 <DIRECTIVE_CONFIRM>
 执行状态: SUCCESS
 操作日志:
-- 已载入角色/任务/事件记录JSON对象·
+- 已载入角色&任务&事件记录JSON对象·
 </DIRECTIVE_CONFIRM>
-角色/任务/事件记录已更新。请继续与我对话，我会根据最新的角色/任务/事件记录信息进行回复。
+角色&任务&事件记录已更新。请继续与我对话，我会根据最新的角色&任务&事件记录信息进行回复。
 `
         };
         mergedChat.push(charsInfoNotifyConfirm);
@@ -271,16 +264,6 @@ ${charsInfoJsonStr}
     } else {
         // 从startIdx-1开始保留到结尾
         tail = chat.slice(startIdx - 1);
-        tail = tail.map(item => {
-            if (item && typeof item.mes === "string" && item.swipes && item.swipe_id !== undefined && item.swipes[item.swipe_id]) {
-                return {
-                    ...item, mes: removedSections.reduce((mes, section) => {
-                        return mes.replace(new RegExp(`<${section}[\\s\\S]*?${section}.*?>`, "g"), '');
-                    }, item.swipes[item.swipe_id])
-                };
-            }
-            return item;
-        });
         const historyInfoNotify = {
             is_user: false,
             name: assistantName,
