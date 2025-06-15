@@ -85,10 +85,11 @@ function mergeSummaryInfo(chat) {
                     }
                 } catch (e) {
                     // 非法json直接丢弃并记录
+                    console.error(`[Chat History Optimization] JSON parse error at chat[${j}]:`, e);
                     failedChars.push(j);
                 }
             } else {
-                // 没有找到<characters>标签，记录
+                // 没有找到<message_summary>标签，记录
                 failedChars.push(j);
             }
         }
@@ -144,11 +145,12 @@ const charPrompt = `
         // ... 其他任务
     ],
     "event": { // 本条消息的事件记录
-        "record_date": "世界观当前日期", // 记录世界观下当前日期
+        "record_date": "世界观当前日期", // 记录世界观下当前日期，如无明确日期，则使用第N天这种格式记录
         "timestamp": "HH:mm (可选)", // 事件发生时间（可选）
         "participants": ["角色名1", "角色名2"], // 相关人员名字的数组
-        "keywords": ["关键词1", "关键词2"], // 当前信息的关键词数组,仅提取原文中直接出现的、非抽象的关键词。
-        "description": "当前信息描述, 完整保留所有行为主体、核心动作、具体数据（数字/时间/数量等）及硬性要求（步骤/标准/条件等），其余内容精简至最简且无歧义。"
+        "location": "地点名称", // 事件发生的主要地点
+        "location_desc": "地点描述", // 对地点的简要描述（可选）
+        "description": "当前信息描述, 完整保留所有行为主体、核心动作、具体数据（数字/时间/数量等）及硬性要求（步骤/标准/条件等），其余内容需精简且无歧义。"
     }
 }
 </message_summary>
@@ -174,9 +176,9 @@ function filterSummaryInfoByRecent(chat, summaryInfo, keepCount) {
         }
         // 检查角色名或pet_names是否出现在最近消息
         const nameMatched = allNames.some(name => name && recentMessages.includes(name));
-        // 检查keywords是否出现在最近消息
-        const keywordMatched = (event.keywords || []).some(kw => recentMessages.includes(kw));
-        return nameMatched || keywordMatched;
+        // 检查location是否出现在最近消息
+        const locationMatched = event.location && recentMessages.includes(event.location);
+        return nameMatched || locationMatched;
     });
 
     return {
@@ -244,10 +246,11 @@ ${charsInfoJsonStr}
     for (let i = 1; i < chat.length; i++) {
         if (!chat[i].is_user) assistantIdxArr.push(i);
     }
-    const keepCount = extension_settings[extensionName].keepCount || 3;
+    let keepCount = extension_settings[extensionName].keepCount;
+    if (typeof keepCount !== 'number' || isNaN(keepCount)) keepCount = defaultSettings.keepCount;
     const firstUserIdx = chat.findIndex(item => item.is_user);
     let startIdx;
-    if (assistantIdxArr.length === 0) {
+    if (assistantIdxArr.length === 0 || keepCount == 0) {
         startIdx = chat.length;
     } else if (assistantIdxArr.length >= keepCount) {
         startIdx = assistantIdxArr[assistantIdxArr.length - keepCount];
