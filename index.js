@@ -81,6 +81,9 @@ function mergeSummaryInfo(chat) {
                     }
                     // 整合event为events数组
                     if (item.event) {
+                        if (chat[j - 1].is_user && chat[j - 1].mes) {
+                            item.event.event_source_message = chat[j - 1].mes;
+                        }
                         events.push(item.event);
                     }
                 } catch (e) {
