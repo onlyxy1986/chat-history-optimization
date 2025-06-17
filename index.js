@@ -82,7 +82,7 @@ function mergeSummaryInfo(chat) {
                     // 整合event为events数组
                     if (item.event) {
                         if (chat[j - 1].is_user && chat[j - 1].mes) {
-                            item.event.event_source_message = chat[j - 1].mes;
+                            item.event.user_input = chat[j - 1].mes;
                         }
                         events.push(item.event);
                     }
@@ -116,7 +116,7 @@ function mergeSummaryInfo(chat) {
 const charPrompt = `
 额外要求:在回复末尾生成本条信息,用注释包裹:
 <!--
-// 对本条消息的总结(JSON格式)
+// 对本条消息的总结(JSON格式),请对双引号转义以保证JSON格式正确
 <message_summary>
 {
     "characters": [ // 用数组记录各个角色信息，包括{{user}}和其他NPC
@@ -131,13 +131,13 @@ const charPrompt = `
             "clothing": "在此处描述当前衣装", // 角色当前衣着
             "voice": "在此处描述声音", // 角色声音特征
             "notes": "在此处描述其他重要信息", // 角色其他重要信息
-            "items": [ // 道具记录，随获得/消耗增减
+            "items": [ // 道具记录，随获得/消耗增减，count为0则删除条目
                 // { "item_name": "道具名", "count": 1, "desc": "道具描述" }
             ]
         },
         // ... 其他人物信息
     ],
-    "tasks": [ // 任务记录数组，收到任务新增条目，完成任务删除条目
+    "tasks": [ // 任务记录数组，收到任务新增条目，任务已完成则删除条目
         {
             "publisher": "发布者", // 发布任务的角色名
             "receivers": "接受者", // 接受任务的角色名
@@ -148,12 +148,12 @@ const charPrompt = `
         // ... 其他任务
     ],
     "event": { // 本条消息的事件记录
-        "record_date": "世界观当前日期", // 记录世界观下当前日期，如无明确日期，则使用第N天这种格式记录
+        "date": "世界观当前日期", // 记录世界观下当前日期，如无日期信息，则从第1天开始
         "timestamp": "HH:mm (可选)", // 事件发生时间（可选）
         "participants": ["角色名1", "角色名2"], // 相关人员名字的数组
         "location": "地点名称", // 事件发生的主要地点
         "location_desc": "地点描述", // 对地点的简要描述（可选）
-        "description": "当前信息描述, 完整保留所有行为主体、核心动作、具体数据（数字/时间/数量等）及硬性要求（步骤/标准/条件等），其余内容需精简且无歧义。"
+        "summary": "当前信息描述, 完整保留所有行为主体、核心动作、具体数据（数字/时间/数量等）及硬性要求（步骤/标准/条件等），其余内容需精简且无歧义。"
     }
 }
 </message_summary>
@@ -168,7 +168,7 @@ function filterSummaryInfoByRecent(chat, summaryInfo, keepCount) {
     // summaryInfo.characters 是对象，key为角色名
     // 过滤events
     const filteredEvents = (summaryInfo.events || []).filter(event => {
-        const participants = event.participants.map(name => name.replace(/\（.*?\）/g, '').replace(/\(.*?\)/g, '').trim()) || [];
+        const participants = event.participants.map(name => name.replace(/[（(].*?[）)]/g, '').trim()) || [];
         let allNames = [];
         for (const roleName of participants) {
             allNames.push(roleName);
@@ -180,7 +180,7 @@ function filterSummaryInfoByRecent(chat, summaryInfo, keepCount) {
         // 检查角色名或pet_names是否出现在最近消息
         const nameMatched = allNames.some(name => name && recentMessages.includes(name));
         // 检查location是否出现在最近消息
-        const locationMatched = event.location && recentMessages.includes(event.location);
+        const locationMatched = event.location && recentMessages.includes(event.location.replace(/[（(].*?[）)]/g, '').trim());
         return nameMatched || locationMatched;
     });
 
