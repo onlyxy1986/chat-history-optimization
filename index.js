@@ -116,7 +116,7 @@ function mergeSummaryInfo(chat) {
 const charPrompt = `
 额外要求:在回复末尾生成本条信息,用注释包裹:
 <!--
-// 对本条消息的总结(JSON格式),请对双引号转义以保证JSON格式正确
+// 对本条消息(包含小剧场)的总结(JSON格式),请对双引号转义以保证JSON格式正确
 <message_summary>
 {
     "characters": [ // 用数组记录各个角色信息，包括{{user}}和其他NPC
