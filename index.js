@@ -130,10 +130,16 @@ const charPrompt = `
             "age": "在此处描述年龄", // 角色年龄
             "clothing": "在此处描述当前衣装", // 角色当前衣着
             "voice": "在此处描述声音", // 角色声音特征
-            "notes": "在此处描述其他重要信息", // 角色其他重要信息
-            "items": [ // 道具记录，随获得/消耗增减，count为0则删除条目
+            "notes": "在此处描述其他重要信息", // 角色其他非分类信息,尤其注意数字化信息
+            "items": [ // 道具记录，随获得/消耗增减,count为0则删除条目
                 // { "item_name": "道具名", "count": 1, "desc": "道具描述" }
-            ]
+            ],
+            "skills": [ // 技能记录，随获得/移除增减
+                // { "skill_name": "技能名", "level": 1, "desc": "技能描述" }
+            ],
+            "relationships": { // 关系记录，随时间推移增减
+                // "角色名": { "relationship": "关系描述"} // 关系描述和等级
+            }
         },
         // ... 其他人物信息
     ],
@@ -143,12 +149,13 @@ const charPrompt = `
             "receivers": "接受者", // 接受任务的角色名
             "name": "任务名",
             "status": "进行中/已完成", // 任务状态
-            "description": "完整未删减的任务详情文本", // 原始描述保留
+            "requirements": "完整未删减的任务要求", // 保留原始任务要求描述
+            "reward": "任务奖励", // 任务奖励描述
         }
         // ... 其他任务
     ],
     "event": { // 本条消息的事件记录
-        "date": "世界观当前日期", // 记录世界观下当前日期，如无日期信息，则从第1天开始
+        "date": "世界观当前日期", // 记录世界观下当前日期,如无日期信息,则从第1天开始
         "timestamp": "HH:mm (可选)", // 事件发生时间（可选）
         "participants": ["角色名1", "角色名2"], // 相关人员名字的数组
         "location": "地点名称", // 事件发生的主要地点
@@ -161,7 +168,7 @@ const charPrompt = `
 `;
 
 function filterSummaryInfoByRecent(chat, summaryInfo, keepCount) {
-    const recentCount = Math.max(keepCount, defaultSettings.keepCount) * 2 + 1;
+    const recentCount = keepCount * 2 + 1;
     const startIdx = Math.max(chat.length - recentCount, 0);
     const recentMessages = chat.slice(startIdx).map(item => item.mes || '').join(' ');
 
