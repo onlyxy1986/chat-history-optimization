@@ -178,7 +178,7 @@ function filterSummaryInfoByRecent(chat, summaryInfo, keepCount) {
             }
         }
         // 检查角色名或pet_names是否出现在最近消息
-        const nameMatched = allNames.some(name => name && recentMessages.includes(name));
+        const nameMatched = allNames.some(name => name && recentMessages.includes(name.replace(/[（(].*?[）)]/g, '').trim()));
         // 检查location是否出现在最近消息
         const locationMatched = event.location && recentMessages.includes(event.location.replace(/[（(].*?[）)]/g, '').trim());
         return nameMatched || locationMatched;
