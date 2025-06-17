@@ -161,7 +161,7 @@ const charPrompt = `
 `;
 
 function filterSummaryInfoByRecent(chat, summaryInfo, keepCount) {
-    const recentCount = keepCount * 2 + 1;
+    const recentCount = Math.max(keepCount, defaultSettings.keepCount) * 2 + 1;
     const startIdx = Math.max(chat.length - recentCount, 0);
     const recentMessages = chat.slice(startIdx).map(item => item.mes || '').join(' ');
 
