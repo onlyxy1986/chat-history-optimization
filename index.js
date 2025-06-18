@@ -119,7 +119,7 @@ const charPrompt = `
 // 对本条消息(正文以及小剧场<xiaojuchang>)的总结(JSON格式),不要遗漏field,对双引号转义以保证JSON格式正确
 <message_summary>
 {
-    "characters": [ // 用数组记录各个角色信息，包括{{user}}和其他NPC
+    "characters": [ // 用数组记录各个角色信息，包括{{user}}和其他NPC(包含小剧场<xiaojuchang>内出现的人物)
         {
             "character_name": "角色名", // 角色唯一标识名称
             "pet_names": ["称呼1", "称呼2", etc…], // {{user}}对此角色的常用称呼
