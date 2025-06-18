@@ -116,7 +116,7 @@ function mergeSummaryInfo(chat) {
 const charPrompt = `
 额外要求:在回复末尾生成本条信息,用注释包裹:
 <!--
-// 对本条消息的总结(JSON格式),预设field要完整保留,对双引号转义以保证JSON格式正确
+// 对本条消息的总结(JSON格式),field禁止缺漏,对双引号转义以保证JSON格式正确
 <message_summary>
 {
     "characters": [ // 用数组记录各个角色信息，包括{{user}}和其他NPC
@@ -170,6 +170,9 @@ const charPrompt = `
 `;
 
 function filterSummaryInfoByRecent(chat, summaryInfo, keepCount) {
+    if (keepCount == 0) {
+        return summaryInfo;
+    }
     const recentCount = keepCount * 2 + 1;
     const startIdx = Math.max(chat.length - recentCount, 0);
     const recentMessages = chat.slice(startIdx).map(item => item.mes || '').join(' ');
