@@ -109,7 +109,7 @@ function mergeSummaryInfo(chat) {
     return {
         characters: characterMap,
         tasks: latestTasks,
-        events: events
+        events_history: events
     };
 }
 
@@ -122,7 +122,7 @@ const charPrompt = `
     "characters": [ // 用数组记录各个角色信息，包括{{user}}和其他NPC
         {
             "character_name": "角色名", // 角色唯一标识名称
-            "pet_names": ["称呼1", "称呼2", etc…], // {{user}}对此角色的常用称呼
+            "pet_names": ["称呼1", "称呼2"], // {{user}}对此角色的常用称呼
             "personality": "在此处描述人物性格", // 角色性格特征
             "background": "在此处描述人物背景", // 角色背景故事
             "appearance": "在此处描述外貌", // 角色外貌特征
@@ -178,8 +178,8 @@ function filterSummaryInfoByRecent(chat, summaryInfo, keepCount) {
     const recentMessages = chat.slice(startIdx).map(item => item.mes || '').join(' ');
 
     // summaryInfo.characters 是对象，key为角色名
-    // 过滤events
-    const filteredEvents = (summaryInfo.events || []).filter(event => {
+    // 过滤events_history
+    const filteredEvents = (summaryInfo.events_history || []).filter(event => {
         const participants = event.participants.map(name => name.replace(/[（(].*?[）)]/g, '').trim()) || [];
         let allNames = [];
         for (const roleName of participants) {
@@ -198,7 +198,7 @@ function filterSummaryInfoByRecent(chat, summaryInfo, keepCount) {
 
     return {
         ...summaryInfo,
-        events: filteredEvents
+        events_history: filteredEvents
     };
 }
 
@@ -225,35 +225,19 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     if (summaryInfo && Object.keys(summaryInfo).length > 0) {
         const charsInfoJsonStr = JSON.stringify(filterSummaryInfoByRecent(chat, summaryInfo, extension_settings[extensionName].keepCount), null, 2);
         const charsInfoNotify = {
-            is_user: true,
-            name: chat[chat.length - 1].name,
+            is_user: false,
+            name: assistantName,
             send_date: Date.now(),
             mes: `
 <ROLE_DATA_UPDATE>
-# 指令
-全量载入下方角色&任务&事件记录JSON对象（覆盖历史缓存）。
-【重要】生成最新回复时，绝不允许出现与角色&任务&事件记录矛盾的内容。
-如有矛盾，请优先以角色&任务&事件记录为准，并在回复中合理体现角色的真实状态和历史。
+# 已载入下方角色&任务&事件记录JSON对象,角色&任务&事件记录已更新。
+生成最新回复时，会优先以角色&任务&事件记录为准，并在回复中合理体现角色的真实状态和历史。
 ---
 ${charsInfoJsonStr}
 </ROLE_DATA_UPDATE>
 `
         };
         mergedChat.push(charsInfoNotify);
-        const charsInfoNotifyConfirm = {
-            is_user: false,
-            name: assistantName,
-            send_date: Date.now(),
-            mes: `
-<DIRECTIVE_CONFIRM>
-执行状态: SUCCESS
-操作日志:
-- 已载入角色&任务&事件记录JSON对象·
-</DIRECTIVE_CONFIRM>
-角色&任务&事件记录已更新。请继续与我对话，我会根据最新的角色&任务&事件记录信息进行回复。
-`
-        };
-        mergedChat.push(charsInfoNotifyConfirm);
     }
 
     // 保留倒数第 keepCount 条 assistant 消息及其后的所有信息
@@ -276,30 +260,12 @@ ${charsInfoJsonStr}
         startIdx = Math.max(startIdx, firstUserIdx + 1);
     }
     let tail = [];
-    if (startIdx >= chat.length) {
-        // 只保留最后一条消息
-        tail = [chat[chat.length - 1]];
-    } else {
+    if (startIdx < chat.length) {
         // 从startIdx-1开始保留到结尾
-        tail = chat.slice(startIdx - 1);
-        const historyInfoNotify = {
-            is_user: false,
-            name: assistantName,
-            send_date: Date.now(),
-            mes: `后续消息是最近的消息记录.`
-        };
-        mergedChat.push(historyInfoNotify);
+        tail = chat.slice(startIdx - 1).filter(item => item && item.is_user === false);
     }
     mergedChat.push(...tail);
-
-
-    const userInfoNotify = {
-        is_user: false,
-        name: assistantName,
-        send_date: Date.now(),
-        mes: `下一条消息是用户输入的内容.`
-    };
-    mergedChat.splice(mergedChat.length - 1, 0, userInfoNotify);
+    mergedChat.push(chat[chat.length - 1])
 
     // 用 mergedChat 替换 chat 的内容
     chat.length = 0;
