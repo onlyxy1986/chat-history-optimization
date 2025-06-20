@@ -13,22 +13,73 @@ const context = SillyTavern.getContext();
 // Keep track of where your extension is located, name should match repo name
 const extensionName = "chat-history-optimization";
 const extensionFolderPath = `scripts/extensions/third-party/${extensionName}`;
+const mergeThreshold = 50 * 1024;
 const defaultSettings = {
     extensionToggle: false,
-    keepCount: 3
+    keepCount: 3,
+    charPrompt: `{
+    "characters": [ // 用数组记录各个角色信息，包括{{user}}和其他NPC
+        {
+            "character_name": "角色名", // 角色唯一标识名称
+            "pet_names": ["称呼1", "称呼2"], // {{user}}对此角色的常用称呼
+            "personality": "在此处描述人物性格", // 角色性格特征
+            "background": "在此处描述人物背景", // 角色背景故事
+            "appearance": "在此处描述外貌", // 角色外貌特征
+            "body": "在此描述身材数据", // 具体的身高，体重，罩杯，三围等数据
+            "status": "在此处描述当前状态", // 角色当前状态（如情绪、健康、身体情况等）
+            "age": "在此处描述年龄", // 角色年龄
+            "clothing": "在此处描述当前衣装", // 角色当前衣着
+            "voice": "在此处描述声音", // 角色声音特征
+            "misc": "在此描述其他特征", // 角色未分类的特征数据
+            "notes": "在此处描述其他重要信息", // 角色其他非分类信息,尤其注意数字化信息
+            "items": [ // 道具记录，随获得/消耗增减,count为0则删除条目
+                // { "item_name": "道具名", "count": 1, "desc": "道具描述" }
+            ],
+            "skills": [ // 技能记录，随获得/移除增减
+                // { "skill_name": "技能名", "level": 1, "desc": "技能描述" }
+            ],
+            "relationships": { // 关系记录，随时间推移增减
+                // "角色名": { "relationship": "关系描述"} // 关系描述和等级
+            }
+        }
+        // ... 其他人物信息
+    ],
+    "tasks": [ // 任务记录数组，收到任务新增条目，任务已完成则删除条目
+        {
+            "publisher": "发布者", // 发布任务的角色名
+            "receivers": "接受者", // 接受任务的角色名
+            "name": "任务名",
+            "status": "进行中/已完成", // 任务状态
+            "requirements": "完整未删减的任务要求", // 保留原始任务要求描述
+            "reward": "任务奖励" // 任务奖励描述
+        }
+        // ... 其他任务
+    ],
+    "event": { // 本条消息的事件记录
+        "date": "世界观当前日期", // 记录世界观下当前日期,如无日期信息,则从第1天开始
+        "timestamp": "HH:mm (可选)", // 事件发生时间（可选）
+        "participants": ["角色名1", "角色名2"], // 相关人员名字的数组
+        "location": "地点名称", // 事件发生的主要地点
+        "location_desc": "地点描述", // 对地点的简要描述（可选）
+        "summary": "当前信息描述, 完整保留所有行为主体、核心动作、具体数据（数字/时间/数量等）及硬性要求（步骤/标准/条件等），其余内容需精简且无歧义。"
+    }
+}`,
 };
 
 // Loads the extension settings if they exist, otherwise initializes them to the defaults.
 async function loadSettings() {
     //Create the settings if they don't exist
     extension_settings[extensionName] = extension_settings[extensionName] || {};
+    console.warn("extension_settings[extensionName] 1", extension_settings[extensionName]);
     if (Object.keys(extension_settings[extensionName]).length === 0 || !Object.keys(defaultSettings).every(key => key in extension_settings[extensionName])) {
         Object.assign(extension_settings[extensionName], defaultSettings);
     }
-
+    console.warn("extension_settings[extensionName] 2", extension_settings[extensionName]);
     // Updating settings in the UI
     $("#extension_toggle").prop("checked", extension_settings[extensionName].extensionToggle).trigger("input");
     $("#keep_count").prop("value", extension_settings[extensionName].keepCount).trigger("input");
+    // 加载 charPrompt 到 textarea
+    $("#char_prompt_textarea").prop("value", extension_settings[extensionName].charPrompt).trigger("input");
 }
 
 function onToggleInput(event) {
@@ -40,6 +91,24 @@ function onToggleInput(event) {
 function onKeepCountInput(event) {
     const value = parseInt($(event.target).prop("value"));
     extension_settings[extensionName].keepCount = value;
+    saveSettingsDebounced();
+}
+
+function onCharPromptInput(event) {
+    let val = $(event.target).val();
+    // 移除//开头的注释
+    let jsonStr = val.replace(/\/\/.*$/gm, '');
+    let isValid = false;
+    try {
+        JSON.parse(jsonStr);
+        isValid = true;
+    } catch (e) {
+        console.error(`[Chat History Optimization] JSON parse error`, jsonStr, e);
+        isValid = false;
+    }
+    // 设置 index.html 选中区标签内容
+    $("#char_prompt_validity").text(isValid ? "(有效)" : "(无效)");
+    extension_settings[extensionName].charPrompt = val;
     saveSettingsDebounced();
 }
 
@@ -113,61 +182,56 @@ function mergeSummaryInfo(chat) {
     };
 }
 
-const charPrompt = `
+function getCharPrompt() {
+    // 获取 textarea 的内容作为 charPrompt
+    return `
 额外要求:在回复末尾生成本条信息,用注释包裹:
 <!--
 // 对本条消息的总结(JSON格式),field禁止缺漏,对双引号转义以保证JSON格式正确
 <message_summary>
-{
-    "characters": [ // 用数组记录各个角色信息，包括{{user}}和其他NPC
-        {
-            "character_name": "角色名", // 角色唯一标识名称
-            "pet_names": ["称呼1", "称呼2"], // {{user}}对此角色的常用称呼
-            "personality": "在此处描述人物性格", // 角色性格特征
-            "background": "在此处描述人物背景", // 角色背景故事
-            "appearance": "在此处描述外貌", // 角色外貌特征
-            "body": "在此描述身材数据", // 具体的身高，体重，罩杯，三围等数据
-            "status": "在此处描述当前状态", // 角色当前状态（如情绪、健康、身体情况等）
-            "age": "在此处描述年龄", // 角色年龄
-            "clothing": "在此处描述当前衣装", // 角色当前衣着
-            "voice": "在此处描述声音", // 角色声音特征
-            "misc": "在此描述其他特征", // 角色未分类的特征数据
-            "notes": "在此处描述其他重要信息", // 角色其他非分类信息,尤其注意数字化信息
-            "items": [ // 道具记录，随获得/消耗增减,count为0则删除条目
-                // { "item_name": "道具名", "count": 1, "desc": "道具描述" }
-            ],
-            "skills": [ // 技能记录，随获得/移除增减
-                // { "skill_name": "技能名", "level": 1, "desc": "技能描述" }
-            ],
-            "relationships": { // 关系记录，随时间推移增减
-                // "角色名": { "relationship": "关系描述"} // 关系描述和等级
-            }
-        },
-        // ... 其他人物信息
-    ],
-    "tasks": [ // 任务记录数组，收到任务新增条目，任务已完成则删除条目
-        {
-            "publisher": "发布者", // 发布任务的角色名
-            "receivers": "接受者", // 接受任务的角色名
-            "name": "任务名",
-            "status": "进行中/已完成", // 任务状态
-            "requirements": "完整未删减的任务要求", // 保留原始任务要求描述
-            "reward": "任务奖励", // 任务奖励描述
-        }
-        // ... 其他任务
-    ],
-    "event": { // 本条消息的事件记录
-        "date": "世界观当前日期", // 记录世界观下当前日期,如无日期信息,则从第1天开始
-        "timestamp": "HH:mm (可选)", // 事件发生时间（可选）
-        "participants": ["角色名1", "角色名2"], // 相关人员名字的数组
-        "location": "地点名称", // 事件发生的主要地点
-        "location_desc": "地点描述", // 对地点的简要描述（可选）
-        "summary": "当前信息描述, 完整保留所有行为主体、核心动作、具体数据（数字/时间/数量等）及硬性要求（步骤/标准/条件等），其余内容需精简且无歧义。"
-    }
-}
+${$("#char_prompt_textarea").val()}
 </message_summary>
 -->
 `;
+}
+
+function mergeEvents(events) {
+    if (!Array.isArray(events) || events.length === 0) return [];
+
+    const merged = [];
+    let prev = null;
+
+    for (const curr of events) {
+        if (
+            prev &&
+            prev.date === curr.date &&
+            prev.location === curr.location
+        ) {
+            // 合并participants并去重
+            prev.participants = Array.from(new Set([...prev.participants, ...curr.participants]));
+            // 更新时间范围
+            prev.timestamp.end = curr.timestamp;
+            // location_desc用最后一个
+            prev.location_desc = curr.location_desc;
+            // 拼接summary
+            prev.summary += curr.summary ? curr.summary : '';
+            // user_input丢弃
+        } else {
+            // 新建一个合并项
+            if (prev) merged.push(prev);
+            prev = {
+                date: curr.date,
+                timestamp: { start: curr.timestamp, end: curr.timestamp },
+                participants: [...curr.participants],
+                location: curr.location,
+                location_desc: curr.location_desc,
+                summary: curr.summary || ''
+            };
+        }
+    }
+    if (prev) merged.push(prev);
+    return merged;
+}
 
 function filterSummaryInfoByRecent(chat, summaryInfo, keepCount) {
     if (keepCount == 0) {
@@ -208,7 +272,8 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
         return;
     }
 
-    chat[chat.length - 1]['mes'] = "用户输入:" + chat[chat.length - 1]['mes'] + "\n\n" + charPrompt;
+    // 用 textarea 的内容作为 charPrompt
+    chat[chat.length - 1]['mes'] = "用户输入:" + chat[chat.length - 1]['mes'] + "\n\n" + getCharPrompt();
     const summaryInfo = mergeSummaryInfo(chat);
     console.log("[Chat History Optimization] characters info:", summaryInfo);
 
@@ -221,9 +286,15 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
         mergedChat.push(chat[firstAssistantIdx]);
     }
 
+    let finalSummaryInfo = filterSummaryInfoByRecent(chat, summaryInfo, extension_settings[extensionName].keepCount);
+    const tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
+    if (tokenCount > mergeThreshold) {
+        finalSummaryInfo.events_history = mergeEvents(finalSummaryInfo.events_history);
+        console.warn("[Chat History Optimization] Summary info is too large, merge message.", finalSummaryInfo);
+    }
     // charsInfo 转为 json 文本，作为一条 assistant 消消息加入
     if (summaryInfo && Object.keys(summaryInfo).length > 0) {
-        const charsInfoJsonStr = JSON.stringify(filterSummaryInfoByRecent(chat, summaryInfo, extension_settings[extensionName].keepCount), null, 2);
+        const charsInfoJsonStr = JSON.stringify(finalSummaryInfo, null, 2);
         const charsInfoNotify = {
             is_user: false,
             name: assistantName,
@@ -276,7 +347,6 @@ ${charsInfoJsonStr}
     }
 
     // 计算 token 数量
-    const tokenCount = await getTokenCountAsync(chatHistory);
     $("#token-count").prop("textContent", `${tokenCount}`);
     console.log("[Chat History Optimization] token count:", tokenCount);
 
@@ -295,6 +365,7 @@ jQuery(async () => {
 
     $("#extension_toggle").on("input", onToggleInput);
     $("#keep_count").on("input", onKeepCountInput);
+    $("#char_prompt_textarea").on("input", onCharPromptInput);
 
     // Load settings when starting things up (if you have any)
     loadSettings();
