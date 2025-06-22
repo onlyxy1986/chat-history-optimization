@@ -224,7 +224,6 @@ function mergeEvents(events) {
                 timestamp: { start: curr.timestamp, end: curr.timestamp },
                 participants: [...curr.participants],
                 location: curr.location,
-                location_desc: curr.location_desc,
                 summary: curr.summary || ''
             };
         }
@@ -233,13 +232,17 @@ function mergeEvents(events) {
     return merged;
 }
 
-function filterSummaryInfoByRecent(chat, summaryInfo, keepCount) {
+function filterSummaryInfoByRecent(chat, summaryInfo, keepCount, username) {
     if (keepCount == 0) {
         return summaryInfo;
     }
     const recentCount = keepCount * 2 + 1;
     const startIdx = Math.max(chat.length - recentCount, 0);
-    const recentMessages = chat.slice(startIdx).map(item => item.mes || '').join(' ');
+    const recentMessages = chat.slice(startIdx).map(item => {
+        // 移除 <message_summary>...</message_summary> 内容
+        const mes = item.mes || '';
+        return mes.replace(/<message_summary>((?:(?!<message_summary>)[\s\S])*?)<\/message_summary>/gi, '');
+    }).join(' ');
 
     // summaryInfo.characters 是对象，key为角色名
     // 过滤events_history
@@ -247,14 +250,18 @@ function filterSummaryInfoByRecent(chat, summaryInfo, keepCount) {
         const participants = event.participants.map(name => name.replace(/[（(].*?[）)]/g, '').trim()) || [];
         let allNames = [];
         for (const roleName of participants) {
-            allNames.push(roleName);
+            if (roleName === username) continue;
+            if (roleName && roleName.trim()) allNames.push(roleName);
             const charObj = summaryInfo.characters[roleName];
             if (charObj && Array.isArray(charObj.pet_names)) {
-                allNames = allNames.concat(charObj.pet_names);
+                allNames.push(...charObj.pet_names.filter(n => n && n.trim()));
             }
         }
         // 检查角色名或pet_names是否出现在最近消息
-        const nameMatched = allNames.some(name => name && recentMessages.includes(name.replace(/[（(].*?[）)]/g, '').trim()));
+        const nameMatched = allNames.some(name => {
+            const cleanName = name.replace(/[（(].*?[）)]/g, '').trim();
+            return cleanName && recentMessages.includes(cleanName);
+        });
         // 检查location是否出现在最近消息
         const locationMatched = event.location && recentMessages.includes(event.location.replace(/[（(].*?[）)]/g, '').trim());
         return nameMatched || locationMatched;
@@ -286,7 +293,7 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
         mergedChat.push(chat[firstAssistantIdx]);
     }
 
-    let finalSummaryInfo = filterSummaryInfoByRecent(chat, summaryInfo, extension_settings[extensionName].keepCount);
+    let finalSummaryInfo = filterSummaryInfoByRecent(chat, summaryInfo, extension_settings[extensionName].keepCount, chat[chat.length - 1].name);
     const tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
     if (tokenCount > mergeThreshold) {
         finalSummaryInfo.events_history = mergeEvents(finalSummaryInfo.events_history);
