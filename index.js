@@ -294,6 +294,7 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     }
 
     let finalSummaryInfo = filterSummaryInfoByRecent(chat, summaryInfo, extension_settings[extensionName].keepCount, chat[chat.length - 1].name);
+    finalSummaryInfo.events_history = mergeEvents(finalSummaryInfo.events_history);
     let tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
     while (tokenCount > mergeThreshold) {
         finalSummaryInfo.events_history = finalSummaryInfo.events_history.slice(Math.floor(finalSummaryInfo.events_history.length / 4));
