@@ -13,7 +13,7 @@ const context = SillyTavern.getContext();
 // Keep track of where your extension is located, name should match repo name
 const extensionName = "chat-history-optimization";
 const extensionFolderPath = `scripts/extensions/third-party/${extensionName}`;
-const mergeThreshold = 50 * 1024;
+const mergeThreshold = 64 * 1024;
 const defaultSettings = {
     extensionToggle: false,
     keepCount: 3,
