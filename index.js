@@ -293,14 +293,41 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
         mergedChat.push(chat[firstAssistantIdx]);
     }
 
-    let finalSummaryInfo = filterSummaryInfoByRecent(chat, summaryInfo, extension_settings[extensionName].keepCount, chat[chat.length - 1].name);
-    finalSummaryInfo.events_history = mergeEvents(finalSummaryInfo.events_history);
-    let tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
-    while (tokenCount > mergeThreshold) {
-        finalSummaryInfo.events_history = finalSummaryInfo.events_history.slice(Math.floor(finalSummaryInfo.events_history.length / 5));
-        tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
-        console.warn("[Chat History Optimization] Summary info is too large, reduce message to count.", tokenCount);
+    let finalSummaryInfo = summaryInfo;
+    // 根据 events_history 生成每个角色的 visitedLocations
+    if (finalSummaryInfo && finalSummaryInfo.characters && Array.isArray(finalSummaryInfo.events_history)) {
+        for (const event of finalSummaryInfo.events_history) {
+            if (!event.location || !Array.isArray(event.participants)) continue;
+            for (const name in finalSummaryInfo.characters) {
+                const charObj = finalSummaryInfo.characters[name];
+                // 检查 character_name 或 pet_names 是否出现在 participants 中（均需去除括号内容和trim）
+                const allNames = [charObj.character_name, ...(Array.isArray(charObj.pet_names) ? charObj.pet_names : [])]
+                    .map(n => n ? n.replace(/[（(].*?[）)]/g, '').trim() : '');
+                const cleanParticipants = event.participants.map(p => p ? p.replace(/[（(].*?[）)]/g, '').trim() : '');
+                if (allNames.some(n => cleanParticipants.includes(n) && n)) {
+                    if (!charObj.visitedLocations) charObj.visitedLocations = [];
+                    charObj.visitedLocations.push(event.location);
+                }
+            }
+        }
+        // 去重 visitedLocations
+        for (const name in finalSummaryInfo.characters) {
+            const charObj = finalSummaryInfo.characters[name];
+            if (Array.isArray(charObj.visitedLocations)) {
+                charObj.visitedLocations = Array.from(new Set(charObj.visitedLocations));
+            }
+        }
     }
+
+    finalSummaryInfo.events_history = mergeEvents(finalSummaryInfo.events_history);
+    finalSummaryInfo = filterSummaryInfoByRecent(chat, summaryInfo, extension_settings[extensionName].keepCount, chat[chat.length - 1].name);
+
+    let tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
+    // while (tokenCount > mergeThreshold) {
+    //     finalSummaryInfo.events_history = finalSummaryInfo.events_history.slice(Math.floor(finalSummaryInfo.events_history.length / 5));
+    //     tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
+    //     console.warn("[Chat History Optimization] Summary info is too large, reduce message to count.", tokenCount);
+    // }
     // charsInfo 转为 json 文本，作为一条 assistant 消消息加入
     if (finalSummaryInfo && Object.keys(finalSummaryInfo).length > 0) {
         const charsInfoJsonStr = JSON.stringify(finalSummaryInfo, null, 2);
