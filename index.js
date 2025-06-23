@@ -38,13 +38,13 @@ const defaultSettings = {
             "skills": [ // 技能记录，随获得/移除增减
                 // { "skill_name": "技能名", "level": 1, "desc": "技能描述" }
             ],
-            "relationships": { // 关系记录，随时间推移增减
+            "relationships": { // 与其他角色的关系记录
                 // "角色名": { "relationship": "关系描述"} // 关系描述和等级
             }
         }
         // ... 其他人物信息
     ],
-    "tasks": [ // 任务记录数组，收到任务新增条目，任务已完成则删除条目
+    "tasks": [ // 任务记录数组，收到任务新增条目，完成任务删除条目, 保留进行中的任务
         {
             "publisher": "发布者", // 发布任务的角色名
             "receivers": "接受者", // 接受任务的角色名
@@ -297,7 +297,7 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     finalSummaryInfo.events_history = mergeEvents(finalSummaryInfo.events_history);
     let tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
     while (tokenCount > mergeThreshold) {
-        finalSummaryInfo.events_history = finalSummaryInfo.events_history.slice(Math.floor(finalSummaryInfo.events_history.length / 4));
+        finalSummaryInfo.events_history = finalSummaryInfo.events_history.slice(Math.floor(finalSummaryInfo.events_history.length / 5));
         tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
         console.warn("[Chat History Optimization] Summary info is too large, reduce message to count.", tokenCount);
     }
