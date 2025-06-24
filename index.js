@@ -323,11 +323,11 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     finalSummaryInfo = filterSummaryInfoByRecent(chat, summaryInfo, extension_settings[extensionName].keepCount, chat[chat.length - 1].name);
 
     let tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
-    // while (tokenCount > mergeThreshold) {
-    //     finalSummaryInfo.events_history = finalSummaryInfo.events_history.slice(Math.floor(finalSummaryInfo.events_history.length / 5));
-    //     tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
-    //     console.warn("[Chat History Optimization] Summary info is too large, reduce message to count.", tokenCount);
-    // }
+    while (tokenCount > mergeThreshold) {
+         finalSummaryInfo.events_history = finalSummaryInfo.events_history.slice(Math.floor(finalSummaryInfo.events_history.length / 6));
+         tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
+         console.warn("[Chat History Optimization] Summary info is too large, reduce message to count.", tokenCount);
+     }
     // charsInfo 转为 json 文本，作为一条 assistant 消消息加入
     if (finalSummaryInfo && Object.keys(finalSummaryInfo).length > 0) {
         const charsInfoJsonStr = JSON.stringify(finalSummaryInfo, null, 2);
