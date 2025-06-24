@@ -5,7 +5,7 @@
 import { extension_settings, getContext, loadExtensionSettings } from "../../../extensions.js";
 import { getTokenCountAsync } from '../../../tokenizers.js';
 //You'll likely need to import some other functions from the main script
-import { saveSettingsDebounced } from "../../../../script.js";
+import { saveSettingsDebounced, this_chid, characters } from "../../../../script.js";
 import { getRegexedString, regex_placement } from '../../../extensions/regex/engine.js';
 
 const context = SillyTavern.getContext();
@@ -18,34 +18,38 @@ const defaultSettings = {
     extensionToggle: false,
     keepCount: 3,
     charPrompt: `{
-    "characters": [ // 用数组记录各个角色信息，包括{{user}}和其他NPC
-        {
+    "characters": { // 角色信息记录，包括{{user}}和其他NPC
+        "character_name": { // 角色名
             "character_name": "角色名", // 角色唯一标识名称
-            "pet_names": ["称呼1", "称呼2"], // {{user}}对此角色的常用称呼
+            "pet_names": ["称呼1", "称呼2"], // {{user}}对此角色的常用称呼, 只输出新增项
             "personality": "在此处描述人物性格", // 角色性格特征
+            "job": "在此处描述职业", // 角色职业
             "background": "在此处描述人物背景", // 角色背景故事
             "appearance": "在此处描述外貌", // 角色外貌特征
             "body": "在此描述身材数据", // 具体的身高，体重，罩杯，三围等数据
             "status": "在此处描述当前状态", // 角色当前状态（如情绪、健康、身体情况等）
             "age": "在此处描述年龄", // 角色年龄
             "clothing": "在此处描述当前衣装", // 角色当前衣着
-            "voice": "在此处描述声音", // 角色声音特征
-            "misc": "在此描述其他特征", // 角色未分类的特征数据
-            "notes": "在此处描述其他重要信息", // 角色其他非分类信息,尤其注意数字化信息
-            "items": [ // 道具记录，随获得/消耗增减,count为0则删除条目
-                // { "item_name": "道具名", "count": 1, "desc": "道具描述" }
-            ],
-            "skills": [ // 技能记录，随获得/移除增减
-                // { "skill_name": "技能名", "level": 1, "desc": "技能描述" }
-            ],
-            "relationships": { // 与其他角色的关系记录
-                // "角色名": { "relationship": "关系描述"} // 关系描述和等级
-            }
+            "misc": { // 角色未明确定义的其他信息, 新增/改变时只列出新增/改变项
+                // "信息名":"信息内容" // 例如 "favorite_food": "pizza"
+            },
+            "items": { // 物品记录，新增/改变时只列出新增/改变项
+                // "物品名":{ "count": 1, "desc": "物品描述" }
+            },
+            "skills": { // 技能记录，新增/改变时只列出新增/改变项
+                // "技能名":{ "level": 1, "desc": "技能描述" }
+            },
+            "relationships": { // 角色关系记录，新增/改变时只列出新增/改变项
+                // "角色名": { "relationship": "关系描述"} // 关系描述
+            },
+            "records": [ // 角色事件记录，只输出当前消息的事件信息，不要带入之前信息
+                // "时间:[时间] 地点:[地点] 在场人物:[一起行动的人(如果有,多人用逗号分隔)] [6个字内的事件简述]" // 例如 "时间:[2023-10-01] 地点:[图书馆] 在场人物:[Alice,Bob] [读书]"
+            ]
         }
         // ... 其他人物信息
-    ],
-    "tasks": [ // 任务记录数组，收到任务新增条目，完成任务删除条目, 保留进行中的任务
-        {
+    },
+    "tasks": { // 任务记录数组，新增/改变时只列出新增/改变项
+        "任务名": {
             "publisher": "发布者", // 发布任务的角色名
             "receivers": "接受者", // 接受任务的角色名
             "name": "任务名",
@@ -54,15 +58,17 @@ const defaultSettings = {
             "reward": "任务奖励" // 任务奖励描述
         }
         // ... 其他任务
-    ],
-    "event": { // 本条消息的事件记录
-        "date": "世界观当前日期", // 记录世界观下当前日期,如无日期信息,则从第1天开始
-        "timestamp": "HH:mm (可选)", // 事件发生时间（可选）
-        "participants": ["角色名1", "角色名2"], // 相关人员名字的数组
-        "location": "地点名称", // 事件发生的主要地点
-        "location_desc": "地点描述", // 对地点的简要描述（可选）
-        "summary": "当前信息描述, 完整保留所有行为主体、核心动作、具体数据（数字/时间/数量等）及硬性要求（步骤/标准/条件等），其余内容需精简且无歧义。"
-    }
+    },
+    "events": [ // 历史信息记录, 只输出当前消息的事件信息，不要带入之前信息
+        {
+            "date": "世界观当前日期", // 记录世界观下当前日期,如无日期信息,则从第1天开始
+            "timestamp": "HH:mm (可选)", // 事件发生时间（可选）
+            "participants": ["角色名1", "角色名2"], // 相关人员名字的数组
+            "location": "地点名称", // 事件发生的主要地点，颗粒度到建筑物，如“图书馆”、“酒馆”等
+            "location_desc": "地点描述", // 对地点的简要描述（可选）
+            "summary": "当前信息描述, 完整保留所有行为主体、核心动作、具体数据（数字/时间/数量等）及硬性要求（步骤/标准/条件等），其余内容需精简且无歧义。"
+        }
+    ]
 }`,
 };
 
@@ -112,62 +118,54 @@ function onCharPromptInput(event) {
     saveSettingsDebounced();
 }
 
+function deepMerge(target, source) {
+    if (Array.isArray(target) && Array.isArray(source)) {
+        return target.concat(source);
+    }
+    if (typeof target !== 'object' || target === null) return source;
+    if (typeof source !== 'object' || source === null) return target;
+    const result = { ...target };
+    for (const key of Object.keys(source)) {
+        if (key in target) {
+            result[key] = deepMerge(target[key], source[key]);
+        } else {
+            result[key] = source[key];
+        }
+    }
+    return result;
+}
+
 function mergeSummaryInfo(chat) {
-    // 记录解析失败或未找到的消息索引
     let failedChars = [];
-    // characterMap: { character_name: { pet_names: Set, tasks: [], items: [], [record_date]: { events: [] } } }
-    const characterMap = {};
-    let latestTasks = [];
-    const events = [];
+    let mergedObj = {};
 
     for (let j = 1; j < chat.length; j++) {
         const item = chat[j];
         if (item && !item.is_user && item.swipes && item.swipes[item.swipe_id]) {
             const swipeContent = item.swipes[item.swipe_id];
-            // 去除注释并提取 <message_summary>...</message_summary> 标签内容（不捕获标签本身，忽略嵌套错误）
             const matches = [...swipeContent
                 .replace(/\/\/.*$/gm, '')
                 .matchAll(/<message_summary>((?:(?!<message_summary>)[\s\S])*?)<\/message_summary>/gi)];
             if (matches.length > 0) {
                 let jsonStr = matches[matches.length - 1][1].trim();
                 try {
-                    // 只提取第一个{...}对象
                     const objMatch = jsonStr.match(/\{[\s\S]*\}/);
                     if (!objMatch) {
                         failedChars.push(j);
                         continue;
                     }
-                    const item = JSON.parse(objMatch[0]);
-                    // 更新角色信息，id为唯一标识，后出现的覆盖前面的
-                    if (Array.isArray(item.characters)) {
-                        for (const char of item.characters) {
-                            characterMap[char.character_name] = char;
-                        }
-                    }
-                    // 只保留最后一次出现的tasks
-                    if (Array.isArray(item.tasks)) {
-                        latestTasks = item.tasks;
-                    }
-                    // 整合event为events数组
-                    if (item.event) {
-                        if (chat[j - 1].is_user && chat[j - 1].mes) {
-                            item.event.user_input = chat[j - 1].mes;
-                        }
-                        events.push(item.event);
-                    }
+                    const itemObj = JSON.parse(objMatch[0]);
+                    mergedObj = deepMerge(mergedObj, itemObj);
                 } catch (e) {
-                    // 非法json直接丢弃并记录
                     console.error(`[Chat History Optimization] JSON parse error at chat[${j}]:`, e);
                     failedChars.push(j);
                 }
             } else {
-                // 没有找到<message_summary>标签，记录
                 failedChars.push(j);
             }
         }
     }
 
-    // 打印log并显示在failed-chars里
     if (failedChars.length > 0) {
         console.warn(`[Chat History Optimization] Failed to parse or missing <characters> at chat indexes: ${failedChars.join(', ')}`);
         $("#chars-failed").prop("textContent", failedChars.join(', '));
@@ -175,11 +173,7 @@ function mergeSummaryInfo(chat) {
         $("#chars-failed").prop("textContent", "无");
     }
 
-    return {
-        characters: characterMap,
-        tasks: latestTasks,
-        events_history: events
-    };
+    return mergedObj;
 }
 
 function getCharPrompt() {
@@ -187,7 +181,7 @@ function getCharPrompt() {
     return `
 额外要求:在回复末尾生成本条信息,用注释包裹:
 <!--
-// 对本条消息的总结(JSON格式),field禁止缺漏,对双引号转义以保证JSON格式正确
+// 对本条消息的总结(JSON格式),新增项目时参考模版,变化时按对应项目变化项输出规则进行,对双引号转义以保证JSON格式正确,确保输出的json格式正确。
 <message_summary>
 ${$("#char_prompt_textarea").val()}
 </message_summary>
@@ -209,21 +203,27 @@ function mergeEvents(events) {
         ) {
             // 合并participants并去重
             prev.participants = Array.from(new Set([...prev.participants, ...curr.participants]));
-            // 更新时间范围
-            prev.timestamp.end = curr.timestamp;
+            // 合并timestamp为区间
+            if (typeof prev.timestamp === 'object' && prev.timestamp.start && prev.timestamp.end) {
+                prev.timestamp.end = curr.timestamp && curr.timestamp.end ? curr.timestamp.end : curr.timestamp;
+            } else {
+                prev.timestamp = {
+                    start: prev.timestamp && prev.timestamp.start ? prev.timestamp.start : prev.timestamp,
+                    end: curr.timestamp && curr.timestamp.end ? curr.timestamp.end : curr.timestamp
+                };
+            }
             // location_desc用最后一个
-            prev.location_desc = curr.location_desc;
+            prev.location_desc = curr.location_desc || prev.location_desc;
             // 拼接summary
-            prev.summary += curr.summary ? curr.summary : '';
-            // user_input丢弃
+            prev.summary = (prev.summary || '') + (curr.summary || '');
         } else {
-            // 新建一个合并项
             if (prev) merged.push(prev);
             prev = {
                 date: curr.date,
-                timestamp: { start: curr.timestamp, end: curr.timestamp },
+                timestamp: curr.timestamp && curr.timestamp.start ? { ...curr.timestamp } : { start: curr.timestamp, end: curr.timestamp },
                 participants: [...curr.participants],
                 location: curr.location,
+                location_desc: curr.location_desc || '',
                 summary: curr.summary || ''
             };
         }
@@ -245,14 +245,15 @@ function filterSummaryInfoByRecent(chat, summaryInfo, keepCount, username) {
     }).join(' ');
 
     // summaryInfo.characters 是对象，key为角色名
-    // 过滤events_history
-    const filteredEvents = (summaryInfo.events_history || []).filter(event => {
-        const participants = event.participants.map(name => name.replace(/[（(].*?[）)]/g, '').trim()) || [];
+    // 过滤events
+    const filteredEvents = (summaryInfo.events || []).filter(event => {
+        // 参与人名去除括号内容
+        const participants = (event.participants || []).map(name => name.replace(/[（(].*?[）)]/g, '').trim());
         let allNames = [];
         for (const roleName of participants) {
             if (roleName === username) continue;
             if (roleName && roleName.trim()) allNames.push(roleName);
-            const charObj = summaryInfo.characters[roleName];
+            const charObj = summaryInfo.characters && summaryInfo.characters[roleName];
             if (charObj && Array.isArray(charObj.pet_names)) {
                 allNames.push(...charObj.pet_names.filter(n => n && n.trim()));
             }
@@ -269,7 +270,7 @@ function filterSummaryInfoByRecent(chat, summaryInfo, keepCount, username) {
 
     return {
         ...summaryInfo,
-        events_history: filteredEvents
+        events: filteredEvents
     };
 }
 
@@ -294,9 +295,9 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     }
 
     let finalSummaryInfo = summaryInfo;
-    // 根据 events_history 生成每个角色的 visitedLocations
-    if (finalSummaryInfo && finalSummaryInfo.characters && Array.isArray(finalSummaryInfo.events_history)) {
-        for (const event of finalSummaryInfo.events_history) {
+    // 根据 events 生成每个角色的 visitedLocations
+    if (finalSummaryInfo && finalSummaryInfo.characters && Array.isArray(finalSummaryInfo.events)) {
+        for (const event of finalSummaryInfo.events) {
             if (!event.location || !Array.isArray(event.participants)) continue;
             for (const name in finalSummaryInfo.characters) {
                 const charObj = finalSummaryInfo.characters[name];
@@ -319,15 +320,15 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
         }
     }
 
-    finalSummaryInfo.events_history = mergeEvents(finalSummaryInfo.events_history);
+    finalSummaryInfo.events = mergeEvents(finalSummaryInfo.events);
     finalSummaryInfo = filterSummaryInfoByRecent(chat, summaryInfo, extension_settings[extensionName].keepCount, chat[chat.length - 1].name);
 
     let tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
     while (tokenCount > mergeThreshold) {
-         finalSummaryInfo.events_history = finalSummaryInfo.events_history.slice(Math.floor(finalSummaryInfo.events_history.length / 6));
-         tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
-         console.warn("[Chat History Optimization] Summary info is too large, reduce message to count.", tokenCount);
-     }
+        finalSummaryInfo.events = finalSummaryInfo.events.slice(Math.floor(finalSummaryInfo.events.length / 6));
+        tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
+        console.warn("[Chat History Optimization] Summary info is too large, reduce message to count.", tokenCount);
+    }
     // charsInfo 转为 json 文本，作为一条 assistant 消消息加入
     if (finalSummaryInfo && Object.keys(finalSummaryInfo).length > 0) {
         const charsInfoJsonStr = JSON.stringify(finalSummaryInfo, null, 2);
@@ -402,8 +403,11 @@ jQuery(async () => {
     $("#extension_toggle").on("input", onToggleInput);
     $("#keep_count").on("input", onKeepCountInput);
     $("#char_prompt_textarea").on("input", onCharPromptInput);
+    $("#char_prompt_reset").on("click", function () {
+        // 恢复为默认模板
+        $("#char_prompt_textarea").val(defaultSettings.charPrompt).trigger("input");
+    });
 
     // Load settings when starting things up (if you have any)
     loadSettings();
 });
-
