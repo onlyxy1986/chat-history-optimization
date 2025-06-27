@@ -183,7 +183,7 @@ function getCharPrompt() {
     return `
 额外要求:在回复末尾生成本条信息,用注释包裹:
 <!--
-// 对本条消息的信息提取(JSON格式),以<ROLE_DATA_UPDATE>载入的信息为基础按要求输出更新项，确保输出的JSON格式正确。
+// 对当前正文的信息提取(JSON格式),输出与<ROLE_DATA_UPDATE>的差异item，无变化的field无需输出，确保输出的JSON格式正确。
 <message_summary>
 ${$("#char_prompt_textarea").val()}
 </message_summary>
@@ -340,8 +340,8 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
             send_date: Date.now(),
             mes: `
 <ROLE_DATA_UPDATE>
-# 载入下方角色&任务&事件记录JSON对象，更新角色&任务&事件记录。
-生成回复时，在<thinking>阶段会检索ROLE_DATA_UPDATE的内容，在回复中合理体现角色的真实状态和历史。
+# 载入下方记录角色&任务&事件的JSON对象，更新角色&任务&事件记录。
+生成回复时，在<thinking>阶段需先检索ROLE_DATA_UPDATE的内容，在回复中合理体现角色的真实状态和历史。
 ---
 ${charsInfoJsonStr}
 </ROLE_DATA_UPDATE>
