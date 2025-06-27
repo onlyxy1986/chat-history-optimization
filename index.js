@@ -21,36 +21,37 @@ const defaultSettings = {
     "characters": { // 角色信息记录，包括{{user}}和其他NPC
         "character_name": { // 角色名
             "character_name": "角色名", // 角色唯一标识名称
-            "pet_names": ["称呼1", "称呼2"], // 旁人如何称呼此角色? 只输出新增项
-            "acquaintance": ["角色1","角色2"], // 见过/对话过/合作过的角色，只输出新增项
-            "personality": "人物性格", 
+            "pet_names": ["称呼1", "称呼2"], // 旁人如何称呼此角色?
+            "seen": ["事物1","事物2"], // 角色看到或者接触的人或者物
+            "acquaintance": ["角色1","角色2"], // 角色见过|对话过|合作过的其它角色
+            "personality": "人物性格",
             "job": "职业",
-            "background": "背景故事", 
+            "background": "背景故事",
             "appearance": "外貌",
             "body": "身高,体重,罩杯,三围",
-            "status": "当前状态",
-            "action": "将要做的事情", // 不在场角色需根据action更新status，并更新下一步action
-            "age": "年龄", 
-            "clothing": "当前着装", 
-            "misc": { // 有重要信息但没定义field? 记录在misc里, 新增/改变时只输出相关项
+            "status": "当前状态", // **所有(无论是否在当前回复中出现)**角色都需根据action字段更新status字段，并安排下一步action
+            "action": "将要做的事情", // **所有(无论是否在当前回复中出现)**角色都需根据action字段更新status字段，并安排下一步action
+            "age": "年龄",
+            "clothing": "当前着装",
+            "misc": { // 有重要信息但没定义field? 记录在misc里, 随当前回复新增/调整，例如是否处女、资金、特殊点数等
                 // "信息名":"信息内容" // 例如 "favorite_food": "pizza"
             },
-            "items": { // 角色的物品记录，只输出当前信息的物品变化
+            "items": { // 角色的物品记录，随当前回复增减物品
                 // "物品名":{ "count": 1, "desc": "物品描述" }
             },
-            "skills": { // 角色的技能记录，只输出当前回复的技能变化
-                // "技能名":{ "level": 1, "desc": "技能描述" }
+            "skills": { // 角色的技能记录，随当前回复新增/调整
+                // "技能名":{ "level": 1, "desc": "技能的功能描述" }
             },
-            "relationships": { // 角色与旁人关系记录，新增/改变时只列出相关项
+            "relationships": { // 角色与旁人关系记录，随当前回复新增/调整
                 // "角色名": { "relationship": "关系描述"} // 关系描述，例如"[角色名]的恋人，好感度60"，"[角色名]的仆人，臣服度100"
             },
-            "records": [ // 角色事件记录，只输出当前回复的事件信息，不要带入之前信息
+            "stories": [ // 角色事件记录，只输出当前回复的事件信息，不要带入之前信息
                 // "日期:[日期] 地点:[地点] 在场人物:[一起行动的人(如果有,多人用逗号分隔)] [6个字内的事件精确简述]" // 例如 "日期:[2023-10-01] 地点:[图书馆] 在场人物:[Alice,Bob] [读书]"
             ]
         }
         // ... 其他人物信息
     },
-    "tasks": { // 任务记录数组，新增/改变时只列出新增/改变项
+    "tasks": { // 任务记录数组，随当前回复新增/调整
         "任务名": {
             "publisher": "发布者", // 发布任务的角色名
             "receivers": "接受者", // 接受任务的角色名
@@ -61,13 +62,12 @@ const defaultSettings = {
         }
         // ... 其他任务
     },
-    "events": [ // 历史信息记录, 只输出当前消息的事件信息，不要带入之前信息
+    "events": [ // 历史信息记录, 只输出当前消息的事件信息，不要带入已存在信息
         {
             "date": "世界观当前日期", // 记录世界观下当前日期,如无日期信息,则从第1天开始
             "timestamp": "HH:mm (可选)", // 事件发生时间（可选）
             "participants": ["角色名1", "角色名2"], // 相关人员名字的数组
             "location": "地点名称", // 事件发生的地点，用.分隔大小地点，如“图书馆.三楼.阅览室”、“酒馆.二楼.卫生间”等
-            "location_desc": "地点描述", // 对地点环境的简要描述（可选）
             "summary": "当前信息描述,原样保留数值信息，其余内容需精简且无歧义。"
         }
     ]
@@ -214,8 +214,6 @@ function mergeEvents(events) {
                     end: curr.timestamp && curr.timestamp.end ? curr.timestamp.end : curr.timestamp
                 };
             }
-            // location_desc用最后一个
-            prev.location_desc = curr.location_desc || prev.location_desc;
             // 拼接summary
             prev.summary = (prev.summary || '') + (curr.summary || '');
         } else {
@@ -225,7 +223,6 @@ function mergeEvents(events) {
                 timestamp: curr.timestamp && curr.timestamp.start ? { ...curr.timestamp } : { start: curr.timestamp, end: curr.timestamp },
                 participants: [...curr.participants],
                 location: curr.location,
-                location_desc: curr.location_desc || '',
                 summary: curr.summary || ''
             };
         }
