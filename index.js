@@ -46,12 +46,12 @@ const defaultSettings = {
                 // "角色名": { "relationship": "关系描述"} // 关系描述，例如"[角色名]的恋人，好感度60"，"[角色名]的仆人，臣服度100"
             },
             "stories": [ // 角色事件记录，只输出当前回复的事件信息，不要带入之前信息
-                // "日期:[日期] 地点:[地点] 在场人物:[一起行动的人(如果有,多人用逗号分隔)] [6个字内的事件精确简述]" // 例如 "日期:[2023-10-01] 地点:[图书馆] 在场人物:[Alice,Bob] [读书]"
+                // "日期:[日期(记录世界观下当前日期,如无日期信息,则从第1天开始)] 时间:[时间(可选)] 地点:[地点(用.分隔大小地点，如“图书馆.三楼.阅览室”、“酒馆.二楼.卫生间”)] 人物:[一起行动的人(如果有,多人用逗号分隔)] [10个字内的事件精确简述]" // 例如 "日期:[2023-10-01] 地点:[图书馆] 在场人物:[Alice,Bob] [读书]"
             ]
         }
         // ... 其他人物信息
     },
-    "tasks": { // 任务记录数组，随当前回复新增/调整
+    "quests": { // 任务记录数组，抽取当前回复中的任务信息，随当前回复新增/调整
         "任务名": {
             "publisher": "发布者", // 发布任务的角色名
             "receivers": "接受者", // 接受任务的角色名
@@ -59,18 +59,16 @@ const defaultSettings = {
             "status": "进行中/已完成", // 任务状态
             "requirements": "完整未删减的任务要求", // 保留原始任务要求描述
             "reward": "任务奖励" // 任务奖励描述
+            // ... 其他任务信息
         }
         // ... 其他任务
     },
-    "events": [ // 历史信息记录, 只输出当前消息的事件信息，不要带入已存在信息
-        {
-            "date": "世界观当前日期", // 记录世界观下当前日期,如无日期信息,则从第1天开始
-            "timestamp": "HH:mm (可选)", // 事件发生时间（可选）
-            "participants": ["角色名1", "角色名2"], // 相关人员名字的数组
-            "location": "地点名称", // 事件发生的地点，用.分隔大小地点，如“图书馆.三楼.阅览室”、“酒馆.二楼.卫生间”等
-            "summary": "当前信息描述,原样保留数值信息，其余内容需精简且无歧义。"
+    "locations": { // 地点记录数组，抽取当前回复中的地点信息，随当前回复新增/调整
+        "地点(用.分隔大小地点，如“图书馆.三楼.阅览室”、“酒馆.二楼.卫生间”)": {
+            "name": "地点(用.分隔大小地点，如“图书馆.三楼.阅览室”、“酒馆.二楼.卫生间”)",
+            "description": "地点环境描述" // 地点的详细环境描述
         }
-    ]
+    }
 }`,
 };
 
@@ -181,96 +179,15 @@ function mergeSummaryInfo(chat) {
 function getCharPrompt() {
     // 获取 textarea 的内容作为 charPrompt
     return `
-额外要求:在回复末尾生成本条信息,用注释包裹:
+<ROLE_DATA_FILL>
+额外要求:在回复末尾生成以下信息,用注释包裹:
 <!--
-// 对当前正文的信息提取(JSON格式),输出与<ROLE_DATA_UPDATE>的差异item，无变化的field无需输出，确保输出的JSON格式正确。
+// 以JSON格式提取当前回复的信息，输出与<ROLE_DATA_UPDATE>的差异item，无变化的field无需输出，确保输出的JSON格式正确。
 <message_summary>
 ${$("#char_prompt_textarea").val()}
 </message_summary>
 -->
-`;
-}
-
-function mergeEvents(events) {
-    if (!Array.isArray(events) || events.length === 0) return [];
-
-    const merged = [];
-    let prev = null;
-
-    for (const curr of events) {
-        if (
-            prev &&
-            prev.date === curr.date &&
-            prev.location === curr.location
-        ) {
-            // 合并participants并去重
-            prev.participants = Array.from(new Set([...prev.participants, ...curr.participants]));
-            // 合并timestamp为区间
-            if (typeof prev.timestamp === 'object' && prev.timestamp.start && prev.timestamp.end) {
-                prev.timestamp.end = curr.timestamp && curr.timestamp.end ? curr.timestamp.end : curr.timestamp;
-            } else {
-                prev.timestamp = {
-                    start: prev.timestamp && prev.timestamp.start ? prev.timestamp.start : prev.timestamp,
-                    end: curr.timestamp && curr.timestamp.end ? curr.timestamp.end : curr.timestamp
-                };
-            }
-            // 拼接summary
-            prev.summary = (prev.summary || '') + (curr.summary || '');
-        } else {
-            if (prev) merged.push(prev);
-            prev = {
-                date: curr.date,
-                timestamp: curr.timestamp && curr.timestamp.start ? { ...curr.timestamp } : { start: curr.timestamp, end: curr.timestamp },
-                participants: [...curr.participants],
-                location: curr.location,
-                summary: curr.summary || ''
-            };
-        }
-    }
-    if (prev) merged.push(prev);
-    return merged;
-}
-
-function filterSummaryInfoByRecent(chat, summaryInfo, keepCount, username) {
-    if (keepCount == 0) {
-        return summaryInfo;
-    }
-    const recentCount = keepCount * 2 + 1;
-    const startIdx = Math.max(chat.length - recentCount, 0);
-    const recentMessages = chat.slice(startIdx).map(item => {
-        // 移除 <message_summary>...</message_summary> 内容
-        const mes = item.mes || '';
-        return mes.replace(/<message_summary>((?:(?!<message_summary>)[\s\S])*?)<\/message_summary>/gi, '');
-    }).join(' ');
-
-    // summaryInfo.characters 是对象，key为角色名
-    // 过滤events
-    const filteredEvents = (summaryInfo.events || []).filter(event => {
-        // 参与人名去除括号内容
-        const participants = (event.participants || []).map(name => name.replace(/[（(].*?[）)]/g, '').trim());
-        let allNames = [];
-        for (const roleName of participants) {
-            if (roleName === username) continue;
-            if (roleName && roleName.trim()) allNames.push(roleName);
-            const charObj = summaryInfo.characters && summaryInfo.characters[roleName];
-            if (charObj && Array.isArray(charObj.pet_names)) {
-                allNames.push(...charObj.pet_names.filter(n => n && n.trim()));
-            }
-        }
-        // 检查角色名或pet_names是否出现在最近消息
-        const nameMatched = allNames.some(name => {
-            const cleanName = name.replace(/[（(].*?[）)]/g, '').trim();
-            return cleanName && recentMessages.includes(cleanName);
-        });
-        // 检查location是否出现在最近消息
-        const locationMatched = event.location && recentMessages.includes(event.location.replace(/[（(].*?[）)]/g, '').trim());
-        return nameMatched || locationMatched;
-    });
-
-    return {
-        ...summaryInfo,
-        events: filteredEvents
-    };
+</ROLE_DATA_FILL>`;
 }
 
 globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, abort, type) {
@@ -294,34 +211,6 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     }
 
     let finalSummaryInfo = summaryInfo;
-    // 根据 events 生成每个角色的 visitedLocations
-    if (finalSummaryInfo && finalSummaryInfo.characters && Array.isArray(finalSummaryInfo.events)) {
-        for (const event of finalSummaryInfo.events) {
-            if (!event.location || !Array.isArray(event.participants)) continue;
-            for (const name in finalSummaryInfo.characters) {
-                const charObj = finalSummaryInfo.characters[name];
-                // 检查 character_name 或 pet_names 是否出现在 participants 中（均需去除括号内容和trim）
-                const allNames = [charObj.character_name, ...(Array.isArray(charObj.pet_names) ? charObj.pet_names : [])]
-                    .map(n => n ? n.replace(/[（(].*?[）)]/g, '').trim() : '');
-                const cleanParticipants = event.participants.map(p => p ? p.replace(/[（(].*?[）)]/g, '').trim() : '');
-                if (allNames.some(n => cleanParticipants.includes(n) && n)) {
-                    if (!charObj.visitedLocations) charObj.visitedLocations = [];
-                    charObj.visitedLocations.push(event.location);
-                }
-            }
-        }
-        // 去重 visitedLocations
-        for (const name in finalSummaryInfo.characters) {
-            const charObj = finalSummaryInfo.characters[name];
-            if (Array.isArray(charObj.visitedLocations)) {
-                charObj.visitedLocations = Array.from(new Set(charObj.visitedLocations));
-            }
-        }
-    }
-
-    finalSummaryInfo.events = mergeEvents(finalSummaryInfo.events);
-    finalSummaryInfo = filterSummaryInfoByRecent(chat, summaryInfo, extension_settings[extensionName].keepCount, chat[chat.length - 1].name);
-
     let tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
     while (tokenCount > mergeThreshold) {
         finalSummaryInfo.events = finalSummaryInfo.events.slice(Math.floor(finalSummaryInfo.events.length / 6));
@@ -331,18 +220,20 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     // charsInfo 转为 json 文本，作为一条 assistant 消消息加入
     if (finalSummaryInfo && Object.keys(finalSummaryInfo).length > 0) {
         const charsInfoJsonStr = JSON.stringify(finalSummaryInfo, null, 2);
+        // 动态生成 summary keys string
+        const summaryKeysStr = Object.keys(finalSummaryInfo).join('&');
         const charsInfoNotify = {
             is_user: false,
             name: assistantName,
             send_date: Date.now(),
             mes: `
-<ROLE_DATA_UPDATE>
-# 载入下方记录角色&任务&事件的JSON对象，更新角色&任务&事件记录。
-生成回复时，在<thinking>阶段需先检索ROLE_DATA_UPDATE的内容，在回复中合理体现角色的真实状态和历史。
----
-${charsInfoJsonStr}
-</ROLE_DATA_UPDATE>
-`
+    # 载入下方记录${summaryKeysStr}的JSON对象，更新${summaryKeysStr}信息。
+    生成回复的内容需参考<ROLE_DATA_UPDATE>的信息，不可与<ROLE_DATA_UPDATE>的信息产生冲突。
+    ---
+    <ROLE_DATA_UPDATE>
+    ${charsInfoJsonStr}
+    </ROLE_DATA_UPDATE>
+    `
         };
         mergedChat.push(charsInfoNotify);
     }
