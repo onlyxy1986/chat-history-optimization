@@ -209,13 +209,10 @@ function getCharPrompt() {
     // 获取 textarea 的内容作为 charPrompt
     return `
 <ROLE_DATA_FILL>
-额外要求:在回复末尾生成<message_summary>信息,用注释包裹:
-<!--
-// 以JSON格式提取当前回复的信息，输出与<ROLE_DATA_UPDATE>的差异item，无变化的field无需输出，确保输出的JSON格式正确。
+额外要求:在回复末尾生成<message_summary>信息:以JSON格式提取当前回复的信息，输出与<ROLE_DATA_UPDATE>的差异item，无变化的field无需输出，确保输出的JSON格式正确。
 <message_summary>
 ${$("#char_prompt_textarea").val()}
 </message_summary>
--->
 </ROLE_DATA_FILL>`;
 }
 
