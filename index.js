@@ -7,6 +7,7 @@ import { getTokenCountAsync } from '../../../tokenizers.js';
 //You'll likely need to import some other functions from the main script
 import { saveSettingsDebounced, this_chid, characters } from "../../../../script.js";
 import { getRegexedString, regex_placement } from '../../../extensions/regex/engine.js';
+import { eventSource, event_types } from "../../../../script.js";
 
 const context = SillyTavern.getContext();
 
@@ -97,6 +98,8 @@ const defaultSettings = {
     }
 }`,
 };
+
+let finalSummaryInfo = null;
 
 // Loads the extension settings if they exist, otherwise initializes them to the defaults.
 async function loadSettings() {
@@ -204,106 +207,44 @@ function mergeSummaryInfo(chat) {
     return mergedObj;
 }
 
-function getCharPrompt() {
-    // 获取 textarea 的内容作为 charPrompt
-    return `
-<ROLE_DATA_FILL>
-额外要求:在回复末尾生成<message_summary>信息,以JSON格式提取当前回复中相对于<ROLE_DATA_UPDATE>内容发生变化的字段(严格遵循字段注释中的规则),省略未修改字段,确保输出为有效JSON。
-<message_summary>
-${$("#char_prompt_textarea").val()}
-</message_summary>
-</ROLE_DATA_FILL>`;
-}
-
 globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, abort, type) {
     if (!extension_settings[extensionName].extensionToggle) {
         console.info("[Chat History Optimization] extension is disabled.")
         return;
     }
 
-    // 用 textarea 的内容作为 charPrompt
-    chat[chat.length - 1]['mes'] = "用户输入:" + chat[chat.length - 1]['mes'] + "\n\n" + getCharPrompt();
-    const summaryInfo = mergeSummaryInfo(chat);
-    console.log("[Chat History Optimization] characters info:", summaryInfo);
+    finalSummaryInfo = mergeSummaryInfo(chat);
+    let tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
+    $("#token-count").prop("textContent", `${tokenCount}`);
+    console.log("[Chat History Optimization] token count:", tokenCount);
 
     const mergedChat = [];
 
-    // 保留第一条assistant消息
-    let firstAssistantIdx = chat.findIndex(item => !item.is_user);
-    const assistantName = chat[firstAssistantIdx].name || "Unknown";
-    if (firstAssistantIdx !== -1) {
-        mergedChat.push(chat[firstAssistantIdx]);
-    }
-
-    let finalSummaryInfo = summaryInfo;
-    let tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
-    while (tokenCount > mergeThreshold) {
-        finalSummaryInfo.events = finalSummaryInfo.events.slice(Math.floor(finalSummaryInfo.events.length / 6));
-        tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
-        console.warn("[Chat History Optimization] Summary info is too large, reduce message to count.", tokenCount);
-    }
-    // charsInfo 转为 json 文本，作为一条 assistant 消消息加入
-    if (finalSummaryInfo && Object.keys(finalSummaryInfo).length > 0) {
-        const charsInfoJsonStr = JSON.stringify(finalSummaryInfo, null, 2);
-        // 动态生成 summary keys string
-        const summaryKeysStr = Object.keys(finalSummaryInfo).join('&');
-        const charsInfoNotify = {
-            is_user: false,
-            name: assistantName,
-            send_date: Date.now(),
-            mes: `
-    # 载入下方记录${summaryKeysStr}的JSON对象，更新${summaryKeysStr}信息。
-    生成回复的内容需参考<ROLE_DATA_UPDATE>的信息，不可与<ROLE_DATA_UPDATE>的信息产生冲突。
-    ---
-    <ROLE_DATA_UPDATE>
-    ${charsInfoJsonStr}
-    </ROLE_DATA_UPDATE>
-    `
-        };
-        mergedChat.push(charsInfoNotify);
-    }
-
     // 保留倒数第 keepCount 条 assistant 消息及其后的所有信息
     let assistantIdxArr = [];
-    for (let i = 1; i < chat.length; i++) {
+    for (let i = 0; i < chat.length; i++) {
         if (!chat[i].is_user) assistantIdxArr.push(i);
     }
     let keepCount = extension_settings[extensionName].keepCount;
     if (typeof keepCount !== 'number' || isNaN(keepCount)) keepCount = defaultSettings.keepCount;
-    const firstUserIdx = chat.findIndex(item => item.is_user);
-    let startIdx;
-    if (assistantIdxArr.length === 0 || keepCount == 0) {
-        startIdx = chat.length;
-    } else if (assistantIdxArr.length >= keepCount) {
-        startIdx = assistantIdxArr[assistantIdxArr.length - keepCount];
-    } else {
-        startIdx = assistantIdxArr[0];
-    }
-    if (firstUserIdx > 0) {
-        startIdx = Math.max(startIdx, firstUserIdx + 1);
-    }
-    let tail = [];
-    if (startIdx < chat.length) {
-        // 从startIdx-1开始保留到结尾
-        tail = chat.slice(startIdx - 1).filter(item => item && item.is_user === false);
-    }
+    if (keepCount == 0 && assistantIdxArr.length == 1) keepCount = 1;
+    if (keepCount > assistantIdxArr.length) keepCount = assistantIdxArr.length;
+    const startIdx = assistantIdxArr[assistantIdxArr.length - keepCount];
+    let tail = chat.slice(startIdx - 1).filter(item => item && item.is_user === false);;
     mergedChat.push(...tail);
     mergedChat.push(chat[chat.length - 1])
 
     // 用 mergedChat 替换 chat 的内容
     chat.length = 0;
-    let chatHistory = "";
+
     for (const item of mergedChat) {
         chat.push(item);
-        chatHistory += item.mes + "\n";
     }
-
-    // 计算 token 数量
-    $("#token-count").prop("textContent", `${tokenCount}`);
-    console.log("[Chat History Optimization] token count:", tokenCount);
 
     console.log("[Chat History Optimization] new chat history:", chat);
 }
+
+eventSource.on(event_types.GENERATE_AFTER_DATA, injectSystemPrompt);
 
 // This function is called when the extension is loaded
 jQuery(async () => {
@@ -326,3 +267,34 @@ jQuery(async () => {
     // Load settings when starting things up (if you have any)
     loadSettings();
 });
+
+function injectSystemPrompt(generate_data) {
+    if (!extension_settings[extensionName].extensionToggle) {
+        console.info("[Chat History Optimization] extension is disabled.")
+        return;
+    }
+    const charsInfoJsonStr = JSON.stringify(finalSummaryInfo, null, 2);
+    const summaryKeysStr = Object.keys(finalSummaryInfo).join('&');
+    const prompt = `
+<ROLE_DATA>
+
+# 载入下方记录${summaryKeysStr}的JSON对象，更新${summaryKeysStr}信息。
+<ROLE_DATA_UPDATE>
+${charsInfoJsonStr}
+</ROLE_DATA_UPDATE>
+
+# 根据以下模版更新<ROLE_DATA_UPDATE>，并将它与原值的差异输出在回复末尾的<message_summary>字段里，省略未修改字段，确保输出为有效JSON。
+<ROLE_DATA_FILL>
+${$("#char_prompt_textarea").val()}
+</ROLE_DATA_FILL>
+
+生成回复时，需参考<ROLE_DATA_UPDATE>的信息，不可与<ROLE_DATA_UPDATE>的信息产生冲突。
+</ROLE_DATA>
+`
+    const message = {
+        "role": "system",
+        "content": prompt,
+    }
+    generate_data.prompt.push(message);
+    console.log("generate_data:", generate_data);
+}
