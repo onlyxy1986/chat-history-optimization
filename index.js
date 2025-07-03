@@ -283,7 +283,7 @@ function injectSystemPrompt(generate_data) {
 ${charsInfoJsonStr}
 </ROLE_DATA_UPDATE>
 
-# 根据以下模版更新<ROLE_DATA_UPDATE>，并将它与原值的差异输出在回复末尾的<message_summary>字段里，省略未修改字段，确保输出为有效JSON。
+# 基于以下模版逐field更新<ROLE_DATA_UPDATE>，并将它与原值的差异输出在回复末尾的<message_summary>字段里，省略未修改字段，确保输出为有效JSON。
 <ROLE_DATA_FILL>
 ${$("#char_prompt_textarea").val()}
 </ROLE_DATA_FILL>
