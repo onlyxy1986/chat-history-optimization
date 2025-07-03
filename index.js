@@ -23,8 +23,7 @@ const defaultSettings = {
         "character_name": { // 角色名
             "character_name": "角色名", // 角色名
             "pet_names": ["代称1", "代称2"], // 被用过的角色代称
-            "seen": ["事物1","事物2"], // 角色看过或接触过的人或者物
-            "acquaintance": ["角色1","角色2"], // 角色认识的其它角色
+            "acquaintance": ["角色1","角色2"], // 角色见过的其它角色
             "personality": "角色性格",
             "job": "角色职业",
             "age": "角色年龄",
@@ -39,7 +38,7 @@ const defaultSettings = {
                 // 示例4: "胸部": {"尺寸": "110cm", "罩杯": "G罩杯", "特征": "白嫩，能看到青色血管" }
             },
             "persistent_state": {  // 【持续状态】事件引发的较长时间身体状态改变（持续几分钟以上至永久）
-                // **所有(无论是否在当前回复中出现)角色**都需根据当前时间更新状态的[持续时间](可预估),持续时间归零后移除该状态
+                // **所有(无论是否在当前回复中出现)角色**都需根据当前时间更新状态的[持续时间](可预估),状态结束后移除
                 // 记录会持续一段时间的生理变化/伤痕/体液残留等，排除瞬态反应
                 // 格式要求：每个状态必须包含持续时间(可预估)或消退条件(可推测)
                 // 格式: "部位": "[原因][状态1描述][持续时间/消退条件]，[原因][状态2描述][持续时间/消退条件]"
@@ -49,19 +48,12 @@ const defaultSettings = {
             },
             "clothing": { // 【穿戴层】可随时穿上/脱下的物品，包含：衣物/饰品/玩具/电子设备
                 // **所有(无论是否在当前回复中出现)角色**都需在日期变换时通过置空字符串来清空的clothing 例如: "下身": ""
-                // 提取角色被提及的着装信息, 按具体部位列出('全身'拆分为'上身'+'下身')，格式 "具体部位":"着装描述"，如佩戴饰物或者玩具也需记录
+                // 提取角色被提及的着装信息, 按具体部位列出('全身'需拆分为'上身'+'下身')，格式 "具体部位":"着装描述"，如佩戴饰物或者玩具也需记录
                 // 示例1: "下身": "黑色西裤，黑色丝袜，黑色内裤",
                 // 示例2: "乳头": "黑色金属乳环，银色乳夹"
                 // 示例3: "屁眼": "粗大的肛塞"
             },
-            // **所有(无论是否在当前回复中出现)角色**都需根据next_action更新current_state,并安排新的next_action
             "current_state": "角色可观测的具体状态，包括：姿势、动作、生理反应、环境交互（避免主观形容词，用行为表现代替情绪）",  // 示例："双腿被皮带固定于沙发扶手，全身痉挛，阴道持续收缩，发出断续尖叫，眼角有泪"
-            "next_action": "角色接下来计划执行或预期发生的具体行为（需明确动作主体和动作对象）",  // 示例："将在医生靠近时故意扭动腰部"
-            "misc": { // 记录无预定义字段的重要角色信息, 随当前回复新增/调整，例如是否处女、资金、特殊点数等
-                // "信息名":"信息内容"
-                // 示例1: "性生活频率": "一周两到三次"
-                // 示例2: "高潮次数": 2
-            },
             "items": { // 角色的物品记录，随当前回复增减物品
                 // "物品名":{ "count": 1, "desc": "物品描述" }
             },
@@ -69,22 +61,23 @@ const defaultSettings = {
                 // "技能名":{ "level": 1, "desc": "技能的功能描述" }
             },
             "relationships": { // 角色与其他角色的关系记录，随当前回复新增/调整
-                // "其他角色": "关系描述" // 关系描述格式为"对<其他角色> 情感:[类型]，强度:[高/中/低]，表现:[具体行为]"
+                // "其他角色": "是<其他角色>的[主人/奴隶/朋友/夫妻] 情感[类型]，强度[高/中/低]"
             },
-            "stories": [ // 角色事件记录，只输出当前回复的事件信息，不要带入之前信息
-                // 格式: "[日期(记录世界观下当前日期,如无日期信息,则从第1天开始)][时间(可选)][地点(用.分隔大小地点，如“图书馆.三楼.阅览室”、“酒馆.二楼.卫生间”)][在场的其他相关角色(如果有,多人用逗号分隔)][10个字内的事件精确简述]"
-                // 示例: "[2023-10-01][图书馆][Alice,Bob][读书]"
-            ]
+            "shame_play": {
+                // "性爱相关play方式": 次数
+            },
+            "misc": { // ... 其它重要信息, 随当前回复新增/调整，例如是否处女、资金、特殊点数等
+                // "信息名":"信息内容"
+                // 示例1: "性生活频率": "一周两到三次"
+                // 示例2: "高潮次数": 2
+            }
         }
-        // ... 其他人物信息
+        // ... 其他角色
     },
-    "locations": { // 地点记录: 提取当前回复中的地点信息，随回复动态更新
-        "地点(用.分隔大小地点，如“图书馆.三楼.阅览室”、“酒馆.二楼.卫生间”)": "地点描述" // 地点描述仅描写[地点]的永久性物理特征（景物/建筑/材质/光照/气味/风化痕迹）。禁止任何动态过程（声音/天气/生物活动/事件）。示例：「青铜神像表面覆满绿锈，砂岩台阶被千年风蚀成波浪状，裂缝中的枯藤如铁铸般凝固。」
-    },
-    "extra_informations": [ // 提取<content>中无预定义字段的重要全局信息(需在<content>明确出现,禁止任何推测)，随回复动态更新，例如奖励条款、 规则警示、关键线索、时效信息等
-        //格式：{"日期":"(记录世界观下当前日期,如无日期信息,则从第1天开始)","时间(可选)":"时间","地点":"(用.分隔大小地点，如“图书馆.三楼.阅览室”、“酒馆.二楼.卫生间”)","角色":"与信息有关的角色(多人用逗号分隔)","主题":"信息的主题","细项":["细项1","细项2",…] // 细项的格式为"[细项][细项原文]"}
+    "information": [ // 记录当前回复中命令、要求、条款、规则、线索、时效、通知、说明(禁止记录其它类型信息)
+        //格式：{"日期":"(记录世界观下当前日期,如无日期信息,则从第1天开始)","时间(可选)":"时间","地点":"(用.分隔大小地点，如“图书馆.三楼.阅览室”、“酒馆.二楼.卫生间”)","角色":"与信息有关的角色(多人用逗号分隔)","类型":"说明","主题":"主题","细项":["细项1","细项2",…] // 细项的格式为"[细项][细项原文]"}
     ],
-    "quests": { // 任务记录：提取当前回复中所有明示/暗示的任务信息，随回复动态更新
+    "quests": { // 任务记录：提取当前回复中的明确及暗示的任务，随回复动态更新
         "任务名": {
             "publisher": "发布者", // 发布任务的角色名
             "receivers": "接受者", // 接受任务的角色名
@@ -176,7 +169,7 @@ function mergeSummaryInfo(chat) {
             const swipeContent = item.swipes[item.swipe_id];
             const matches = [...swipeContent
                 .replace(/\/\/.*$/gm, '')
-                .matchAll(/<message_summary>((?:(?!<message_summary>)[\s\S])*?)<\/message_summary>/gi)];
+                .matchAll(/<ROLE_DATA_DELTA_UPDATE>((?:(?!<ROLE_DATA_DELTA_UPDATE>)[\s\S])*?)<\/ROLE_DATA_DELTA_UPDATE>/gi)];
             if (matches.length > 0) {
                 let jsonStr = matches[matches.length - 1][1].trim();
                 try {
@@ -207,6 +200,26 @@ function mergeSummaryInfo(chat) {
     return mergedObj;
 }
 
+
+function getCharPrompt() {
+    const charsInfoJsonStr = JSON.stringify(finalSummaryInfo, null, 2);
+    const summaryKeysStr = Object.keys(finalSummaryInfo).join('&');
+    const prompt = `
+额外要求:
+------
+#1. 载入<ROLE_DATA>里的${summaryKeysStr}信息，生成回复时需基于<ROLE_DATA>的信息，不可与<ROLE_DATA>的信息产生冲突。
+<ROLE_DATA>
+${charsInfoJsonStr}
+</ROLE_DATA>
+
+#2. 在回复末尾生成<ROLE_DATA_DELTA_UPDATE>信息,以JSON格式提取当前回复中相对于<ROLE_DATA>内容发生变化的字段(严格遵循字段注释中的规则),省略未修改字段,确保输出为有效JSON。
+<ROLE_DATA_DELTA_UPDATE>
+${$("#char_prompt_textarea").val()}
+</ROLE_DATA_DELTA_UPDATE>
+`
+    return prompt;
+}
+
 globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, abort, type) {
     if (!extension_settings[extensionName].extensionToggle) {
         console.info("[Chat History Optimization] extension is disabled.")
@@ -230,8 +243,10 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     if (keepCount == 0 && assistantIdxArr.length == 1) keepCount = 1;
     if (keepCount > assistantIdxArr.length) keepCount = assistantIdxArr.length;
     const startIdx = assistantIdxArr[assistantIdxArr.length - keepCount];
-    let tail = chat.slice(startIdx - 1).filter(item => item && item.is_user === false);;
+    let tail = chat.slice(startIdx).filter(item => item && item.is_user === false);;
     mergedChat.push(...tail);
+
+    chat[chat.length - 1]['mes'] = "用户输入:" + chat[chat.length - 1]['mes'] + "\n\n" + getCharPrompt();
     mergedChat.push(chat[chat.length - 1])
 
     // 用 mergedChat 替换 chat 的内容
@@ -269,32 +284,4 @@ jQuery(async () => {
 });
 
 function injectSystemPrompt(generate_data) {
-    if (!extension_settings[extensionName].extensionToggle) {
-        console.info("[Chat History Optimization] extension is disabled.")
-        return;
-    }
-    const charsInfoJsonStr = JSON.stringify(finalSummaryInfo, null, 2);
-    const summaryKeysStr = Object.keys(finalSummaryInfo).join('&');
-    const prompt = `
-<ROLE_DATA>
-
-# 载入下方记录${summaryKeysStr}的JSON对象，更新${summaryKeysStr}信息。
-<ROLE_DATA_UPDATE>
-${charsInfoJsonStr}
-</ROLE_DATA_UPDATE>
-
-# 根据以下模版更新<ROLE_DATA_UPDATE>，并将它与原值的差异输出在回复末尾的<message_summary>字段里，省略未修改字段，确保输出为有效JSON。
-<ROLE_DATA_FILL>
-${$("#char_prompt_textarea").val()}
-</ROLE_DATA_FILL>
-
-生成回复时，需参考<ROLE_DATA_UPDATE>的信息，不可与<ROLE_DATA_UPDATE>的信息产生冲突。
-</ROLE_DATA>
-`
-    const message = {
-        "role": "system",
-        "content": prompt,
-    }
-    generate_data.prompt.push(message);
-    console.log("generate_data:", generate_data);
 }
