@@ -206,16 +206,17 @@ function getCharPrompt() {
     const summaryKeysStr = Object.keys(finalSummaryInfo).join('&');
     const prompt = `
 额外要求:
+1. 载入<ROLE_DATA>里的${summaryKeysStr}做为回复生成时的内容基石，不可与<ROLE_DATA>的信息矛盾。
+2. 在回复末尾生成<ROLE_DATA_DELTA_UPDATE>信息,完整提取回复中相对于<ROLE_DATA>内容发生变化的字段(严格遵循字段注释中的规则),省略未修改字段,确保输出为有效JSON。
 ------
-#1. 载入<ROLE_DATA>里的${summaryKeysStr}信息，生成回复时需基于<ROLE_DATA>的信息，不可与<ROLE_DATA>的信息产生冲突。
 <ROLE_DATA>
 ${charsInfoJsonStr}
 </ROLE_DATA>
-
-#2. 在回复末尾生成<ROLE_DATA_DELTA_UPDATE>信息,以JSON格式提取当前回复中相对于<ROLE_DATA>内容发生变化的字段(严格遵循字段注释中的规则),省略未修改字段,确保输出为有效JSON。
+------
 <ROLE_DATA_DELTA_UPDATE>
 ${$("#char_prompt_textarea").val()}
 </ROLE_DATA_DELTA_UPDATE>
+
 `
     return prompt;
 }
