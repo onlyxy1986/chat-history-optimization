@@ -244,7 +244,16 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     if (keepCount == 0 && assistantIdxArr.length == 1) keepCount = 1;
     if (keepCount > assistantIdxArr.length) keepCount = assistantIdxArr.length;
     const startIdx = assistantIdxArr[assistantIdxArr.length - keepCount];
-    let tail = chat.slice(startIdx).filter(item => item && item.is_user === false);;
+    let tail = chat
+    .slice(startIdx)
+    .filter(item => item && item.is_user === false)
+    .map(item => {
+        const match = (item.mes || '').match(/<StatusBlocks>((?:(?!<StatusBlocks>)[\s\S])*?)<\/content>/);
+        return {
+            ...item,
+            mes: match ? match[0] : '' // 只保留整个匹配内容，没有则为空字符串
+        };
+    });
     mergedChat.push(...tail);
 
     chat[chat.length - 1]['mes'] = "用户输入:" + chat[chat.length - 1]['mes'] + "\n\n" + getCharPrompt();
