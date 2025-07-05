@@ -140,6 +140,18 @@ function onCharPromptInput(event) {
     saveSettingsDebounced();
 }
 
+function fixupValue(object) {
+    if (object && typeof object === 'object') {
+        if ('全身' in object) {
+            object['上身'] = object['全身'];
+            object['下身'] = object['全身'];
+            object['脚'] = object['全身'];
+            delete object['全身'];
+        }
+    }
+    return object
+}
+
 function deepMerge(target, source) {
     if (Array.isArray(target) && Array.isArray(source)) {
         // 去除source中与target重复的item
@@ -151,7 +163,7 @@ function deepMerge(target, source) {
     const result = { ...target };
     for (const key of Object.keys(source)) {
         if (key in target) {
-            result[key] = deepMerge(target[key], source[key]);
+            result[key] = fixupValue(deepMerge(target[key], source[key]));
         } else {
             result[key] = source[key];
         }
@@ -245,15 +257,15 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     if (keepCount > assistantIdxArr.length) keepCount = assistantIdxArr.length;
     const startIdx = assistantIdxArr[assistantIdxArr.length - keepCount];
     let tail = chat
-    .slice(startIdx)
-    .filter(item => item && item.is_user === false)
-    .map(item => {
-        const match = (item.mes || '').match(/<StatusBlocks>((?:(?!<StatusBlocks>)[\s\S])*?)<\/content>/);
-        return {
-            ...item,
-            mes: match ? match[0] : '' // 只保留整个匹配内容，没有则为空字符串
-        };
-    });
+        .slice(startIdx)
+        .filter(item => item && item.is_user === false)
+        .map(item => {
+            const match = (item.mes || '').match(/<StatusBlocks>((?:(?!<StatusBlocks>)[\s\S])*?)<\/content>/);
+            return {
+                ...item,
+                mes: match ? match[0] : '' // 只保留整个匹配内容，没有则为空字符串
+            };
+        });
     mergedChat.push(...tail);
 
     chat[chat.length - 1]['mes'] = "用户输入:" + chat[chat.length - 1]['mes'] + "\n\n" + getCharPrompt();
@@ -268,8 +280,6 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
 
     console.log("[Chat History Optimization] new chat history:", chat);
 }
-
-eventSource.on(event_types.GENERATE_AFTER_DATA, injectSystemPrompt);
 
 // This function is called when the extension is loaded
 jQuery(async () => {
@@ -292,6 +302,3 @@ jQuery(async () => {
     // Load settings when starting things up (if you have any)
     loadSettings();
 });
-
-function injectSystemPrompt(generate_data) {
-}
