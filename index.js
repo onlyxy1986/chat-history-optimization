@@ -267,7 +267,7 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     let tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
     while (tokenCount > mergeThreshold) {
         finalSummaryInfo.information && (finalSummaryInfo.information = finalSummaryInfo.information.slice(Math.floor(finalSummaryInfo.information.length / 10)));
-        finalSummaryInfo.action_waiting_result && (finalSummaryInfo.action_waiting_result = Object.fromEntries(Object.entries(finalSummaryInfo.action_waiting_result).filter(([, v]) => v.status !== '已有结果')));
+        finalSummaryInfo.action_waiting_result && (finalSummaryInfo.action_waiting_result = Object.fromEntries(Object.entries(finalSummaryInfo.action_waiting_result).filter(([, v]) => v.status !== '已有结果' && v.status !== '已完成无后续')));
         finalSummaryInfo.quests && (finalSummaryInfo.quests = Object.fromEntries(Object.entries(finalSummaryInfo.quests).filter(([, v]) => v.status !== '已完成')));
         tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
         console.warn("[Chat History Optimization] Summary info is too large, reduce message to count.", tokenCount, finalSummaryInfo);
