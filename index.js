@@ -14,7 +14,7 @@ const context = SillyTavern.getContext();
 // Keep track of where your extension is located, name should match repo name
 const extensionName = "chat-history-optimization";
 const extensionFolderPath = `scripts/extensions/third-party/${extensionName}`;
-const mergeThreshold = 64 * 1024;
+const mergeThreshold = 54 * 1024;
 const defaultSettings = {
     extensionToggle: false,
     keepCount: 3,
@@ -141,13 +141,37 @@ function onCharPromptInput(event) {
 }
 
 function fixupValue(object) {
-    if (object && typeof object === 'object') {
+    if (object && typeof object === 'object' && !Array.isArray(object)) {
+        // 移除 count 为 0 的 item
+        for (const key in object) {
+            if (Object.prototype.hasOwnProperty.call(object, key)) {
+                const item = object[key];
+                if (item && typeof item === 'object' && 'count' in item && ((item.count == 0) || (item.count == "0"))) {
+                    delete object[key];
+                }
+            }
+        }
+
+        for (const key of Object.keys(object)) {
+            const value = object[key];
+            if (value && value.character_name && key !== value.character_name) {
+                delete object[key];
+                object[value.character_name] = deepMerge(object[value.character_name], value);
+            }
+        }
+
         if ('全身' in object) {
             object['上身'] = object['全身'];
             object['下身'] = object['全身'];
             object['脚'] = object['全身'];
             delete object['全身'];
         }
+
+        if ('shame_play' in object) {
+            delete object['shame_play'];
+        }
+
+
     }
     return object
 }
@@ -241,6 +265,13 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
 
     finalSummaryInfo = mergeSummaryInfo(chat);
     let tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
+    while (tokenCount > mergeThreshold) {
+        finalSummaryInfo.information && (finalSummaryInfo.information = finalSummaryInfo.information.slice(Math.floor(finalSummaryInfo.information.length / 10)));
+        finalSummaryInfo.action_waiting_result && (finalSummaryInfo.action_waiting_result = Object.fromEntries(Object.entries(finalSummaryInfo.action_waiting_result).filter(([, v]) => v.status !== '已有结果')));
+        finalSummaryInfo.quests && (finalSummaryInfo.quests = Object.fromEntries(Object.entries(finalSummaryInfo.quests).filter(([, v]) => v.status !== '已完成')));
+        tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
+        console.warn("[Chat History Optimization] Summary info is too large, reduce message to count.", tokenCount, finalSummaryInfo);
+    }
     $("#token-count").prop("textContent", `${tokenCount}`);
     console.log("[Chat History Optimization] token count:", tokenCount);
 
