@@ -264,7 +264,6 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     }
 
     finalSummaryInfo = mergeSummaryInfo(chat);
-    finalSummaryInfo.information && (finalSummaryInfo.information.forEach(item => {item.mention=false;}));
     let tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
     while (tokenCount > mergeThreshold) {
         finalSummaryInfo.information && (finalSummaryInfo.information = finalSummaryInfo.information.slice(Math.floor(finalSummaryInfo.information.length / 10)));
