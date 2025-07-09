@@ -180,12 +180,6 @@ function fixupValue(object) {
             object['脚'] = object['全身'];
             delete object['全身'];
         }
-
-        if ('shame_play' in object) {
-            delete object['shame_play'];
-        }
-
-
     }
     return object
 }
@@ -280,9 +274,15 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     finalSummaryInfo = mergeSummaryInfo(chat);
     let tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
     while (tokenCount > mergeThreshold) {
-        finalSummaryInfo.information && (finalSummaryInfo.information = finalSummaryInfo.information.slice(Math.floor(finalSummaryInfo.information.length / 10)));
-        finalSummaryInfo.action_waiting_result && (finalSummaryInfo.action_waiting_result = Object.fromEntries(Object.entries(finalSummaryInfo.action_waiting_result).filter(([, v]) => v.status !== '已有结果' && v.status !== '已完成无后续')));
-        finalSummaryInfo.quests && (finalSummaryInfo.quests = Object.fromEntries(Object.entries(finalSummaryInfo.quests).filter(([, v]) => v.status !== '已完成')));
+        const countToRemove = Math.max(1, Math.floor(info.length / 10));
+        // 按 used_in_response 排序，移除使用次数最少的项，然后恢复原始顺序
+        const keptItems = info
+            .map((item, index) => ({ item, index }))
+            .sort((a, b) => (a.item.used_in_response ?? 0) - (b.item.used_in_response ?? 0))
+            .slice(countToRemove)
+            .sort((a, b) => a.index - b.index)
+            .map(x => x.item);
+        finalSummaryInfo.information = keptItems;
         tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
         console.warn("[Chat History Optimization] Summary info is too large, reduce message to count.", tokenCount, finalSummaryInfo);
     }
