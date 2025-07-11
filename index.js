@@ -274,14 +274,9 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     finalSummaryInfo = mergeSummaryInfo(chat);
     let tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
     while (tokenCount > mergeThreshold) {
-        const countToRemove = Math.max(1, Math.floor(info.length / 10));
+        const countToRemove = Math.max(1, Math.floor(finalSummaryInfo.length / 10));
         // 按 used_in_response 排序，移除使用次数最少的项，然后恢复原始顺序
-        const keptItems = info
-            .map((item, index) => ({ item, index }))
-            .sort((a, b) => (a.item.used_in_response ?? 0) - (b.item.used_in_response ?? 0))
-            .slice(countToRemove)
-            .sort((a, b) => a.index - b.index)
-            .map(x => x.item);
+        const keptItems = finalSummaryInfo.map((item, index) => ({ item, index })).sort((a, b) => (a.item.used_in_response ?? 0) - (b.item.used_in_response ?? 0)).slice(countToRemove).sort((a, b) => a.index - b.index).map(x => x.item);
         finalSummaryInfo.information = keptItems;
         tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
         console.warn("[Chat History Optimization] Summary info is too large, reduce message to count.", tokenCount, finalSummaryInfo);
