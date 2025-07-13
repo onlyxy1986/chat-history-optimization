@@ -14,26 +14,27 @@ const context = SillyTavern.getContext();
 // Keep track of where your extension is located, name should match repo name
 const extensionName = "chat-history-optimization";
 const extensionFolderPath = `scripts/extensions/third-party/${extensionName}`;
-const mergeThreshold = 60 * 1024;
+const mergeThreshold = 54 * 1024;
 const defaultSettings = {
     extensionToggle: false,
     keepCount: 3,
     charPrompt: `{
     // 日期: 世界观下当前日期,如无日期信息,则从第1天开始
     // 地点: 用.分隔大小地点，如“图书馆.三楼.阅览室”、“酒馆.二楼.卫生间”
-    "date": "日期",
-    "characters": { // {{user}}和其他NPC的信息记录
-        "character_name": { // 角色名
-            "character_name": "角色名", // 角色名
-            "pet_names": ["代称1", "代称2"], // 被用过的角色代称
-            "personality": "角色性格",
-            "job": "角色职业",
-            "age": "角色年龄",
-            "background": "角色背景故事",
-            "interests": { // 兴趣爱好，随当前回复新增/调整
-                // "兴趣爱好":{ "level": 1, "desc": "描述" }
+    "日期": "日期",
+    "角色信息": { // {{user}}和其他NPC的信息记录
+        "{{角色名}}": { //角色名(中文)
+            "角色名": "{{角色名}}", //角色名(中文)
+            "代称": ["{{代称1}}", "{{代称2}}"], // 被用过的角色代称
+            "性格": "{{性格}}",
+            "职业": "{{职业}}",
+            "年龄": "{{年龄}}",
+            "背景": "{{背景}}",
+            "兴趣爱好": {
+                // "兴趣爱好1":{ "level": 1, "desc": "描述" }
+                // ... 其它兴趣爱好
             },
-            "physical_traits": { // 【身体蓝图】裸体时仍存在的永久特征，包含：体型/疤痕/纹身/天生属性
+            "永久特征": { // 【身体蓝图】裸体时仍存在的永久特征，包含：体型/疤痕/纹身/天生属性
                 // 提取角色被提及的所有外貌和部位的**静态特征**描述, 填充时自选格式:
                 // 格式1. "部位1":"特征描述"
                 // 格式2. "部位2": {"特征1":"特征描述", "特征2":"特征描述"}
@@ -42,8 +43,8 @@ const defaultSettings = {
                 // 示例3: "臀部": {"尺寸": "94cm", "特征": "蜜桃一般，弹性十足"}
                 // 示例4: "胸部": {"尺寸": "110cm", "罩杯": "G罩杯", "特征": "白嫩，能看到青色血管" }
             },
-            "persistent_state": {  // 【持续状态】事件引发的较长时间身体状态改变（持续几分钟以上至永久）
-                // **characters里所有角色**都需随时间更新状态的[持续时间](可预估)或消退条件(可推测),状态结束后需移除
+            "身体状态": {  // 【持续状态】事件引发的较长时间身体状态改变（持续几分钟以上至永久）
+                // **所有角色**都需随时间更新状态的[持续时间](可预估)或消退条件(可推测),主动移除已结束状态
                 // 记录会持续一段时间的生理变化/伤痕/体液残留等，排除瞬态反应
                 // 格式要求：每个状态必须包含持续时间(可预估)或消退条件(可推测)
                 // 格式: "部位": "[原因][状态1描述][持续时间/消退条件]，[原因][状态2描述][持续时间/消退条件]"
@@ -51,20 +52,20 @@ const defaultSettings = {
                 // 示例2: "乳头": "[被主人捏弄][红肿][持续1小时]，[被主人滴催情药水][敏感度提升][持续2小时]"
                 // 示例3: "双腿": "[被捆绑至沙发两边][无法动弹][直至松绑]"
             },
-            "clothing": { // 【穿戴层】可随时穿上/脱下的物品，包含：衣物/饰品/玩具/电子设备
+            "衣着": { // 【穿戴层】可随时穿上/脱下的物品，包含：衣物/饰品/玩具/电子设备
                 // 提取角色被提及的着装信息, 按具体部位列出，格式 "具体部位":"着装描述"，如佩戴饰物或者玩具也需记录
                 // 示例1: "下身": "黑色西裤，黑色丝袜，黑色内裤",
                 // 示例2: "乳头": "黑色金属乳环，银色乳夹"
                 // 示例3: "屁眼": "粗大的肛塞"
             },
-            "current_state": "角色可观测的具体状态，包括：姿势、动作、生理反应、环境交互（避免主观形容词，用行为表现代替情绪）",  // 示例："双腿被皮带固定于沙发扶手，全身痉挛，阴道持续收缩，发出断续尖叫，眼角有泪"
-            "items": { // 角色长期使用或主要用途的物品，排除一次性或临时物品，需随当前回复增减物品
-                // "物品名":{ "count": 1, "desc": "物品用途描述" }
+            "当前状态": "角色可观测的具体状态，包括：姿势、动作、生理反应、环境交互（避免主观形容词，用行为表现代替情绪）",  // 示例："双腿被皮带固定于沙发扶手，全身痉挛，阴道持续收缩，发出断续尖叫，眼角有泪"
+            "物品": { // 角色长期使用或主要用途的物品，排除一次性或临时物品，需随当前回复增减物品
+                // "物品1":{ "数量": 1, "用途": "物品1用途描述" }
             },
-            "skills": { // 角色的技能记录，随当前回复新增/调整
-                // "技能名":{ "level": 1, "desc": "技能效果描述" }
+            "技能": { // 角色的技能记录，随当前回复新增/调整
+                // "技能1":{ "等级": 1, "效果": "技能1效果描述" }
             },
-            "misc": { // 杂项信息存储区：用于动态记录和更新与当前上下文相关的各种附加属性。
+            "杂项信息": { // 杂项信息存储区：用于动态记录和更新与当前上下文相关的各种附加属性。
                 // 键名规则: 中文，确保清晰且无空格。
                 // 值类型: 可以是字符串、数字、布尔值、数组或嵌套对象，根据信息特性灵活选择。
                 // 示例1: "性生活频率": "一周两到三次"
@@ -73,7 +74,7 @@ const defaultSettings = {
         }
         // ... 其他角色
     },
-    "character_relations": { // 出场角色之间的关系记录
+    "角色关系": { // 出场角色之间的关系记录
         // 示例:
         // "角色1": {
         //     "角色2": {
@@ -82,29 +83,34 @@ const defaultSettings = {
         //     }
         // }
     },
-    "information": {// 记录回复中的行为结果、伏笔、伏笔收尾、要求、规则、线索、通知、说明等会对后文内容产生持续影响的关键信息
+    "信息记录": {// 记录回复中的行为结果、伏笔、伏笔收尾、要求、规则、线索、通知、说明等会对后文内容产生持续影响的关键信息
         // **used_in_response**更新: 在回复直接或间接用细项内容时used_in_response加1
         // 格式："编号":{"日期":"日期","时间":"时间(可选)","地点":"地点","角色":"相关角色(多人用逗号分隔)","类型":"说明","主题":"主题","细项":["结果1","说明2","通知3",…],"used_in_response":0}
     } ,
-    "quests": { // 任务记录：识别并抽取所有类似[任务|命令|安排|要求]的信息，随回复动态更新
-        "任务名": {
-            "publisher": "发布者", // 发布任务的角色名
-            "receiver": "接受者", // 接受任务的角色名
-            "name": "任务名",
-            "status": "待承接/已过期/进行中/已完成", // 任务状态
-            "progress": "任务进度", // 任务进度
-            "requirements": {
-                "primary_requirement":"完整未删减的任务主要求", // 保留原始任务要求描述
-                "secondary_requirement_1":"完整未删减的任务次要要求1" // (可选)，保留原始任务要求描述
+    "任务记录": { // 任务记录：识别并抽取所有类似[任务|命令|安排|要求]的信息，随回复动态更新
+        "{{任务名}}": {
+            "发布者": "发布者",
+            "接受者": "接受者",
+            "任务名": "任务名",
+            "任务状态": "待承接/已过期/进行中/已完成",
+            "任务进度": "任务进度",
+            "任务要求": {
+                "主要要求":"完整未删减的任务主要求", // 保留原始任务要求描述
+                "次要要求1":"完整未删减的任务次要要求1" // (可选)，保留原始任务要求描述
                // ... 其它次要要求
             },
-            "reward": "任务奖励" // 任务奖励描述
+            "任务奖励": "任务奖励"
             // ... 其他任务信息
         }
         // ... 其他任务
     }
 }`,
 };
+
+const wordMapping = {
+    "崩溃": "臣服",
+    "绝望": "释然"
+}
 
 let finalSummaryInfo = null;
 
@@ -246,12 +252,23 @@ function mergeSummaryInfo(chat) {
 
 
 function getCharPrompt() {
-    const charsInfoJsonStr = JSON.stringify(finalSummaryInfo, null, 2);
-    const summaryKeysStr = Object.keys(finalSummaryInfo).join('&');
+    let charsInfoJsonStr = JSON.stringify(finalSummaryInfo, null, 2);
+    for (const [key, value] of Object.entries(wordMapping)) {
+        charsInfoJsonStr = charsInfoJsonStr.replace(new RegExp(key, 'g'), value);
+    }
+
     const prompt = `
-额外要求:
-1. 载入<ROLE_DATA>里的${summaryKeysStr}做为回复生成时的内容基石，不可与<ROLE_DATA>的信息矛盾。
-2. 在回复末尾生成<ROLE_DATA_DELTA_UPDATE>信息,完整提取回复中相对于<ROLE_DATA>内容发生变化的字段(严格遵循字段注释中的规则),省略未修改字段,确保输出为有效JSON。
+<ROLE_PLAY>
+##角色扮演指导##
+
+数据使用:
+- 整体理解：将characters（如：性格特质、背景故事、人际关系、身体状态等）视为一个有机整体，深入理解其内在逻辑与相互影响。
+- 数据驱动：充分利用<ROLE_DATA>中的信息来构建和丰富细节、氛围及上下文。
+- 关系与经历：基于character_relations和information字段，合理推断并展现角色间的关系网络及其过往经历对当前情境的影响。
+- 推进叙事：主动创造角色出场并推动互动。主动识别并推进quests中未完成的任务，将其作为驱动情节发展的核心动力。
+
+数据更新:
+- 在回复末尾生成<ROLE_DATA_DELTA_UPDATE>信息，提取<ROLE_DATA>发生变化的字段（严格遵循字段注释中的规则），省略未修改字段，确保输出为有效JSON。
 ------
 <ROLE_DATA>
 ${charsInfoJsonStr}
@@ -260,7 +277,9 @@ ${charsInfoJsonStr}
 <ROLE_DATA_DELTA_UPDATE>
 ${$("#char_prompt_textarea").val()}
 </ROLE_DATA_DELTA_UPDATE>
+------
 
+</ROLE_PLAY>
 `
     return prompt;
 }
@@ -274,10 +293,18 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     finalSummaryInfo = mergeSummaryInfo(chat);
     let tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
     while (tokenCount > mergeThreshold) {
-        const countToRemove = Math.max(1, Math.floor(finalSummaryInfo.information.length / 10));
+        const infoEntries = Object.entries(finalSummaryInfo.information);
+        if (infoEntries.length === 0) {
+            break;
+        }
+        const countToRemove = Math.max(1, Math.floor(infoEntries.length / 10));
         // 按 used_in_response 排序，移除使用次数最少的项，然后恢复原始顺序
-        const keptItems = finalSummaryInfo.information.map((item, index) => ({ item, index })).sort((a, b) => (a.item.used_in_response ?? 0) - (b.item.used_in_response ?? 0)).slice(countToRemove).sort((a, b) => a.index - b.index).map(x => x.item);
-        finalSummaryInfo.information = keptItems;
+        finalSummaryInfo.information = Object.fromEntries(
+            infoEntries
+                .sort(([, a], [, b]) => (a.used_in_response ?? 0) - (b.used_in_response ?? 0))
+                .slice(countToRemove)
+                .sort(([keyA], [keyB]) => Number(keyA) - Number(keyB))
+        );
         tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
         console.warn("[Chat History Optimization] Summary info is too large, reduce message to count.", tokenCount, finalSummaryInfo);
     }
@@ -298,14 +325,7 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     const startIdx = assistantIdxArr[assistantIdxArr.length - keepCount];
     let tail = chat
         .slice(startIdx)
-        .filter(item => item && item.is_user === false)
-        .map(item => {
-            const match = (item.mes || '').match(/<StatusBlocks>((?:(?!<StatusBlocks>)[\s\S])*?)<\/content>/);
-            return {
-                ...item,
-                mes: match ? match[0] : '' // 只保留整个匹配内容，没有则为空字符串
-            };
-        });
+        .filter(item => item && item.is_user === false);
     mergedChat.push(...tail);
 
     chat[chat.length - 1]['mes'] = "用户输入:" + chat[chat.length - 1]['mes'] + "\n\n" + getCharPrompt();
