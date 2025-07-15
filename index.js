@@ -169,14 +169,9 @@ function fixupValue(object) {
                 if (item && typeof item === 'object' && 'count' in item && ((item.count == 0) || (item.count == "0"))) {
                     delete object[key];
                 }
-            }
-        }
-
-        for (const key of Object.keys(object)) {
-            const value = object[key];
-            if (value && value.character_name && key !== value.character_name) {
-                delete object[key];
-                object[value.character_name] = deepMerge(object[value.character_name], value);
+                if (item && typeof item === 'object' && '任务状态' in item && (item.任务状态 == "已完成")) {
+                    delete object[key];
+                }
             }
         }
 
@@ -293,18 +288,24 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     finalSummaryInfo = mergeSummaryInfo(chat);
     let tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
     while (tokenCount > mergeThreshold) {
-        const infoEntries = Object.entries(finalSummaryInfo.information);
+        const infoEntries = Object.entries(finalSummaryInfo.信息记录);
         if (infoEntries.length === 0) {
             break;
         }
         const countToRemove = Math.max(1, Math.floor(infoEntries.length / 10));
         // 按 used_in_response 排序，移除使用次数最少的项，然后恢复原始顺序
-        finalSummaryInfo.information = Object.fromEntries(
+        finalSummaryInfo.信息记录 = Object.fromEntries(
             infoEntries
                 .sort(([, a], [, b]) => (a.used_in_response ?? 0) - (b.used_in_response ?? 0))
                 .slice(countToRemove)
                 .sort(([keyA], [keyB]) => Number(keyA) - Number(keyB))
         );
+        // 移除已完成的任务
+        if (finalSummaryInfo?.任务记录) {
+            finalSummaryInfo.任务记录 = Object.fromEntries(
+                Object.entries(finalSummaryInfo.任务记录).filter(([, task]) => task['任务状态'] !== '已完成')
+            );
+        }
         tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
         console.warn("[Chat History Optimization] Summary info is too large, reduce message to count.", tokenCount, finalSummaryInfo);
     }
