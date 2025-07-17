@@ -19,8 +19,10 @@ const defaultSettings = {
     extensionToggle: false,
     keepCount: 3,
     charPrompt: `{
+    // 天数: 第1天开始计数的天数
     // 日期: 世界观下当前日期,如无日期信息,则从第1天开始
     // 地点: 用.分隔大小地点，如“图书馆.三楼.阅览室”、“酒馆.二楼.卫生间”
+    "天数": "第1天",
     "日期": "日期",
     "角色信息": { // {{user}}和其他NPC的信息记录
         "{{角色名}}": { //角色名(中文)
@@ -79,15 +81,13 @@ const defaultSettings = {
         // "角色1": {
         //     "角色2": {
         //         "关系": "父子|恋人|主奴|朋友|顾客",
-        //         "关系细节": "关系的细节描述"
         //     }
         // }
     },
-    "信息记录": {// 记录回复中的行为结果、伏笔、伏笔收尾、要求、规则、线索、通知、说明等会对后文内容产生持续影响的关键信息
-        // **used_in_response**更新: 在回复直接或间接用细项内容时used_in_response加1
-        // 格式："编号":{"日期":"日期","时间":"时间(可选)","地点":"地点","角色":"相关角色(多人用逗号分隔)","类型":"说明","主题":"主题","细项":["结果1","说明2","通知3",…],"used_in_response":0}
-    } ,
-    "任务记录": { // 任务记录：识别并抽取所有类似[任务|命令|安排|要求]的信息，随回复动态更新
+    "信息记录": [// 记录回复中的行为结果、伏笔、伏笔收尾、要求、规则、线索、通知、说明等会对后文内容产生持续影响的关键信息
+        // 格式：{"日期":"日期","时间":"时间(可选)","地点":"地点","角色":"相关角色(多人用逗号分隔)","主题":"主题","细项":["结果1","说明2","通知3",…]}
+    ] ,
+    "任务记录": { // 任务记录：识别并抽取所有[任务|命令|安排|要求]的信息，随回复动态更新
         "{{任务名}}": {
             "发布者": "发布者",
             "接受者": "接受者",
@@ -257,10 +257,10 @@ function getCharPrompt() {
 ##角色扮演指导##
 
 数据使用:
-- 整体理解：将characters（如：性格特质、背景故事、人际关系、身体状态等）视为一个有机整体，深入理解其内在逻辑与相互影响。
+- 整体理解：将角色信息（如：性格特质、背景故事、人际关系、身体状态等）视为一个有机整体，深入理解其内在逻辑与相互影响。
 - 数据驱动：充分利用<ROLE_DATA>中的信息来构建和丰富细节、氛围及上下文。
-- 关系与经历：基于character_relations和information字段，合理推断并展现角色间的关系网络及其过往经历对当前情境的影响。
-- 推进叙事：主动创造角色出场并推动互动。主动识别并推进quests中未完成的任务，将其作为驱动情节发展的核心动力。
+- 关系与经历：基于角色关系和信息记录，合理推断并展现角色间的关系网络及其过往经历对当前情境的影响。
+- 推进叙事：主动创造角色出场并推动互动。主动识别并推进任务记录中未完成的任务，将其作为驱动情节发展的核心动力。
 
 数据更新:
 - 在回复末尾生成<ROLE_DATA_DELTA_UPDATE>信息，提取<ROLE_DATA>发生变化的字段（严格遵循字段注释中的规则），省略未修改字段，确保输出为有效JSON。
@@ -288,24 +288,8 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     finalSummaryInfo = mergeSummaryInfo(chat);
     let tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
     while (tokenCount > mergeThreshold) {
-        const infoEntries = Object.entries(finalSummaryInfo.信息记录);
-        if (infoEntries.length === 0) {
-            break;
-        }
-        const countToRemove = Math.max(1, Math.floor(infoEntries.length / 10));
-        // 按 used_in_response 排序，移除使用次数最少的项，然后恢复原始顺序
-        finalSummaryInfo.信息记录 = Object.fromEntries(
-            infoEntries
-                .sort(([, a], [, b]) => (a.used_in_response ?? 0) - (b.used_in_response ?? 0))
-                .slice(countToRemove)
-                .sort(([keyA], [keyB]) => Number(keyA) - Number(keyB))
-        );
-        // 移除已完成的任务
-        if (finalSummaryInfo?.任务记录) {
-            finalSummaryInfo.任务记录 = Object.fromEntries(
-                Object.entries(finalSummaryInfo.任务记录).filter(([, task]) => task['任务状态'] !== '已完成')
-            );
-        }
+        const countToRemove = Math.max(1, Math.floor(finalSummaryInfo.信息记录.length / 10));
+        finalSummaryInfo.信息记录 = finalSummaryInfo.信息记录.slice(countToRemove);
         tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
         console.warn("[Chat History Optimization] Summary info is too large, reduce message to count.", tokenCount, finalSummaryInfo);
     }
