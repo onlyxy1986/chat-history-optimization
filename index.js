@@ -168,9 +168,6 @@ function fixupValue(object) {
                 if (item && typeof item === 'object' && 'count' in item && ((item.count == 0) || (item.count == "0"))) {
                     delete object[key];
                 }
-                if (item && typeof item === 'object' && '任务状态' in item && (item.任务状态 == "已完成")) {
-                    delete object[key];
-                }
             }
         }
 
@@ -223,6 +220,9 @@ function mergeSummaryInfo(chat) {
                         continue;
                     }
                     const itemObj = JSON.parse(objMatch[0]);
+                    // if (mergedObj.身体状态 && mergedObj.天数 && itemObj.天数 && mergedObj.天数 !== itemObj.天数) {
+                    //     delete mergedObj.身体状态
+                    // }
                     mergedObj = deepMerge(mergedObj, itemObj);
                 } catch (e) {
                     console.error(`[Chat History Optimization] JSON parse error at chat[${j}]:`, e);
@@ -306,11 +306,13 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     if (typeof keepCount !== 'number' || isNaN(keepCount)) keepCount = defaultSettings.keepCount;
     if (keepCount == 0 && assistantIdxArr.length == 1) keepCount = 1;
     if (keepCount > assistantIdxArr.length) keepCount = assistantIdxArr.length;
-    const startIdx = assistantIdxArr[assistantIdxArr.length - keepCount];
-    let tail = chat
-        .slice(startIdx)
-        .filter(item => item && item.is_user === false);
-    mergedChat.push(...tail);
+    if (keepCount > 0) {
+        const startIdx = assistantIdxArr[assistantIdxArr.length - keepCount];
+        let tail = chat
+            .slice(startIdx)
+            .filter(item => item && item.is_user === false);
+        mergedChat.push(...tail);
+    }
 
     chat[chat.length - 1]['mes'] = "用户输入:" + chat[chat.length - 1]['mes'] + "\n\n" + getCharPrompt();
     mergedChat.push(chat[chat.length - 1])
