@@ -310,8 +310,7 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     const startIdx = assistantIdxArr[assistantIdxArr.length - keepCount];
     let tail = chat
         .slice(startIdx)
-        .filter(item => item && item.is_user === false)
-        .map(item => item.replace(/<thinking>[\s\S]*?<\/thinking>/g,''));
+        .filter(item => item && item.is_user === false);
     mergedChat.push(...tail);
 
     chat[chat.length - 1]['mes'] = "用户输入:" + chat[chat.length - 1]['mes'] + "\n\n" + getCharPrompt();
