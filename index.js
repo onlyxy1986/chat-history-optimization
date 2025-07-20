@@ -14,7 +14,6 @@ const context = SillyTavern.getContext();
 // Keep track of where your extension is located, name should match repo name
 const extensionName = "chat-history-optimization";
 const extensionFolderPath = `scripts/extensions/third-party/${extensionName}`;
-const mergeThreshold = 96 * 1024;
 const defaultSettings = {
     extensionToggle: false,
     keepCount: 3,
@@ -200,17 +199,21 @@ function deepMerge(target, source) {
     return result;
 }
 
-function mergeSummaryInfo(chat) {
+function mergeRoleDataInfo(chat) {
     let failedChars = [];
     let mergedObj = {};
 
     for (let j = 1; j < chat.length; j++) {
         const item = chat[j];
         if (item && !item.is_user && item.swipes && item.swipes[item.swipe_id]) {
-            const swipeContent = item.swipes[item.swipe_id];
-            const matches = [...swipeContent
+            let matches = [...item.mes
                 .replace(/\/\/.*$/gm, '')
                 .matchAll(/<ROLE_DATA_DELTA_UPDATE>((?:(?!<ROLE_DATA_DELTA_UPDATE>)[\s\S])*?)<\/ROLE_DATA_DELTA_UPDATE>/gi)];
+            if (matches.length == 0) {
+                matches = [...item.swipes[item.swipe_id]
+                    .replace(/\/\/.*$/gm, '')
+                    .matchAll(/<ROLE_DATA_DELTA_UPDATE>((?:(?!<ROLE_DATA_DELTA_UPDATE>)[\s\S])*?)<\/ROLE_DATA_DELTA_UPDATE>/gi)];
+            }
             if (matches.length > 0) {
                 let jsonStr = matches[matches.length - 1][1].trim();
                 try {
@@ -235,7 +238,7 @@ function mergeSummaryInfo(chat) {
     }
 
     if (failedChars.length > 0) {
-        console.warn(`[Chat History Optimization] Failed to parse or missing <characters> at chat indexes: ${failedChars.join(', ')}`);
+        console.warn(`[Chat History Optimization] Failed to parse or missing <ROLE_DATA_DELTA_UPDATE> at chat indexes: ${failedChars.join(', ')}`);
         $("#chars-failed").prop("textContent", failedChars.join(', '));
     } else {
         $("#chars-failed").prop("textContent", "无");
@@ -244,6 +247,37 @@ function mergeSummaryInfo(chat) {
     return mergedObj;
 }
 
+function mergeRoleDataSummaryInfo(chat) {
+    let roleDataSummary = [];
+
+    for (let j = 1; j < chat.length; j++) {
+        const item = chat[j];
+        if (item && !item.is_user && item.swipes && item.swipes[item.swipe_id]) {
+            let matches = [...item.mes
+                .replace(/\/\/.*$/gm, '')
+                .matchAll(/<ROLE_DATA_SUMMARY>((?:(?!<ROLE_DATA_SUMMARY>)[\s\S])*?)<\/ROLE_DATA_SUMMARY>/gi)];
+            if (matches.length == 0) {
+                matches = [...item.swipes[item.swipe_id]
+                    .replace(/\/\/.*$/gm, '')
+                    .matchAll(/<ROLE_DATA_SUMMARY>((?:(?!<ROLE_DATA_SUMMARY>)[\s\S])*?)<\/ROLE_DATA_SUMMARY>/gi)];
+            }
+            if (matches.length > 0) {
+                let jsonStr = matches[matches.length - 1][1].trim();
+                try {
+                    const objMatch = jsonStr.match(/\[[\s\S]*\]/);
+                    if (!objMatch) {
+                        continue;
+                    }
+                    roleDataSummary.push(JSON.parse(objMatch[0]));
+                } catch (e) {
+                    console.error(`[Chat History Optimization] JSON parse error at chat[${j}]:`, e);
+                }
+            }
+        }
+    }
+
+    return roleDataSummary;
+}
 
 function getCharPrompt() {
     let charsInfoJsonStr = JSON.stringify(finalSummaryInfo, null, 2);
@@ -278,25 +312,83 @@ ${$("#char_prompt_textarea").val()}
     return prompt;
 }
 
+function replaceInfoRecordsWithSummary(finalSummaryInfo, roleDataSummary) {
+    if (!finalSummaryInfo || !Array.isArray(finalSummaryInfo.信息记录) || !Array.isArray(roleDataSummary)) return;
+
+    for (const roleDataSummaryItem of roleDataSummary) {
+        const infoRecords = finalSummaryInfo.信息记录;
+        const newInfoRecords = [];
+        let i = 0;
+        while (i < infoRecords.length) {
+            const current = infoRecords[i];
+            // 查找 roleDataSummary 中匹配的 summary
+            const summaryItem = roleDataSummaryItem.find(
+                s => (s.天数 && s.天数 === current.天数) || (s.日期 && s.日期 === current.日期)
+            );
+            if (summaryItem) {
+                // 找到所有连续的同日期/天数的 item
+                const matchKey = summaryItem.天数 || summaryItem.日期;
+                let j = i;
+                while (
+                    j < infoRecords.length &&
+                    ((summaryItem.天数 && infoRecords[j].天数 === summaryItem.天数) ||
+                        (summaryItem.日期 && infoRecords[j].日期 === summaryItem.日期))
+                ) {
+                    j++;
+                }
+                // 替换为 summary
+                newInfoRecords.push({
+                    "日期": summaryItem.日期,
+                    "天数": summaryItem.天数,
+                    "主题": "摘要",
+                    "细项": summaryItem.summary || [],
+                });
+                i = j; // 跳过已替换的
+            } else {
+                // 没有 summary 匹配，保留原 item
+                newInfoRecords.push(current);
+                i++;
+            }
+        }
+        finalSummaryInfo.信息记录 = newInfoRecords;
+    }
+}
+
 globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, abort, type) {
     if (!extension_settings[extensionName].extensionToggle) {
         console.info("[Chat History Optimization] extension is disabled.")
         return;
     }
 
-    finalSummaryInfo = mergeSummaryInfo(chat);
-    let tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
-    while (tokenCount > mergeThreshold) {
-        const countToRemove = Math.max(1, Math.floor(finalSummaryInfo.信息记录.length / 10));
-        finalSummaryInfo.信息记录 = finalSummaryInfo.信息记录.slice(countToRemove);
-        tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
-        console.warn("[Chat History Optimization] Summary info is too large, reduce message to count.", tokenCount, finalSummaryInfo);
-    }
+    finalSummaryInfo = mergeRoleDataInfo(chat);
+    const roleDataSummary = mergeRoleDataSummaryInfo(chat);
+    console.log("[Chat History Optimization] roleDataSummary:", roleDataSummary);
+    replaceInfoRecordsWithSummary(finalSummaryInfo, roleDataSummary);
+    const tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
     $("#token-count").prop("textContent", `${tokenCount}`);
     console.log("[Chat History Optimization] token count:", tokenCount);
 
-    const mergedChat = [];
+    // 过滤chat, 如果item.mes包含<ROLE_DATA_SUMMARY>...</ROLE_DATA_SUMMARY>,则移除item,如果前一个item.is_user是true,也一并移除
+    const summaryRegex = /<ROLE_DATA_SUMMARY>[\s\S]*?<\/ROLE_DATA_SUMMARY>/i;
+    const chatToKeep = [];
+    for (const currentItem of chat) {
+        // 检查当前消息是否为包含摘要的AI消息
+        if (currentItem?.mes && !currentItem.is_user && summaryRegex.test(currentItem.mes)) {
+            // 如果是，检查待保留列表中的上一条消息是否为用户消息
+            if (chatToKeep.length > 0 && chatToKeep[chatToKeep.length - 1].is_user) {
+                // 如果是用户消息，则将其从待保留列表中移除
+                chatToKeep.pop();
+            }
+            // 当前包含摘要的AI消息不添加到待保留列表
+        } else {
+            // 否则，将当前消息添加到待保留列表
+            chatToKeep.push(currentItem);
+        }
+    }
+    chat.length = 0;
+    chat.push(...chatToKeep);
 
+    const mergedChat = [];
     // 保留倒数第 keepCount 条 assistant 消息及其后的所有信息
     let assistantIdxArr = [];
     for (let i = 0; i < chat.length; i++) {
@@ -310,11 +402,15 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
         const startIdx = assistantIdxArr[assistantIdxArr.length - keepCount];
         let tail = chat
             .slice(startIdx)
-            .filter(item => item && item.is_user === false);
+            .filter(item => item && item.is_user === false)
+            .map(item => ({ ...item, mes: (item.mes || '').replace(/<thinking>[\s\S]*?<\/thinking>/g, '').trim().replace(/<ROLE_DATA_DELTA_UPDATE>((?:(?!<ROLE_DATA_DELTA_UPDATE>)[\s\S])*?)<\/ROLE_DATA_DELTA_UPDATE>/gi, '<ROLE_DATA_DELTA_UPDATE>\n// fill it\n</ROLE_DATA_DELTA_UPDATE>').trim() }));
         mergedChat.push(...tail);
     }
 
     chat[chat.length - 1]['mes'] = "用户输入:" + chat[chat.length - 1]['mes'] + "\n\n" + getCharPrompt();
+    if (chat.length == 2 && chat[0].is_user === false && chat[1].is_user === true) {
+        chat[chat.length - 1]['mes'] = chat[chat.length - 1]['mes'] + "（此为首条信息，必须完整地把所有可能的信息都记录到<ROLE_DATA_DELTA_UPDATE>中）";
+    }
     mergedChat.push(chat[chat.length - 1])
 
     // 用 mergedChat 替换 chat 的内容
