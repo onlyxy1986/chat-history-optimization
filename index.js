@@ -58,7 +58,7 @@ const defaultSettings = {
                 // 示例2: "乳头": "黑色金属乳环，银色乳夹"
                 // 示例3: "屁眼": "粗大的肛塞"
             },
-            "当前状态": "角色可观测的具体状态，包括：姿势、动作、生理反应、环境交互（避免主观形容词，用行为表现代替情绪）",  // 示例："双腿被皮带固定于沙发扶手，全身痉挛，阴道持续收缩，发出断续尖叫，眼角有泪"
+            "当前状态": "[第X天][时间]角色可观测的具体状态，包括：姿势、动作、生理反应、环境交互（避免主观形容词，用行为表现代替情绪）",  // 示例："[第2天][10:15]双腿被皮带固定于沙发扶手，全身痉挛，阴道持续收缩，发出断续尖叫，眼角有泪"
             "物品": { // 角色长期使用或主要用途的物品，排除一次性或临时物品，需随当前回复增减物品
                 // "物品1":{ "数量": 1, "用途": "物品1用途描述" }
             },
@@ -287,21 +287,12 @@ function getCharPrompt() {
 
     const prompt = `
 <ROLE_PLAY>
-##角色扮演指导##
 
-数据使用:
-- 整体理解：将角色信息（如：性格特质、背景故事、人际关系、身体状态等）视为一个有机整体，深入理解其内在逻辑与相互影响。
-- 数据驱动：充分利用<ROLE_DATA>中的信息来构建和丰富细节、氛围及上下文。
-- 关系与经历：基于角色关系和信息记录，合理推断并展现角色间的关系网络及其过往经历对当前情境的影响。
-- 推进叙事：主动创造角色出场并推动互动。主动识别并推进任务记录中未完成的任务，将其作为驱动情节发展的核心动力。
-
-数据更新:
-- 在回复末尾生成<ROLE_DATA_DELTA_UPDATE>信息，提取<ROLE_DATA>发生变化的字段（严格遵循字段注释中的规则），省略未修改字段，确保输出为有效JSON。
-------
 <ROLE_DATA>
 ${charsInfoJsonStr}
 </ROLE_DATA>
 ------
+**在回复末尾生成<ROLE_DATA_DELTA_UPDATE>信息，提取<ROLE_DATA>发生变化的字段（严格遵循字段注释中的规则），省略未修改字段，确保输出为有效JSON。**
 <ROLE_DATA_DELTA_UPDATE>
 ${$("#char_prompt_textarea").val()}
 </ROLE_DATA_DELTA_UPDATE>
@@ -361,6 +352,15 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     }
 
     finalSummaryInfo = mergeRoleDataInfo(chat);
+    // 过滤掉任务状态为'已完成'的任务
+    if (finalSummaryInfo && finalSummaryInfo.任务记录 && typeof finalSummaryInfo.任务记录 === 'object') {
+        for (const key of Object.keys(finalSummaryInfo.任务记录)) {
+            const task = finalSummaryInfo.任务记录[key];
+            if (task && task.任务状态 === '已完成') {
+                delete finalSummaryInfo.任务记录[key];
+            }
+        }
+    }
     const roleDataSummary = mergeRoleDataSummaryInfo(chat);
     console.log("[Chat History Optimization] roleDataSummary:", roleDataSummary);
     replaceInfoRecordsWithSummary(finalSummaryInfo, roleDataSummary);
@@ -403,8 +403,10 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
         let tail = chat
             .slice(startIdx)
             .filter(item => item && item.is_user === false)
-            .map(item => ({ ...item, mes: (item.mes || '').replace(/<thinking>[\s\S]*?<\/thinking>/g, '').trim().replace(/<ROLE_DATA_DELTA_UPDATE>((?:(?!<ROLE_DATA_DELTA_UPDATE>)[\s\S])*?)<\/ROLE_DATA_DELTA_UPDATE>/gi, '<ROLE_DATA_DELTA_UPDATE>\n// fill it\n</ROLE_DATA_DELTA_UPDATE>').trim() }));
-        mergedChat.push(...tail);
+            .map(item => (item.mes || '').replace(/<thinking>[\s\S]*?<\/thinking>/g, '').trim().replace(/<ROLE_DATA_DELTA_UPDATE>((?:(?!<ROLE_DATA_DELTA_UPDATE>)[\s\S])*?)<\/ROLE_DATA_DELTA_UPDATE>/gi, '<ROLE_DATA_DELTA_UPDATE>\n//IMPORTANT INFOMATION, FILL IT\n<\/ROLE_DATA_DELTA_UPDATE>').trim());
+        finalSummaryInfo.最新回复 = tail.join('\n');
+    } else {
+        finalSummaryInfo.最新回复 = "";
     }
 
     chat[chat.length - 1]['mes'] = "用户输入:" + chat[chat.length - 1]['mes'] + "\n\n" + getCharPrompt();
