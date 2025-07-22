@@ -110,8 +110,6 @@ const wordMapping = {
     "绝望": "释然"
 }
 
-let finalSummaryInfo = null;
-
 // Loads the extension settings if they exist, otherwise initializes them to the defaults.
 async function loadSettings() {
     //Create the settings if they don't exist
@@ -223,9 +221,6 @@ function mergeRoleDataInfo(chat) {
                         continue;
                     }
                     const itemObj = JSON.parse(objMatch[0]);
-                    // if (mergedObj.身体状态 && mergedObj.天数 && itemObj.天数 && mergedObj.天数 !== itemObj.天数) {
-                    //     delete mergedObj.身体状态
-                    // }
                     mergedObj = deepMerge(mergedObj, itemObj);
                 } catch (e) {
                     console.error(`[Chat History Optimization] JSON parse error at chat[${j}]:`, e);
@@ -279,7 +274,7 @@ function mergeRoleDataSummaryInfo(chat) {
     return roleDataSummary;
 }
 
-function getCharPrompt() {
+function getCharPrompt(finalSummaryInfo) {
     let charsInfoJsonStr = JSON.stringify(finalSummaryInfo, null, 2);
     for (const [key, value] of Object.entries(wordMapping)) {
         charsInfoJsonStr = charsInfoJsonStr.replace(new RegExp(key, 'g'), value);
@@ -351,7 +346,7 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
         return;
     }
 
-    finalSummaryInfo = mergeRoleDataInfo(chat);
+    let finalSummaryInfo = mergeRoleDataInfo(chat);
     // 过滤掉任务状态为'已完成'的任务
     if (finalSummaryInfo && finalSummaryInfo.任务记录 && typeof finalSummaryInfo.任务记录 === 'object') {
         for (const key of Object.keys(finalSummaryInfo.任务记录)) {
@@ -364,6 +359,50 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     const roleDataSummary = mergeRoleDataSummaryInfo(chat);
     console.log("[Chat History Optimization] roleDataSummary:", roleDataSummary);
     replaceInfoRecordsWithSummary(finalSummaryInfo, roleDataSummary);
+    // 对 finalSummaryInfo.信息记录 去重，保留最后出现的 item，保持原顺序
+    if (finalSummaryInfo && Array.isArray(finalSummaryInfo.信息记录)) {
+        const seen = new Map();
+        // 逆序遍历，记录每个唯一 item 的索引
+        for (let i = finalSummaryInfo.信息记录.length - 1; i >= 0; i--) {
+            const item = finalSummaryInfo.信息记录[i];
+            // 以按字母序排序后的 JSON 字符串作为唯一标识，避免 key 顺序问题
+            const key = item.主题 + ',' + item.日期;
+
+            if (!seen.has(key)) {
+                seen.set(key, i);
+            }
+        }
+        // 按原顺序保留最后出现的 item
+        const uniqueRecords = Array.from(seen.values()).sort((a, b) => a - b).map(idx => finalSummaryInfo.信息记录[idx]);
+        finalSummaryInfo.信息记录 = uniqueRecords;
+    }
+    // 收集所有出现在信息记录中的角色
+    let infoRolesSet = new Set();
+    if (finalSummaryInfo && Array.isArray(finalSummaryInfo.信息记录)) {
+        for (const record of finalSummaryInfo.信息记录) {
+            if (record && typeof record.角色 === 'string') {
+                let roleStr = record.角色.replace(/[()（）]/g, '');
+                let roles = roleStr.split(/[,，]/).map(r => r.trim()).filter(r => r.length > 0);
+                roles.forEach(role => infoRolesSet.add(role));
+            }
+        }
+    }
+
+    console.log("[Chat History Optimization] infoRolesSet:", infoRolesSet);
+    console.log("[Chat History Optimization] finalSummaryInfo:", finalSummaryInfo);
+
+    // 处理角色信息，只保留未出现角色的角色名和当前状态
+    if (finalSummaryInfo && finalSummaryInfo.角色信息 && typeof finalSummaryInfo.角色信息 === 'object') {
+        for (const roleName of Object.keys(finalSummaryInfo.角色信息)) {
+            if (!infoRolesSet.has(roleName)) {
+                const roleObj = finalSummaryInfo.角色信息[roleName];
+                finalSummaryInfo.角色信息[roleName] = {
+                    "角色名": roleObj.角色名,
+                    "当前状态": roleObj.当前状态
+                };
+            }
+        }
+    }
     const tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
     $("#token-count").prop("textContent", `${tokenCount}`);
     console.log("[Chat History Optimization] token count:", tokenCount);
@@ -403,13 +442,13 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
         let tail = chat
             .slice(startIdx)
             .filter(item => item && item.is_user === false)
-            .map(item => (item.mes || '').replace(/<thinking>[\s\S]*?<\/thinking>/g, '').trim().replace(/<ROLE_DATA_DELTA_UPDATE>((?:(?!<ROLE_DATA_DELTA_UPDATE>)[\s\S])*?)<\/ROLE_DATA_DELTA_UPDATE>/gi, '<ROLE_DATA_DELTA_UPDATE>\n//IMPORTANT INFOMATION, FILL IT\n<\/ROLE_DATA_DELTA_UPDATE>').trim());
+            .map(item => (item.mes || '').replace(/<thinking>[\s\S]*?<\/thinking>/g, '').trim().replace(/<ROLE_DATA_DELTA_UPDATE>((?:(?!<ROLE_DATA_DELTA_UPDATE>)[\s\S])*?)<\/ROLE_DATA_DELTA_UPDATE>/gi, '<ROLE_DATA_DELTA_UPDATE>\n//IMPORTANT INFORMATION, FILL IT\n<\/ROLE_DATA_DELTA_UPDATE>').trim());
         finalSummaryInfo.最新回复 = tail.join('\n');
     } else {
         finalSummaryInfo.最新回复 = "";
     }
 
-    chat[chat.length - 1]['mes'] = "用户输入:" + chat[chat.length - 1]['mes'] + "\n\n" + getCharPrompt();
+    chat[chat.length - 1]['mes'] = "用户输入:" + chat[chat.length - 1]['mes'] + "\n\n" + getCharPrompt(finalSummaryInfo);
     if (chat.length == 2 && chat[0].is_user === false && chat[1].is_user === true) {
         chat[chat.length - 1]['mes'] = chat[chat.length - 1]['mes'] + "（此为首条信息，必须完整地把所有可能的信息都记录到<ROLE_DATA_DELTA_UPDATE>中）";
     }
