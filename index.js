@@ -396,10 +396,6 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
         for (const roleName of Object.keys(finalSummaryInfo.角色信息)) {
             if (!infoRolesSet.has(roleName)) {
                 const roleObj = finalSummaryInfo.角色信息[roleName];
-                finalSummaryInfo.角色信息[roleName] = {
-                    "角色名": roleObj.角色名,
-                    "当前状态": roleObj.当前状态
-                };
             }
         }
     }
