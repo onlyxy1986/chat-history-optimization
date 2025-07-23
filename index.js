@@ -23,6 +23,23 @@ const defaultSettings = {
     // 地点: 用.分隔大小地点，如“图书馆.三楼.阅览室”、“酒馆.二楼.卫生间”
     "天数": "第1天",
     "日期": "日期",
+    "任务记录": { // 任务记录：识别并抽取所有[任务|命令|安排|要求]的信息，随回复动态更新
+        "{{任务名}}": {
+            "发布者": "发布者",
+            "接受者": "接受者",
+            "任务名": "任务名",
+            "任务状态": "待承接/已过期/进行中/已完成",
+            "任务进度": "任务进度",
+            "任务要求": {
+                "主要要求":"完整未删减的任务主要求", // 保留原始任务要求描述
+                "次要要求1":"完整未删减的任务次要要求1" // (可选)，保留原始任务要求描述
+               // ... 其它次要要求
+            },
+            "任务奖励": "任务奖励"
+            // ... 其他任务信息
+        }
+        // ... 其他任务
+    },
     "角色信息": { // {{user}}和其他NPC的信息记录
         "{{角色名}}": { //角色名(中文)
             "角色名": "{{角色名}}", //角色名(中文)
@@ -82,32 +99,18 @@ const defaultSettings = {
         //     }
         // }
     },
-    "信息记录": [// 记录回复中的行为结果、伏笔、伏笔收尾、要求、规则、线索、通知、说明等会对后文内容产生持续影响的关键信息
+    "信息记录": [// 记录回复中的行为结果、伏笔、伏笔收尾、要求、规则、线索、通知、说明等会对后文内容产生持续影响的关键信息，涉及数字的信息要保留数字
         // 格式：{"日期":"日期","时间":"时间(可选)","地点":"地点","角色":"相关角色(多人用逗号分隔)","主题":"主题","细项":["结果1","说明2","通知3",…]}
-    ] ,
-    "任务记录": { // 任务记录：识别并抽取所有[任务|命令|安排|要求]的信息，随回复动态更新
-        "{{任务名}}": {
-            "发布者": "发布者",
-            "接受者": "接受者",
-            "任务名": "任务名",
-            "任务状态": "待承接/已过期/进行中/已完成",
-            "任务进度": "任务进度",
-            "任务要求": {
-                "主要要求":"完整未删减的任务主要求", // 保留原始任务要求描述
-                "次要要求1":"完整未删减的任务次要要求1" // (可选)，保留原始任务要求描述
-               // ... 其它次要要求
-            },
-            "任务奖励": "任务奖励"
-            // ... 其他任务信息
-        }
-        // ... 其他任务
-    }
+    ]
 }`,
 };
 
 const wordMapping = {
     "崩溃": "臣服",
-    "绝望": "释然"
+    "绝望": "释然",
+    "空洞": "迷离",
+    "麻木": "挣扎",
+    "认命": "求生欲"
 }
 
 // Loads the extension settings if they exist, otherwise initializes them to the defaults.
@@ -351,7 +354,7 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     if (finalSummaryInfo && finalSummaryInfo.任务记录 && typeof finalSummaryInfo.任务记录 === 'object') {
         for (const key of Object.keys(finalSummaryInfo.任务记录)) {
             const task = finalSummaryInfo.任务记录[key];
-            if (task && task.任务状态 === '已完成') {
+            if (task && (task.任务状态 === '已完成' || task.任务状态 === '已失败' || task.任务状态 === '已取消')) {
                 delete finalSummaryInfo.任务记录[key];
             }
         }
@@ -378,12 +381,54 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     }
     // 收集所有出现在信息记录中的角色
     let infoRolesSet = new Set();
-    if (finalSummaryInfo && Array.isArray(finalSummaryInfo.信息记录)) {
-        for (const record of finalSummaryInfo.信息记录) {
-            if (record && typeof record.角色 === 'string') {
-                let roleStr = record.角色.replace(/[()（）]/g, '');
-                let roles = roleStr.split(/[,，]/).map(r => r.trim()).filter(r => r.length > 0);
-                roles.forEach(role => infoRolesSet.add(role));
+    for (let j = 1; j < chat.length; j++) {
+        const item = chat[j];
+        if (item && !item.is_user && item.swipes && item.swipes[item.swipe_id]) {
+            let matches = [...item.mes
+                .replace(/\/\/.*$/gm, '')
+                .matchAll(/<ROLE_DATA_DELTA_UPDATE>((?:(?!<ROLE_DATA_DELTA_UPDATE>)[\s\S])*?)<\/ROLE_DATA_DELTA_UPDATE>/gi)];
+            if (matches.length == 0) {
+                matches = [...item.swipes[item.swipe_id]
+                    .replace(/\/\/.*$/gm, '')
+                    .matchAll(/<ROLE_DATA_DELTA_UPDATE>((?:(?!<ROLE_DATA_DELTA_UPDATE>)[\s\S])*?)<\/ROLE_DATA_DELTA_UPDATE>/gi)];
+            }
+            if (matches.length > 0) {
+                let jsonStr = matches[matches.length - 1][1].trim();
+                try {
+                    const objMatch = jsonStr.match(/\{[\s\S]*\}/);
+                    if (!objMatch) {
+                        failedChars.push(j);
+                        continue;
+                    }
+                    const itemObj = JSON.parse(objMatch[0]);
+                    let shouldProcessRoles = false;
+                    if (
+                        itemObj &&
+                        Array.isArray(itemObj.信息记录) &&
+                        Array.isArray(finalSummaryInfo.信息记录)
+                    ) {
+                        // 按字母序 stringify 作为唯一标识
+                        const makeKey = obj => {
+                            if (!obj || typeof obj !== 'object') return '';
+                            let time = (typeof obj.时间 === 'string' && obj.时间.trim() !== '' && obj.时间 !== '无效' && obj.时间 !== null && obj.时间 !== undefined) ? obj.时间 : '';
+                            return obj.主题 + ',' + obj.日期 + ',' + time + ',' + obj.地点;
+                        };
+                        const finalKeys = new Set(finalSummaryInfo.信息记录.map(makeKey));
+                        for (const infoItem of itemObj.信息记录) {
+                            if (finalKeys.has(makeKey(infoItem))) {
+                                shouldProcessRoles = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!shouldProcessRoles) continue;
+                    if (itemObj && itemObj.角色信息 && typeof itemObj.角色信息 === 'object') {
+                        for (const roleName of Object.keys(itemObj.角色信息)) {
+                            infoRolesSet.add(roleName);
+                        }
+                    }
+                } catch (e) {
+                }
             }
         }
     }
@@ -396,6 +441,10 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
         for (const roleName of Object.keys(finalSummaryInfo.角色信息)) {
             if (!infoRolesSet.has(roleName)) {
                 const roleObj = finalSummaryInfo.角色信息[roleName];
+                finalSummaryInfo.角色信息[roleName] = {
+                    "角色名": roleObj.角色名,
+                    "当前状态": roleObj.当前状态
+                };
             }
         }
     }
