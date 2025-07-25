@@ -111,7 +111,10 @@ const wordMapping = {
     "绝望": "释然",
     "空洞": "迷离",
     "麻木": "挣扎",
-    "认命": "求生欲"
+    "认命": "求生欲",
+    "极端": "有些",
+    "极度": "有些",
+    "扭曲": "抵触"
 }
 
 // Loads the extension settings if they exist, otherwise initializes them to the defaults.
@@ -178,6 +181,12 @@ function fixupValue(object) {
             object['脚'] = object['全身'];
             delete object['全身'];
         }
+
+        if ('精神' in object) {
+            delete object['精神'];
+        }
+
+
     }
     return object
 }
@@ -291,7 +300,7 @@ function getCharPrompt(finalSummaryInfo) {
 ${charsInfoJsonStr}
 </ROLE_DATA>
 ------
-**在回复末尾生成<ROLE_DATA_DELTA_UPDATE>信息，提取<ROLE_DATA>发生变化的字段（严格遵循字段注释中的规则），省略未修改字段，确保输出为有效JSON。**
+**在回复末尾生成<ROLE_DATA_DELTA_UPDATE>信息，提取<ROLE_DATA>发生变化的字段（严格遵循字段注释中的规则）（忽略’摘要'的变化），省略未修改字段，确保输出为有效JSON。**
 <ROLE_DATA_DELTA_UPDATE>
 ${$("#char_prompt_textarea").val()}
 </ROLE_DATA_DELTA_UPDATE>
@@ -414,7 +423,7 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
                             let time = (typeof obj.时间 === 'string' && obj.时间.trim() !== '' && obj.时间 !== '无效' && obj.时间 !== null && obj.时间 !== undefined) ? obj.时间 : '';
                             return obj.主题 + ',' + obj.日期 + ',' + time + ',' + obj.地点;
                         };
-                        const finalKeys = new Set(finalSummaryInfo.信息记录.map(makeKey));
+                        const finalKeys = new Set(finalSummaryInfo.信息记录.slice(Math.max(0, finalSummaryInfo.信息记录.length - 50)).map(makeKey));
                         for (const infoItem of itemObj.信息记录) {
                             if (finalKeys.has(makeKey(infoItem))) {
                                 shouldProcessRoles = true;
