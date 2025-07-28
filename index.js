@@ -507,7 +507,9 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
         let tail = chat
             .slice(startIdx)
             .filter(item => item && item.is_user === false)
-            .map(item => (item.mes || '').replace(/<ROLE_DATA_DELTA_UPDATE>((?:(?!<ROLE_DATA_DELTA_UPDATE>)[\s\S])*?)<\/ROLE_DATA_DELTA_UPDATE>/gi, '<ROLE_DATA_DELTA_UPDATE>\n//IMPORTANT INFORMATION, FILL IT\n<\/ROLE_DATA_DELTA_UPDATE>').trim());
+            .map(item => (item.mes || '')
+                .replace(/<thinking>[\s\S]*?<\/thinking>/g, '<thinking>\nFILL YOUR THINKING\n<\/thinking>').trim()
+                .replace(/<ROLE_DATA_DELTA_UPDATE>((?:(?!<ROLE_DATA_DELTA_UPDATE>)[\s\S])*?)<\/ROLE_DATA_DELTA_UPDATE>/gi, '<ROLE_DATA_DELTA_UPDATE>\n//IMPORTANT INFORMATION, FILL IT\n<\/ROLE_DATA_DELTA_UPDATE>').trim());
         finalSummaryInfo.前文 = tail.join('\n');
     } else {
         finalSummaryInfo.前文 = "";
