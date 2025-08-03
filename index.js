@@ -30,7 +30,7 @@ const defaultSettings = {
             "任务名": "{{任务名}}",
             "发布日": "{{天数}}",
             "截止日": "{{天数}}",
-            "任务状态": "待承接/已过期/进行中/已完成",
+            "任务状态": "已过期/进行中/已完成",
             "任务进度": "任务进度",
             "任务要求": {
                 "主要要求":"完整未删减的任务主要求", // 保留原始任务要求描述
@@ -42,15 +42,15 @@ const defaultSettings = {
         }
         // ... 其他任务
     },
-    "全局设定": { // 全局设定：识别并**原文复制**所有[系统|设定|规则]的信息，随回复动态更新
+    "全局设定": { // 全局设定：识别并**原文复制**所有[系统|设定|规则]的信息
         // 格式：
-        // 示例1: {"全局设定1名字": "[设定1细项1][设定1细项2][设定1细项3][...]"},
-        // 示例2: {"全局设定2名字": "[设定2细项1][设定2细项2][...]"}
+        // 示例: {"全局设定名字": ["子设定1:详情1**原文复制*","子设定2:详情2**原文复制**","补充子设定3:详情3**原文复制**"]},
+       // …其它全局设定
     },
     "信息记录": [// **每轮必须增加，无需与历史信息比较** 记录回复中的行为结果、伏笔、伏笔收尾、要求、规则、线索、通知、说明等会对后文内容产生持续影响的关键信息
         // **特殊情况:**
         // 1. 涉及**数字**需准确保留数字及其相关信息
-        // 2. 涉及**人物**需准确记录人物名
+        // 2. 涉及**人物、地点、物品**则需准确记录名称及其相关信息
         // 3. 说明类信息需**复制原文**
         // 格式：{"天数":"天数","时间":"时间(可选)","地点":"地点","角色":"相关角色(多人用逗号分隔)","主题":"主题","细项":["结果1","说明2","通知3",…]}
     ],
@@ -61,6 +61,7 @@ const defaultSettings = {
             "职业": "{{职业}}",
             "年龄": "{{年龄}}",
             "背景": "{{背景}}",
+            "境界(或符合当前世界观的其它名称)": "淬体境(初级)",
             "兴趣爱好": {
                 // "兴趣爱好1":{ "level": 1, "desc": "描述" }
                 // ... 其它兴趣爱好
@@ -90,13 +91,13 @@ const defaultSettings = {
             },
             "情境快照": "[第X天][时间][地点]角色可观测的具体状态，包括：姿势、动作、生理反应、环境交互（避免主观形容词，用行为表现代替情绪）",  // 示例："[第2天][10:15][别墅]双腿被皮带固定于沙发扶手，全身痉挛，阴道持续收缩，发出断续尖叫，眼角有泪"
             "物品": { // 角色长期使用或主要用途的物品，排除一次性或临时物品，需随当前回复增减物品数量
-                // "物品1":{ "数量": 1, "物品说明": "物品说明**复制原文**" }
-                // "物品2":{ "数量": 0, "物品说明": "物品说明**复制原文**" }
+                // "物品1":{"价值":"100{{兑换单位}}","数量": 1,"状态":"已装备(for法宝)/无(for道具)","物品说明": "物品说明**复制原文**" }
+                // "物品2":{"价值":"100{{兑换单位}}", "数量": 0, "状态":"已装备(for法宝)/无(for道具)", "物品说明": "物品说明**复制原文**" }
             },
             "技能": { // 角色的技能记录，随当前回复新增/调整
-                // "技能1":{ "品级": "天阶/SS", "修炼等级": "1/初窥门径", "技能说明": "技能说明**复制原文**" }
+                // "技能1":{ "品级": "天阶/SS","价值":"10000{{兑换单位}}", "修炼等级": "1/初窥门径", "技能说明": "技能说明**复制原文**" }
             },
-            "杂项信息": { // 杂项信息存储区：用于动态记录和更新与当前上下文相关的各种附加属性。
+            "额外信息": { // 额外信息存储区：用于动态记录和更新与当前上下文相关的各种属性和状态。
                 // 键名规则: 中文，确保清晰且无空格。
                 // 值类型: 可以是字符串、数字、布尔值、数组或嵌套对象，根据信息特性灵活选择。
                 // 示例1: "性生活频率": "一周两到三次"
@@ -347,9 +348,8 @@ function replaceInfoRecordsWithSummary(finalSummaryInfo, roleDataSummary) {
                 }
                 // 替换为 summary
                 newInfoRecords.push({
-                    "日期": summaryItem.日期,
                     "天数": summaryItem.天数,
-                    "主题": "摘要",
+                    "主题": `${summaryItem.天数}摘要`,
                     "细项": summaryItem.summary || [],
                 });
                 i = j; // 跳过已替换的
@@ -370,6 +370,9 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     }
 
     let finalSummaryInfo = mergeRoleDataInfo(chat);
+    const tokenCount_origin = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
+    console.log("[Chat History Optimization] origin token count:", tokenCount_origin);
+
     // 过滤掉任务状态为'已完成'的任务
     if (finalSummaryInfo && finalSummaryInfo.任务记录 && typeof finalSummaryInfo.任务记录 === 'object') {
         for (const key of Object.keys(finalSummaryInfo.任务记录)) {
@@ -389,7 +392,7 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
         for (let i = finalSummaryInfo.信息记录.length - 1; i >= 0; i--) {
             const item = finalSummaryInfo.信息记录[i];
             // 以按字母序排序后的 JSON 字符串作为唯一标识，避免 key 顺序问题
-            const key = item.主题 + ',' + item.日期;
+            const key = item.主题 + ',' + item.天数;
 
             if (!seen.has(key)) {
                 seen.set(key, i);
@@ -431,7 +434,7 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
                         const makeKey = obj => {
                             if (!obj || typeof obj !== 'object') return '';
                             let time = (typeof obj.时间 === 'string' && obj.时间.trim() !== '' && obj.时间 !== '无效' && obj.时间 !== null && obj.时间 !== undefined) ? obj.时间 : '';
-                            return obj.主题 + ',' + obj.日期 + ',' + time + ',' + obj.地点;
+                            return obj.主题 + ',' + obj.天数 + ',' + time + ',' + obj.地点;
                         };
                         const finalKeys = new Set(finalSummaryInfo.信息记录.slice(Math.max(0, finalSummaryInfo.信息记录.length - 50)).map(makeKey));
                         for (const infoItem of itemObj.信息记录) {
@@ -463,7 +466,7 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
                 const roleObj = finalSummaryInfo.角色信息[roleName];
                 finalSummaryInfo.角色信息[roleName] = {
                     "角色名": roleObj.角色名,
-                    "当前状态": roleObj.当前状态
+                    "情境快照": roleObj.情境快照
                 };
             }
         }
