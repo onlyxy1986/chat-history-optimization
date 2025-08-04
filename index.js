@@ -471,7 +471,14 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
             }
         }
     }
-    const tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
+
+    const mergeThreshold = 60 * 1024;
+    let tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
+    while (tokenCount > mergeThreshold) {
+        finalSummaryInfo.信息记录 = finalSummaryInfo.信息记录.slice(Math.floor(finalSummaryInfo.信息记录.length / 10));
+        tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
+        console.warn("[Chat History Optimization] Summary info is too large, reduce message to count.", tokenCount);
+    }
     $("#token-count").prop("textContent", `${tokenCount}`);
     console.log("[Chat History Optimization] token count:", tokenCount);
 
