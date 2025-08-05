@@ -472,7 +472,7 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
         }
     }
 
-    const mergeThreshold = 60 * 1024;
+    const mergeThreshold = 50 * 1024;
     let tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
     while (tokenCount > mergeThreshold) {
         finalSummaryInfo.信息记录 = finalSummaryInfo.信息记录.slice(Math.floor(finalSummaryInfo.信息记录.length / 10));
