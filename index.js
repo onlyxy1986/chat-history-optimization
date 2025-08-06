@@ -102,17 +102,15 @@ const defaultSettings = {
                 // 值类型: 可以是字符串、数字、布尔值、数组或嵌套对象，根据信息特性灵活选择。
                 // 示例1: "性生活频率": "一周两到三次"
                 // 示例2: "高潮次数": {"当天次数":次数, "累计次数":累计次数}
+            },
+            "角色关系": { // 出场角色之间的关系记录
+                // 示例:
+                // "角色1": {
+                //    "关系": "父子|恋人|主奴|朋友|顾客|仇敌"
+                // }
             }
         }
         // ... 其他角色
-    },
-    "角色关系": { // 出场角色之间的关系记录
-        // 示例:
-        // "角色1": {
-        //     "角色2": {
-        //         "关系": "父子|恋人|主奴|朋友|顾客|仇敌"
-        //     }
-        // }
     }
 }`,
 };
@@ -126,6 +124,10 @@ const wordMapping = {
     "极端": "有些",
     "极度": "有些",
     "扭曲": "抵触"
+}
+
+function printObj(comment, obj) {
+    console.log(`[${comment}]`, JSON.parse(JSON.stringify(obj, null, 2)));
 }
 
 // Loads the extension settings if they exist, otherwise initializes them to the defaults.
@@ -204,9 +206,7 @@ function fixupValue(object) {
 
 function deepMerge(target, source) {
     if (Array.isArray(target) && Array.isArray(source)) {
-        // 去除source中与target重复的item
-        const filteredSource = source.filter(item => !target.includes(item));
-        return target.concat(filteredSource);
+        return target.concat(source);
     }
     if (typeof target !== 'object' || target === null) return source;
     if (typeof source !== 'object' || source === null) return target;
@@ -299,7 +299,7 @@ function mergeRoleDataSummaryInfo(chat) {
 }
 
 function getCharPrompt(finalSummaryInfo) {
-    let charsInfoJsonStr = JSON.stringify(finalSummaryInfo, null, 2);
+    let charsInfoJsonStr = JSON.stringify(finalSummaryInfo);
     for (const [key, value] of Object.entries(wordMapping)) {
         charsInfoJsonStr = charsInfoJsonStr.replace(new RegExp(key, 'g'), value);
     }
@@ -370,9 +370,10 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     }
 
     let finalSummaryInfo = mergeRoleDataInfo(chat);
-    const tokenCount_origin = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
+    const tokenCount_origin = await getTokenCountAsync(JSON.stringify(finalSummaryInfo));
     console.log("[Chat History Optimization] origin token count:", tokenCount_origin);
 
+    delete finalSummaryInfo["角色关系"]; // 删除角色关系信息
     // 过滤掉任务状态为'已完成'的任务
     if (finalSummaryInfo && finalSummaryInfo.任务记录 && typeof finalSummaryInfo.任务记录 === 'object') {
         for (const key of Object.keys(finalSummaryInfo.任务记录)) {
@@ -385,23 +386,23 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     const roleDataSummary = mergeRoleDataSummaryInfo(chat);
     console.log("[Chat History Optimization] roleDataSummary:", roleDataSummary);
     replaceInfoRecordsWithSummary(finalSummaryInfo, roleDataSummary);
-    // 对 finalSummaryInfo.信息记录 去重，保留最后出现的 item，保持原顺序
-    if (finalSummaryInfo && Array.isArray(finalSummaryInfo.信息记录)) {
-        const seen = new Map();
-        // 逆序遍历，记录每个唯一 item 的索引
-        for (let i = finalSummaryInfo.信息记录.length - 1; i >= 0; i--) {
-            const item = finalSummaryInfo.信息记录[i];
-            // 以按字母序排序后的 JSON 字符串作为唯一标识，避免 key 顺序问题
-            const key = item.主题 + ',' + item.天数;
+    // // 对 finalSummaryInfo.信息记录 去重，保留最后出现的 item，保持原顺序
+    // if (finalSummaryInfo && Array.isArray(finalSummaryInfo.信息记录)) {
+    //     const seen = new Map();
+    //     // 逆序遍历，记录每个唯一 item 的索引
+    //     for (let i = finalSummaryInfo.信息记录.length - 1; i >= 0; i--) {
+    //         const item = finalSummaryInfo.信息记录[i];
+    //         // 以按字母序排序后的 JSON 字符串作为唯一标识，避免 key 顺序问题
+    //         const key = item.主题 + ',' + item.天数;
 
-            if (!seen.has(key)) {
-                seen.set(key, i);
-            }
-        }
-        // 按原顺序保留最后出现的 item
-        const uniqueRecords = Array.from(seen.values()).sort((a, b) => a - b).map(idx => finalSummaryInfo.信息记录[idx]);
-        finalSummaryInfo.信息记录 = uniqueRecords;
-    }
+    //         if (!seen.has(key)) {
+    //             seen.set(key, i);
+    //         }
+    //     }
+    //     // 按原顺序保留最后出现的 item
+    //     const uniqueRecords = Array.from(seen.values()).sort((a, b) => a - b).map(idx => finalSummaryInfo.信息记录[idx]);
+    //     finalSummaryInfo.信息记录 = uniqueRecords;
+    // }
     // 收集所有出现在信息记录中的角色
     let infoRolesSet = new Set();
     for (let j = 1; j < chat.length; j++) {
@@ -473,10 +474,10 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     }
 
     const mergeThreshold = 50 * 1024;
-    let tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
+    let tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo));
     while (tokenCount > mergeThreshold) {
         finalSummaryInfo.信息记录 = finalSummaryInfo.信息记录.slice(Math.floor(finalSummaryInfo.信息记录.length / 10));
-        tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo, null, 2));
+        tokenCount = await getTokenCountAsync(JSON.stringify(finalSummaryInfo));
         console.warn("[Chat History Optimization] Summary info is too large, reduce message to count.", tokenCount);
     }
     $("#token-count").prop("textContent", `${tokenCount}`);
