@@ -396,7 +396,8 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
                 const roleObj = finalSummaryInfo.角色信息[roleName];
                 finalSummaryInfo.角色信息[roleName] = {
                     "角色名": roleObj.角色名,
-                    "情境快照": roleObj.情境快照
+                    "情景快照": roleObj.情景快照,
+                    "角色关系": roleObj.角色关系,
                 };
             }
         }
