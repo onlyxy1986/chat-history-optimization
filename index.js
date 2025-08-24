@@ -243,11 +243,11 @@ function mergeRoleDataInfo(chat) {
             let full_update = false;
             let matches = [...item.mes
                 .replace(/\/\/.*$/gm, '')
-                .matchAll(/<ROLE_DATA_DELTA_UPDATE>((?:(?!<ROLE_DATA_DELTA_UPDATE>)[\s\S])*?)<\/ROLE_DATA_DELTA_UPDATE>/gi)];
+                .matchAll(/<delta>((?:(?!<delta>)[\s\S])*?)<\/delta>/gi)];
             if (matches.length == 0) {
                 matches = [...item.swipes[item.swipe_id]
                     .replace(/\/\/.*$/gm, '')
-                    .matchAll(/<ROLE_DATA_DELTA_UPDATE>((?:(?!<ROLE_DATA_DELTA_UPDATE>)[\s\S])*?)<\/ROLE_DATA_DELTA_UPDATE>/gi)];
+                    .matchAll(/<delta>((?:(?!<delta>)[\s\S])*?)<\/delta>/gi)];
             }
             if (matches.length == 0) {
                 matches = [...item.swipes[item.swipe_id]
@@ -280,7 +280,7 @@ function mergeRoleDataInfo(chat) {
     }
 
     if (failedChars.length > 0) {
-        console.warn(`[Chat History Optimization] Failed to parse or missing <ROLE_DATA_DELTA_UPDATE> at chat indexes: ${failedChars.join(', ')}`);
+        console.warn(`[Chat History Optimization] Failed to parse or missing <delta> at chat indexes: ${failedChars.join(', ')}`);
         $("#chars-failed").prop("textContent", failedChars.join(', '));
     } else {
         $("#chars-failed").prop("textContent", "无");
@@ -302,10 +302,10 @@ function getCharPrompt(finalSummaryInfo) {
 ${charsInfoJsonStr}
 </ROLE_DATA>
 ------
-**在回复末尾生成<ROLE_DATA_DELTA_UPDATE>信息，提取<ROLE_DATA>发生改变的字段（严格遵循字段注释中的规则），省略未改变字段，确保输出为有效JSON。**
-<ROLE_DATA_DELTA_UPDATE>
+**在<content>结尾生成<delta>信息，提取<ROLE_DATA>发生改变的字段（严格遵循字段注释中的规则），省略未改变字段，确保输出为有效JSON。**
+<delta>
 ${$("#char_prompt_textarea").val()}
-</ROLE_DATA_DELTA_UPDATE>
+</delta>
 ------
 
 </ROLE_PLAY>
@@ -341,11 +341,11 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
         if (item && !item.is_user && item.swipes && item.swipes[item.swipe_id]) {
             let matches = [...item.mes
                 .replace(/\/\/.*$/gm, '')
-                .matchAll(/<ROLE_DATA_DELTA_UPDATE>((?:(?!<ROLE_DATA_DELTA_UPDATE>)[\s\S])*?)<\/ROLE_DATA_DELTA_UPDATE>/gi)];
+                .matchAll(/<delta>((?:(?!<delta>)[\s\S])*?)<\/delta>/gi)];
             if (matches.length == 0) {
                 matches = [...item.swipes[item.swipe_id]
                     .replace(/\/\/.*$/gm, '')
-                    .matchAll(/<ROLE_DATA_DELTA_UPDATE>((?:(?!<ROLE_DATA_DELTA_UPDATE>)[\s\S])*?)<\/ROLE_DATA_DELTA_UPDATE>/gi)];
+                    .matchAll(/<delta>((?:(?!<delta>)[\s\S])*?)<\/delta>/gi)];
             }
             if (matches.length > 0) {
                 let jsonStr = matches[matches.length - 1][1].trim();
@@ -450,7 +450,7 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
             .filter(item => item && item.is_user === false)
             .map(item => (item.mes || '')
                 .replace(/<thinking>[\s\S]*?<\/thinking>/g, '<thinking>\nFILL YOUR THINKING\n<\/thinking>').trim()
-                .replace(/<ROLE_DATA_DELTA_UPDATE>((?:(?!<ROLE_DATA_DELTA_UPDATE>)[\s\S])*?)<\/ROLE_DATA_DELTA_UPDATE>/gi, '<ROLE_DATA_DELTA_UPDATE>\n//IMPORTANT INFORMATION, FILL IT\n<\/ROLE_DATA_DELTA_UPDATE>').trim());
+                .replace(/<delta>((?:(?!<delta>)[\s\S])*?)<\/delta>/gi, '<delta>\n//IMPORTANT INFORMATION, FILL IT\n<\/delta>').trim());
         finalSummaryInfo.前文 = tail.join('\n');
     } else {
         finalSummaryInfo.前文 = "";
@@ -459,7 +459,7 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     printObj("[Chat History Optimization] Final Summary Info Post", finalSummaryInfo);
     chat[chat.length - 1]['mes'] = "用户输入:" + chat[chat.length - 1]['mes'] + "\n\n" + getCharPrompt(finalSummaryInfo);
     if (chat.length == 2 && chat[0].is_user === false && chat[1].is_user === true) {
-        chat[chat.length - 1]['mes'] = chat[chat.length - 1]['mes'] + "（此为首条信息，必须完整地把所有可能的信息都记录到<ROLE_DATA_DELTA_UPDATE>中）";
+        chat[chat.length - 1]['mes'] = chat[chat.length - 1]['mes'] + "（此为首条信息，必须完整地把所有可能的信息都记录到<delta>中）";
     }
     mergedChat.push(chat[chat.length - 1])
 
