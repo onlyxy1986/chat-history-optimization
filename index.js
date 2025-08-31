@@ -449,8 +449,8 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
             .slice(startIdx)
             .filter(item => item && item.is_user === false)
             .map(item => (item.mes || '')
-                .replace(/<thinking>[\s\S]*?<\/thinking>/g, '<thinking>\nFILL YOUR THINKING\n<\/thinking>').trim()
-                .replace(/<delta>((?:(?!<delta>)[\s\S])*?)<\/delta>/gi, '<delta>\n//IMPORTANT INFORMATION, FILL IT\n<\/delta>').trim());
+                .replace(/<thinking>[\s\S]*?<\/thinking>/g, '').trim()
+                .replace(/<delta>((?:(?!<delta>)[\s\S])*?)<\/delta>/gi, '<delta>\n//IMPORTANT INFORMATION, FILL IT\n</delta>').trim());
         finalSummaryInfo.前文 = tail.join('\n');
     } else {
         finalSummaryInfo.前文 = "";
