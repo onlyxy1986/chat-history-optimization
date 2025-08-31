@@ -302,7 +302,7 @@ function getCharPrompt(finalSummaryInfo) {
 ${charsInfoJsonStr}
 </ROLE_DATA>
 ------
-**在<content>结尾生成<delta>信息，提取<ROLE_DATA>发生改变的字段（严格遵循字段注释中的规则），省略未改变字段，确保输出为有效JSON。**
+**在正文后生成<delta>信息，提取<ROLE_DATA>发生改变的字段（严格遵循字段注释中的规则），省略未改变字段，确保输出为有效JSON。**
 <delta>
 ${$("#char_prompt_textarea").val()}
 </delta>
@@ -448,9 +448,12 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
         let tail = chat
             .slice(startIdx)
             .filter(item => item && item.is_user === false)
-            .map(item => (item.mes || '')
-                .replace(/<thinking>[\s\S]*?<\/thinking>/g, '').trim()
-                .replace(/<delta>((?:(?!<delta>)[\s\S])*?)<\/delta>/gi, '<delta>\n//IMPORTANT INFORMATION, FILL IT\n</delta>').trim());
+            .map(item => {
+                if (!item || !item.mes) return '';
+                // 提取 </thinking> 到 <delta> 之间的内容（不包含标签本身）
+                const match = item.mes.match(/<\/thinking>([\s\S]*?)<delta>/i);
+                return match ? match[1].trim() : '';
+            });
         finalSummaryInfo.前文 = tail.join('\n');
     } else {
         finalSummaryInfo.前文 = "";
