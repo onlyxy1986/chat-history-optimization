@@ -452,7 +452,7 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
                 if (!item || !item.mes) return '';
                 // 提取 </thinking> 到 <delta> 之间的内容（不包含标签本身）
                 const match = item.mes.match(/<\/thinking>([\s\S]*?)<delta>/i);
-                return match ? match[1].trim() : '';
+                return match ? match[1].trim() : item.mes;
             });
         finalSummaryInfo.前文 = tail.join('\n');
     } else {
