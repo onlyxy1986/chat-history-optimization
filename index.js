@@ -14,6 +14,7 @@ const context = SillyTavern.getContext();
 // Keep track of where your extension is located, name should match repo name
 const extensionName = "chat-history-optimization";
 const extensionFolderPath = `scripts/extensions/third-party/${extensionName}`;
+const mergeThreshold = 50 * 1024;
 const defaultSettings = {
     extensionToggle: false,
     keepCount: 3,
@@ -261,16 +262,19 @@ function mergeRoleDataInfo(chat) {
 
     for (let j = 1; j < chat.length; j++) {
         const item = chat[j];
-        if (item && !item.is_user && item.swipes && item.swipes[item.swipe_id]) {
-            let full_update = false;
-            let matches = [...item.mes
-                .replace(/\/\/.*$/gm, '')
-                .matchAll(/<delta>((?:(?!<delta>)[\s\S])*?)<\/delta>/gi)];
-            if (matches.length == 0) {
+        if (item && (("is_user" in item && !item.is_user) || (item.role && item.role == "assistant"))) {
+            let matches = [];
+            if (item.mes) {
+                matches = [...item.mes
+                    .replace(/\/\/.*$/gm, '')
+                    .matchAll(/<delta>((?:(?!<delta>)[\s\S])*?)<\/delta>/gi)];
+            }
+            if (matches.length == 0 && ("swipes" in item && "swipe_id" in item && item.swipes[item.swipe_id])) {
                 matches = [...item.swipes[item.swipe_id]
                     .replace(/\/\/.*$/gm, '')
                     .matchAll(/<delta>((?:(?!<delta>)[\s\S])*?)<\/delta>/gi)];
             }
+            printObj(`[Chat History Optimization] chat[${j}] <delta> matches`, matches);
             if (matches.length > 0) {
                 let jsonStr = matches[matches.length - 1][1].trim();
                 try {
@@ -392,17 +396,6 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
         }
     }
 
-    const mergeThreshold = 50 * 1024;
-    let tokenCount = await getTokenCountAsync(JSON.stringify(finalRoleDataInfo));
-    while (tokenCount > mergeThreshold) {
-        finalRoleDataInfo.信息记录 = finalRoleDataInfo.信息记录.slice(Math.floor(finalRoleDataInfo.信息记录.length / 10));
-        tokenCount = await getTokenCountAsync(JSON.stringify(finalRoleDataInfo));
-        console.warn("[Chat History Optimization] Summary info is too large, reduce message to count.", tokenCount);
-    }
-    $("#token-count").prop("textContent", `${tokenCount}`);
-    console.log("[Chat History Optimization] token count:", tokenCount);
-
-    const mergedChat = [];
     // 保留倒数第 keepCount 条 assistant 消息及其后的所有信息
     let assistantIdxArr = [];
     for (let i = 0; i < chat.length; i++) {
@@ -428,7 +421,17 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
         finalRoleDataInfo.前文 = "";
     }
 
+    let tokenCount = await getTokenCountAsync(JSON.stringify(finalRoleDataInfo));
+    while (tokenCount > mergeThreshold) {
+        finalRoleDataInfo.信息记录 = finalRoleDataInfo.信息记录.slice(Math.floor(finalRoleDataInfo.信息记录.length / 10));
+        tokenCount = await getTokenCountAsync(JSON.stringify(finalRoleDataInfo));
+        console.warn("[Chat History Optimization] Summary info is too large, reduce message to count.", tokenCount);
+    }
+    $("#token-count").prop("textContent", `${tokenCount}`);
+    console.log("[Chat History Optimization] token count:", tokenCount);
     printObj("[Chat History Optimization] Final Summary Info Post", finalRoleDataInfo);
+
+    const mergedChat = [];
     chat[chat.length - 1]['mes'] = "用户输入:" + chat[chat.length - 1]['mes'] + "\n\n" + getCharPrompt(finalRoleDataInfo);
     if (chat.length == 2 && chat[0].is_user === false && chat[1].is_user === true) {
         chat[chat.length - 1]['mes'] = chat[chat.length - 1]['mes'] + "（此为首条信息，<delta>中需要参考`前文`和当前输出的信息）";
@@ -437,13 +440,30 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
 
     // 用 mergedChat 替换 chat 的内容
     chat.length = 0;
-
     for (const item of mergedChat) {
         chat.push(item);
     }
-
     console.log("[Chat History Optimization] new chat history:", chat);
 }
+
+async function handleVariablesInMessage(message_id) {
+    const chat = await TavernHelper.getChatMessages(`0-${message_id}`, { include_swipes: true });
+    printObj("[Chat History Optimization] Original Chat History", chat);
+    let finalRoleDataInfo = mergeRoleDataInfo(chat);
+    printObj("[Chat History Optimization] Merged Role Data Info", finalRoleDataInfo);
+    if (finalRoleDataInfo.mvu) {
+        await TavernHelper.insertOrAssignVariables(
+            {
+                stat_data: finalRoleDataInfo.mvu,
+            },
+            { type: 'message', message_id: message_id }
+        );
+        printObj("[Chat History Optimization] MVU inserted/updated", finalRoleDataInfo.mvu);
+    } else {
+        console.log("[Chat History Optimization] No MVU found in the chat history.");
+    }
+}
+eventSource.on(event_types.MESSAGE_RECEIVED, handleVariablesInMessage);
 
 // This function is called when the extension is loaded
 jQuery(async () => {
