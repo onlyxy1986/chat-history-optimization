@@ -233,6 +233,10 @@ function fixupValue(object) {
             object['脚'] = object['全身'];
             delete object['全身'];
         }
+
+        if ('精神状态' in object) {
+            delete object['精神状态'];
+        }
     }
     return object
 }
