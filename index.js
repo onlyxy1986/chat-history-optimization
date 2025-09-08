@@ -256,9 +256,10 @@ function deepMerge(target, source) {
     return result;
 }
 
-function mergeRoleDataInfo(chat) {
+function mergeDataInfo(chat) {
     let failedChars = [];
-    let mergedObj = {};
+    let mergedRoleData = {};
+    let mergedMvuData = {};
 
     for (let j = 1; j < chat.length; j++) {
         const item = chat[j];
@@ -274,7 +275,6 @@ function mergeRoleDataInfo(chat) {
                     .replace(/\/\/.*$/gm, '')
                     .matchAll(/<delta>((?:(?!<delta>)[\s\S])*?)<\/delta>/gi)];
             }
-            printObj(`[Chat History Optimization] chat[${j}] <delta> matches`, matches);
             if (matches.length > 0) {
                 let jsonStr = matches[matches.length - 1][1].trim();
                 try {
@@ -284,12 +284,40 @@ function mergeRoleDataInfo(chat) {
                         continue;
                     }
                     const itemObj = JSON.parse(objMatch[0]);
-                    mergedObj = deepMerge(mergedObj, itemObj);
+                    mergedRoleData = deepMerge(mergedRoleData, itemObj);
                 } catch (e) {
-                    console.error(`[Chat History Optimization] JSON parse error at chat[${j}]:`, e);
+                    console.error(`[Chat History Optimization] delta JSON parse error at chat[${j}]:`, e);
                     failedChars.push(j);
                 }
-            } else {
+            } else if (mergedRoleData) {
+                failedChars.push(j);
+            }
+            matches = [];
+            if (item.mes) {
+                matches = [...item.mes
+                    .replace(/\/\/.*$/gm, '')
+                    .matchAll(/<mvu_change>((?:(?!<mvu_change>)[\s\S])*?)<\/mvu_change>/gi)];
+            }
+            if (matches.length == 0 && ("swipes" in item && "swipe_id" in item && item.swipes[item.swipe_id])) {
+                matches = [...item.swipes[item.swipe_id]
+                    .replace(/\/\/.*$/gm, '')
+                    .matchAll(/<mvu_change>((?:(?!<mvu_change>)[\s\S])*?)<\/mvu_change>/gi)];
+            }
+            if (matches.length > 0) {
+                let jsonStr = matches[matches.length - 1][1].trim();
+                try {
+                    const objMatch = jsonStr.match(/\{[\s\S]*\}/);
+                    if (!objMatch) {
+                        failedChars.push(j);
+                        continue;
+                    }
+                    const itemObj = JSON.parse(objMatch[0]);
+                    mergedMvuData = deepMerge(mergedMvuData, itemObj);
+                } catch (e) {
+                    console.error(`[Chat History Optimization] MVU JSON parse error at chat[${j}]:`, e);
+                    failedChars.push(j);
+                }
+            } else if (mergedMvuData) {
                 failedChars.push(j);
             }
         }
@@ -302,11 +330,14 @@ function mergeRoleDataInfo(chat) {
         $("#chars-failed").prop("textContent", "无");
     }
 
-    return mergedObj;
+    return {
+        "roledata": mergedRoleData,
+        "mvudata": mergedMvuData,
+    };
 }
 
-function getCharPrompt(finalSummaryInfo) {
-    let charsInfoJsonStr = JSON.stringify(finalSummaryInfo);
+function getCharPrompt(mergedDataInfo) {
+    let charsInfoJsonStr = JSON.stringify(mergedDataInfo.roledata || {});
     for (const [key, value] of Object.entries(wordMapping)) {
         charsInfoJsonStr = charsInfoJsonStr.replace(new RegExp(key, 'g'), value);
     }
@@ -317,12 +348,23 @@ function getCharPrompt(finalSummaryInfo) {
 <ROLE_DATA>
 ${charsInfoJsonStr}
 </ROLE_DATA>
-------
-**在正文后生成<delta>信息，提取<ROLE_DATA>发生改变的字段（严格遵循字段注释中的规则），省略未改变字段，确保输出为有效JSON。**
-<delta>
+<ROLE_DATA_TEMPLATE> // **ROLE_DATA的字段指引模板**
 ${$("#char_prompt_textarea").val()}
+</ROLE_DATA_TEMPLATE>
+------
+**在正文后生成<delta>信息，提取<ROLE_DATA>发生改变的字段（严格遵循<ROLE_DATA_TEMPLATE>字段注释中的规则），省略未改变字段，确保输出为有效JSON。**
+<delta>
+//change of role data, output valid JSON only
 </delta>
 ------
+<MVU_DATA>
+${JSON.stringify(mergedDataInfo.mvudata || {})}
+</MVU_DATA>
+------
+**在正文后生成<delta>信息，提取<ROLE_DATA>发生改变的字段（严格遵循字段注释中的规则），省略未改变字段，确保输出为有效JSON。**
+<mvu_change>
+//change of mvu data, output valid JSON only
+</mvu_change>
 
 </ROLE_PLAY>
 `
@@ -335,7 +377,8 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
         return;
     }
 
-    let finalRoleDataInfo = mergeRoleDataInfo(chat);
+    let mergedDataInfo = mergeDataInfo(chat);
+    let finalRoleDataInfo = mergedDataInfo.roledata || {};
     const tokenCount_origin = await getTokenCountAsync(JSON.stringify(finalRoleDataInfo));
     console.log("[Chat History Optimization] origin token count:", tokenCount_origin);
     printObj("[Chat History Optimization] Final Summary Info Pre", finalRoleDataInfo);
@@ -429,10 +472,11 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     }
     $("#token-count").prop("textContent", `${tokenCount}`);
     console.log("[Chat History Optimization] token count:", tokenCount);
-    printObj("[Chat History Optimization] Final Summary Info Post", finalRoleDataInfo);
+    mergedDataInfo.roledata = finalRoleDataInfo
+    printObj("[Chat History Optimization] Final Summary Info Post", mergedDataInfo);
 
     const mergedChat = [];
-    chat[chat.length - 1]['mes'] = "用户输入:" + chat[chat.length - 1]['mes'] + "\n\n" + getCharPrompt(finalRoleDataInfo);
+    chat[chat.length - 1]['mes'] = "用户输入:" + chat[chat.length - 1]['mes'] + "\n\n" + getCharPrompt(mergedDataInfo);
     if (chat.length == 2 && chat[0].is_user === false && chat[1].is_user === true) {
         chat[chat.length - 1]['mes'] = chat[chat.length - 1]['mes'] + "（此为首条信息，<delta>中需要参考`前文`和当前输出的信息）";
     }
@@ -449,16 +493,18 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
 async function handleVariablesInMessage(message_id) {
     const chat = await TavernHelper.getChatMessages(`0-${message_id}`, { include_swipes: true });
     printObj("[Chat History Optimization] Original Chat History", chat);
-    let finalRoleDataInfo = mergeRoleDataInfo(chat);
-    printObj("[Chat History Optimization] Merged Role Data Info", finalRoleDataInfo);
-    if (finalRoleDataInfo.mvu) {
+    const mergedData = mergeDataInfo(chat);
+    printObj("[Chat History Optimization] Merged Role Data Info", mergedData);
+    let mvudata = mergedData.mvudata || {};
+    printObj("[Chat History Optimization] Merged MVU Data Info", mvudata);
+    if (mvudata) {
         await TavernHelper.insertOrAssignVariables(
             {
-                stat_data: finalRoleDataInfo.mvu,
+                stat_data: mvudata,
             },
             { type: 'message', message_id: message_id }
         );
-        printObj("[Chat History Optimization] MVU inserted/updated", finalRoleDataInfo.mvu);
+        printObj("[Chat History Optimization] MVU inserted/updated", mvudata);
     } else {
         console.log("[Chat History Optimization] No MVU found in the chat history.");
     }
