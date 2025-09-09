@@ -263,7 +263,6 @@ function deepMerge(target, source) {
 function mergeDataInfo(chat) {
     let failedChars = [];
     let mergedRoleData = {};
-    let mergedMvuData = {};
 
     for (let j = 1; j < chat.length; j++) {
         const item = chat[j];
@@ -296,34 +295,6 @@ function mergeDataInfo(chat) {
             } else if (mergedRoleData) {
                 failedChars.push(j);
             }
-            matches = [];
-            if (item.mes) {
-                matches = [...item.mes
-                    .replace(/\/\/.*$/gm, '')
-                    .matchAll(/<mvu_change>((?:(?!<mvu_change>)[\s\S])*?)<\/mvu_change>/gi)];
-            }
-            if (matches.length == 0 && ("swipes" in item && "swipe_id" in item && item.swipes[item.swipe_id])) {
-                matches = [...item.swipes[item.swipe_id]
-                    .replace(/\/\/.*$/gm, '')
-                    .matchAll(/<mvu_change>((?:(?!<mvu_change>)[\s\S])*?)<\/mvu_change>/gi)];
-            }
-            if (matches.length > 0) {
-                let jsonStr = matches[matches.length - 1][1].trim();
-                try {
-                    const objMatch = jsonStr.match(/\{[\s\S]*\}/);
-                    if (!objMatch) {
-                        failedChars.push(j);
-                        continue;
-                    }
-                    const itemObj = JSON.parse(objMatch[0]);
-                    mergedMvuData = deepMerge(mergedMvuData, itemObj);
-                } catch (e) {
-                    console.error(`[Chat History Optimization] MVU JSON parse error at chat[${j}]:`, e);
-                    failedChars.push(j);
-                }
-            } else if (mergedMvuData) {
-                failedChars.push(j);
-            }
         }
     }
 
@@ -335,8 +306,7 @@ function mergeDataInfo(chat) {
     }
 
     return {
-        "roledata": mergedRoleData,
-        "mvudata": mergedMvuData,
+        "roledata": mergedRoleData
     };
 }
 
