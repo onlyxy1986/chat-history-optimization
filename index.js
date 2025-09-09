@@ -360,15 +360,6 @@ ${$("#char_prompt_textarea").val()}
 <delta>
 //change of role data, output valid JSON only
 </delta>
-------
-<MVU_DATA>
-${JSON.stringify(mergedDataInfo.mvudata || {})}
-</MVU_DATA>
-------
-**在正文后生成<delta>信息，提取<ROLE_DATA>发生改变的字段（严格遵循字段注释中的规则），省略未改变字段，确保输出为有效JSON。**
-<mvu_change>
-//change of mvu data, output valid JSON only
-</mvu_change>
 
 </ROLE_PLAY>
 `
@@ -494,26 +485,6 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     console.log("[Chat History Optimization] new chat history:", chat);
 }
 
-async function handleVariablesInMessage(message_id) {
-    const chat = await TavernHelper.getChatMessages(`0-${message_id}`, { include_swipes: true });
-    printObj("[Chat History Optimization] Original Chat History", chat);
-    const mergedData = mergeDataInfo(chat);
-    printObj("[Chat History Optimization] Merged Role Data Info", mergedData);
-    let mvudata = mergedData.mvudata || {};
-    printObj("[Chat History Optimization] Merged MVU Data Info", mvudata);
-    if (mvudata) {
-        await TavernHelper.insertOrAssignVariables(
-            {
-                stat_data: mvudata,
-            },
-            { type: 'message', message_id: message_id }
-        );
-        printObj("[Chat History Optimization] MVU inserted/updated", mvudata);
-    } else {
-        console.log("[Chat History Optimization] No MVU found in the chat history.");
-    }
-}
-eventSource.on(event_types.MESSAGE_RECEIVED, handleVariablesInMessage);
 
 // This function is called when the extension is loaded
 jQuery(async () => {
