@@ -380,8 +380,8 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
                         continue;
                     }
                     const itemObj = JSON.parse(objMatch[0]);
-                    if (itemObj && itemObj.角色卡 && typeof itemObj.角色卡 === 'object') {
-                        for (const roleName of Object.keys(itemObj.角色卡)) {
+                    if (itemObj && itemObj.正文出场或提及到的角色) {
+                        for (const roleName of itemObj.正文出场或提及到的角色.split(/[，,、\s]+/)) {
                             infoRolesSet.add(roleName);
                         }
                     }
@@ -395,7 +395,7 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     // 处理角色信息，只保留未出现角色的角色名和当前状态
     if (finalRoleDataInfo && finalRoleDataInfo.角色卡 && typeof finalRoleDataInfo.角色卡 === 'object') {
         for (const roleName of Object.keys(finalRoleDataInfo.角色卡)) {
-            if (!infoRolesSet.has(roleName)) {
+            if (!infoRolesSet.has(roleName) && !chat[chat.length - 1]['mes'].includes(roleName)) {
                 const roleObj = finalRoleDataInfo.角色卡[roleName];
                 finalRoleDataInfo.角色卡[roleName] = {
                     "角色状态": { "情景快照": roleObj.角色状态.情景快照 },
