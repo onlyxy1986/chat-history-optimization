@@ -385,6 +385,11 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
                             infoRolesSet.add(roleName);
                         }
                     }
+                    if (itemObj && itemObj.角色卡 && typeof itemObj.角色卡 === 'object') {
+                        for (const roleName of Object.keys(itemObj.角色卡)) {
+                            infoRolesSet.add(roleName);
+                        }
+                    }
                 } catch (e) {
                 }
             }
