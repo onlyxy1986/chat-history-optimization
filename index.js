@@ -403,7 +403,7 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
             if (!infoRolesSet.has(roleName) && !chat[chat.length - 1]['mes'].includes(roleName)) {
                 const roleObj = finalRoleDataInfo.角色卡[roleName];
                 finalRoleDataInfo.角色卡[roleName] = {
-                    "角色状态": { "情景快照": roleObj.角色状态.场景快照 },
+                    "角色状态": { "场景快照": roleObj.角色状态?.场景快照 },
                     "角色关系": roleObj.角色关系,
                 };
             }
