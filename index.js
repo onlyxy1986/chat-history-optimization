@@ -348,7 +348,7 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     const tokenCount_origin = await getTokenCountAsync(JSON.stringify(finalRoleDataInfo));
     console.log("[Chat History Optimization] origin token count:", tokenCount_origin);
     printObj("[Chat History Optimization] Final Summary Info Pre", finalRoleDataInfo);
-
+    $("#token-count").prop("textContent", "1");
     // 过滤掉任务状态为'已完成'的任务
     if (finalRoleDataInfo && finalRoleDataInfo.任务记录 && typeof finalRoleDataInfo.任务记录 === 'object') {
         for (const key of Object.keys(finalRoleDataInfo.任务记录)) {
@@ -395,7 +395,7 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
             }
         }
     }
-
+    $("#token-count").prop("textContent", "2");
     console.log("[Chat History Optimization] infoRolesSet:", infoRolesSet);
     // 处理角色信息，只保留未出现角色的角色名和当前状态
     if (finalRoleDataInfo && finalRoleDataInfo.角色卡 && typeof finalRoleDataInfo.角色卡 === 'object') {
@@ -409,7 +409,7 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
             }
         }
     }
-
+    $("#token-count").prop("textContent", "3");
     // 保留倒数第 keepCount 条 assistant 消息及其后的所有信息
     let assistantIdxArr = [];
     for (let i = 0; i < chat.length; i++) {
@@ -434,7 +434,7 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     } else {
         finalRoleDataInfo.前文 = "";
     }
-
+    $("#token-count").prop("textContent", "4");
     let tokenCount = await getTokenCountAsync(JSON.stringify(finalRoleDataInfo));
     while (tokenCount > mergeThreshold) {
         finalRoleDataInfo.故事历程 = finalRoleDataInfo.故事历程.slice(Math.floor(finalRoleDataInfo.故事历程.length / 10));
