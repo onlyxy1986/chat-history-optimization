@@ -19,8 +19,14 @@
                 <input step="1" value="3" max="100" min="0" class="text_pole" type="number" id="keep_count">
             </div>
             <div class="marginTop5">
+                <label for="token_limit">
+                    <span>Token限制</span>
+                </label>
+                <input type="text" value="3" max="100" min="0" class="text_pole" id="token_limit">
+            </div>
+            <div class="marginTop5">
                 <label title="错误统计">
-                    <span>人物总结失败的楼层: </span>
+                    <span>失败的楼层: </span>
                     <span id="chars-failed">无</span>
                 </label>
             </div>
@@ -32,7 +38,7 @@
             </div>
             <div class="marginTop5">
                 <label for="char_prompt_textarea">
-                    <span>角色总结JSON模板</span>
+                    <span>JSON模板</span>
                     <small id="char_prompt_validity" style="color:#888">(有效性检测)</small>
                     <button id="char_prompt_reset" type="button" style="margin-left:8px;">重置</button>
                 </label>

@@ -14,10 +14,10 @@ const context = SillyTavern.getContext();
 // Keep track of where your extension is located, name should match repo name
 const extensionName = "chat-history-optimization";
 const extensionFolderPath = `scripts/extensions/third-party/${extensionName}`;
-const mergeThreshold = 50 * 1024;
 const defaultSettings = {
     extensionToggle: false,
     keepCount: 3,
+    tokenLimit: 50 * 1024,
     charPrompt: `{
     // 天数: 第1天开始计数的天数
     // 日期: 世界观下当前日期,如无日期信息,则从第1天开始
@@ -25,6 +25,7 @@ const defaultSettings = {
     "天数": "第1天",
     "日期": "日期",
     "星期": "星期一",
+    "正文出场或提及到的角色": "{{角色名1}},{{角色名2}},{{角色名3}},...",
     "任务记录": { // 任务记录：识别任务或委托信息，并及时更新状态
         "{{任务名}}": {
             "发布者": "{{角色名}}",
@@ -170,21 +171,23 @@ function printObj(comment, obj) {
 async function loadSettings() {
     //Create the settings if they don't exist
     extension_settings[extensionName] = extension_settings[extensionName] || {};
-    console.warn("extension_settings[extensionName] 1", extension_settings[extensionName]);
-    if (Object.keys(extension_settings[extensionName]).length === 0 || !Object.keys(defaultSettings).every(key => key in extension_settings[extensionName])) {
-        Object.assign(extension_settings[extensionName], defaultSettings);
-    }
-    console.warn("extension_settings[extensionName] 2", extension_settings[extensionName]);
     // Updating settings in the UI
-    $("#extension_toggle").prop("checked", extension_settings[extensionName].extensionToggle).trigger("input");
-    $("#keep_count").prop("value", extension_settings[extensionName].keepCount).trigger("input");
+    $("#extension_toggle").prop("checked", extension_settings[extensionName].extensionToggle ?? defaultSettings.extensionToggle).trigger("input");
+    $("#keep_count").prop("value", extension_settings[extensionName].keepCount ?? defaultSettings.keepCount).trigger("input");
     // 加载 charPrompt 到 textarea
-    $("#char_prompt_textarea").prop("value", extension_settings[extensionName].charPrompt).trigger("input");
+    $("#char_prompt_textarea").prop("value", extension_settings[extensionName].charPrompt ?? defaultSettings.charPrompt).trigger("input");
+    $("#token_limit").prop("value", extension_settings[extensionName].tokenLimit ?? defaultSettings.tokenLimit).trigger("input");
 }
 
 function onToggleInput(event) {
     const value = Boolean($(event.target).prop("checked"));
     extension_settings[extensionName].extensionToggle = value;
+    saveSettingsDebounced();
+}
+
+function onTokenLimitInput(event) {
+    const value = parseInt($(event.target).prop("value"));
+    extension_settings[extensionName].tokenLimit = value;
     saveSettingsDebounced();
 }
 
@@ -244,8 +247,9 @@ function fixupValue(object) {
 
 function deepMerge(target, source) {
     if (Array.isArray(target) && Array.isArray(source)) {
-        // 去除source中与target重复的item
-        const filteredSource = source.filter(item => !target.includes(item));
+        // 过滤 source 中 target 已经存在的 item，比较方式是 JSON.stringify
+        const targetStrSet = new Set(target.map(item => JSON.stringify(item)));
+        const filteredSource = source.filter(item => !targetStrSet.has(JSON.stringify(item)));
         return target.concat(filteredSource);
     }
     if (typeof target !== 'object' || target === null) return source;
@@ -402,7 +406,7 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
         for (const roleName of Object.keys(finalRoleDataInfo.角色卡)) {
             if (!infoRolesSet.has(roleName) && !chat[chat.length - 1]['mes'].includes(roleName)) {
                 const roleObj = finalRoleDataInfo.角色卡[roleName];
-                if(!roleObj) continue;
+                if (!roleObj) continue;
                 finalRoleDataInfo.角色卡[roleName] = {
                     "角色状态": { "场景快照": roleObj.角色状态?.场景快照 },
                     "角色关系": roleObj.角色关系,
@@ -437,7 +441,7 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     }
     $("#token-count").prop("textContent", "4");
     let tokenCount = await getTokenCountAsync(JSON.stringify(finalRoleDataInfo));
-    while (tokenCount > mergeThreshold) {
+    while (tokenCount > extension_settings[extensionName].tokenLimit) {
         finalRoleDataInfo.故事历程 = finalRoleDataInfo.故事历程.slice(Math.floor(finalRoleDataInfo.故事历程.length / 10));
         tokenCount = await getTokenCountAsync(JSON.stringify(finalRoleDataInfo));
         console.warn("[Chat History Optimization] Summary info is too large, reduce message to count.", tokenCount);
@@ -476,6 +480,7 @@ jQuery(async () => {
     $("#extension_toggle").on("input", onToggleInput);
     $("#keep_count").on("input", onKeepCountInput);
     $("#char_prompt_textarea").on("input", onCharPromptInput);
+    $("#token_limit").on("input", onTokenLimitInput);
     $("#char_prompt_reset").on("click", function () {
         // 恢复为默认模板
         $("#char_prompt_textarea").val(defaultSettings.charPrompt).trigger("input");
