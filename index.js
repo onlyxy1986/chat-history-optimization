@@ -452,9 +452,9 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     printObj("[Chat History Optimization] Final Summary Info Post", mergedDataInfo);
 
     const mergedChat = [];
-    chat[chat.length - 1]['mes'] = "用户输入:" + chat[chat.length - 1]['mes'] + "\n\n" + getCharPrompt(mergedDataInfo);
+    chat[chat.length - 1]['mes'] = getCharPrompt(mergedDataInfo);
     if (chat.length == 2 && chat[0].is_user === false && chat[1].is_user === true) {
-        chat[chat.length - 1]['mes'] = chat[chat.length - 1]['mes'] + "（此为首条信息，<delta>中需要参考`前文`和当前输出的信息）";
+        chat[chat.length - 1]['mes'] = chat[chat.length - 1]['mes'] + "\n（此为首条信息，<delta>中需要参考`前文`和当前输出的信息）";
     }
     mergedChat.push(chat[chat.length - 1])
 
