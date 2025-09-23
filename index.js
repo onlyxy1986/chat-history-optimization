@@ -153,8 +153,8 @@ const defaultSettings = {
 };
 
 const wordMapping = {
-    "崩溃": "臣服",
-    "绝望": "释然",
+    "崩溃": "恐惧",
+    "绝望": "害怕",
     "空洞": "迷离",
     "麻木": "挣扎",
     "认命": "求生欲",
@@ -268,6 +268,7 @@ function deepMerge(target, source) {
 function mergeDataInfo(chat) {
     let failedChars = [];
     let mergedRoleData = {};
+    let mergedRoleDataHistory = {};
 
     for (let j = 1; j < chat.length; j++) {
         const item = chat[j];
@@ -293,6 +294,7 @@ function mergeDataInfo(chat) {
                     }
                     const itemObj = JSON.parse(objMatch[0]);
                     mergedRoleData = deepMerge(mergedRoleData, itemObj);
+                    mergedRoleDataHistory[j] = mergedRoleData;
                 } catch (e) {
                     console.error(`[Chat History Optimization] delta JSON parse error at chat[${j}]:`, e);
                     failedChars.push(j);
@@ -311,7 +313,8 @@ function mergeDataInfo(chat) {
     }
 
     return {
-        "roledata": mergedRoleData
+        "roledata": mergedRoleData,
+        "roledata_history": mergedRoleDataHistory
     };
 }
 
