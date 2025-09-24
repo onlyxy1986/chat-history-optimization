@@ -1,4 +1,4 @@
-// The main script for the extension
+*// The main script for the extension
 // The following are examples of some basic extension functionality
 
 //You'll likely need to import extension_settings, getContext, and loadExtensionSettings from extensions.js
@@ -215,7 +215,7 @@ function onCharPromptInput(event) {
     saveSettingsDebounced();
 }
 
-function fixupValue(object) {
+function fixupValue(key,object) {
     if (object && typeof object === 'object' && !Array.isArray(object)) {
         // 移除 count 为 0 的 item
         for (const key in object) {
@@ -241,6 +241,11 @@ function fixupValue(object) {
         if ('精神' in object) {
             delete object['精神'];
         }
+
+        // 错误格式特殊修正
+        if ('角色关系' in object && key === '角色状态')  {
+            delete object['角色关系'];
+        }
     }
     return object
 }
@@ -257,7 +262,7 @@ function deepMerge(target, source) {
     const result = { ...target };
     for (const key of Object.keys(source)) {
         if (key in target) {
-            result[key] = fixupValue(deepMerge(target[key], source[key]));
+            result[key] = fixupValue(key,deepMerge(target[key], source[key]));
         } else {
             result[key] = source[key];
         }
@@ -411,8 +416,7 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
                 const roleObj = finalRoleDataInfo.角色卡[roleName];
                 if (!roleObj) continue;
                 finalRoleDataInfo.角色卡[roleName] = {
-                    "角色状态": { "场景快照": roleObj.角色状态?.场景快照 },
-                    "角色关系": roleObj.角色关系,
+                    "角色状态": { "场景快照": roleObj.角色状态?.场景快照 }
                 };
             }
         }
