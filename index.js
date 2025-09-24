@@ -1,4 +1,4 @@
-*// The main script for the extension
+// The main script for the extension
 // The following are examples of some basic extension functionality
 
 //You'll likely need to import extension_settings, getContext, and loadExtensionSettings from extensions.js
