@@ -334,6 +334,16 @@ ${$("#char_prompt_textarea").val()}
     return prompt;
 }
 
+function isCharNameRecent(chat, charName, recentThreshold = 10) {
+    for (let j = chat.length - 1; j >= 0 && j >= chat.length - recentThreshold; j--) {
+        const item = chat[j];
+        if (item && item.mes && item.mes.includes(charName)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, abort, type) {
     if (!extension_settings[extensionName].extensionToggle) {
         console.info("[Chat History Optimization] extension is disabled.")
@@ -342,6 +352,13 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
 
     let mergedDataInfo = mergeDataInfo(chat);
     let finalRoleDataInfo = mergedDataInfo.roledata || {};
+
+    // 更新角色下拉框和信息显示
+    if (finalRoleDataInfo.角色卡 && typeof finalRoleDataInfo.角色卡 === 'object') {
+        globalThis.updateRoleSelectAndInfo(JSON.parse(JSON.stringify(finalRoleDataInfo.角色卡)));
+    } else {
+        globalThis.updateRoleSelectAndInfo({});
+    }
     const tokenCount_origin = await getTokenCountAsync(JSON.stringify(finalRoleDataInfo));
     console.log("[Chat History Optimization] origin token count:", tokenCount_origin);
     printObj("[Chat History Optimization] Final Summary Info Pre", finalRoleDataInfo);
@@ -355,54 +372,11 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
             }
         }
     }
-    // 收集所有出现在信息记录中的角色
-    let infoRolesSet = new Set();
-    for (let j = chat.length - 1; j >= 0 && j >= chat.length - 10; j--) {
-        const item = chat[j];
-        if (item && !item.is_user && item.swipes && item.swipes[item.swipe_id]) {
-            let matches = [...item.mes
-                .replace(/\/\/.*$/gm, '')
-                .matchAll(/<delta>((?:(?!<delta>)[\s\S])*?)<\/delta>/gi)];
-            if (matches.length == 0) {
-                matches = [...item.swipes[item.swipe_id]
-                    .replace(/\/\/.*$/gm, '')
-                    .matchAll(/<delta>((?:(?!<delta>)[\s\S])*?)<\/delta>/gi)];
-            }
-            if (matches.length > 0) {
-                let jsonStr = matches[matches.length - 1][1].trim();
-                try {
-                    const objMatch = jsonStr.match(/\{[\s\S]*\}/);
-                    if (!objMatch) {
-                        failedChars.push(j);
-                        continue;
-                    }
-                    const itemObj = JSON.parse(objMatch[0]);
-                    if (itemObj && itemObj.正文出场或提及到的角色) {
-                        for (const roleName of itemObj.正文出场或提及到的角色.split(/[，,、\s]+/)) {
-                            infoRolesSet.add(roleName);
-                        }
-                    }
-                    if (itemObj && itemObj.角色卡 && typeof itemObj.角色卡 === 'object') {
-                        for (const roleName of Object.keys(itemObj.角色卡)) {
-                            infoRolesSet.add(roleName);
-                        }
-                    }
-                } catch (e) {
-                }
-            }
-        }
-    }
-    $("#token-count").prop("textContent", "2");
-    console.log("[Chat History Optimization] infoRolesSet:", infoRolesSet);
-    // 处理角色信息，只保留未出现角色的角色名和当前状态
+    // 处理角色信息，只保留最近或将要提及的角色信息
     if (finalRoleDataInfo && finalRoleDataInfo.角色卡 && typeof finalRoleDataInfo.角色卡 === 'object') {
         for (const roleName of Object.keys(finalRoleDataInfo.角色卡)) {
-            if (!infoRolesSet.has(roleName) && !chat[chat.length - 1]['mes'].includes(roleName)) {
-                const roleObj = finalRoleDataInfo.角色卡[roleName];
-                if (!roleObj) continue;
-                finalRoleDataInfo.角色卡[roleName] = {
-                    "角色状态": { "场景快照": roleObj.角色状态?.场景快照 }
-                };
+            if (!isCharNameRecent(chat, roleName, 10)) {
+                finalRoleDataInfo.角色卡[roleName] = {};
             }
         }
     }
@@ -477,6 +451,64 @@ jQuery(async () => {
         // 恢复为默认模板
         $("#char_prompt_textarea").val(defaultSettings.charPrompt).trigger("input");
     });
+
+    // 角色信息显示相关逻辑
+    // 用于存储最新的角色卡信息
+    let latestRoleCard = {};
+
+    // 渲染角色下拉框
+    function renderRoleSelect(roleCardObj) {
+        const $select = $("#role_select");
+        $select.empty();
+        if (!roleCardObj || typeof roleCardObj !== 'object') {
+            $select.append('<option value="">无角色</option>');
+            return;
+        }
+        $select.append('<option value="">请选择角色</option>');
+        Object.keys(roleCardObj).forEach(roleName => {
+            $select.append(`<option value="${roleName}">${roleName}</option>`);
+        });
+    }
+
+    // 角色信息格式化显示
+    function formatRoleInfo(roleObj) {
+        if (!roleObj || typeof roleObj !== 'object') return '<span style="color:#888">无信息</span>';
+        // 递归格式化为HTML
+        function render(obj, indent = 0) {
+            let html = '';
+            for (const key in obj) {
+                if (!obj.hasOwnProperty(key)) continue;
+                const value = obj[key];
+                const pad = '&nbsp;'.repeat(indent * 2);
+                if (typeof value === 'object' && value !== null) {
+                    html += `<div>${pad}<b>${key}:</b><div style="margin-left:16px;">${render(value, indent + 1)}</div></div>`;
+                } else {
+                    html += `<div>${pad}<b>${key}:</b> ${value}</div>`;
+                }
+            }
+            return html;
+        }
+        return render(roleObj);
+    }
+
+    // 监听角色选择变化
+    $(document).on('change', '#role_select', function () {
+        const selected = $(this).val();
+        const $display = $('#role_info_display');
+        if (selected && latestRoleCard[selected]) {
+            $display.html(formatRoleInfo(latestRoleCard[selected]));
+        } else {
+            $display.html('<span style="color:#888">请选择角色以查看信息</span>');
+        }
+    });
+
+    // 提供外部调用以更新角色卡和下拉框
+    globalThis.updateRoleSelectAndInfo = function (roleCardObj) {
+        latestRoleCard = roleCardObj || {};
+        renderRoleSelect(latestRoleCard);
+        // 清空显示区
+        $('#role_info_display').html('<span style="color:#888">请选择角色以查看信息</span>');
+    };
 
     // Load settings when starting things up (if you have any)
     loadSettings();
