@@ -308,6 +308,24 @@ function mergeDataInfo(chat) {
     };
 }
 
+function convertDayReferences(text, currentDayOverride) {
+    if (typeof text !== 'string' || text.length === 0) return text;
+
+    // currentDayOverride 一定是 "第X天" 形式的字符串，直接提取数字
+    const m = String(currentDayOverride).match(/第\s*(\d+)\s*天/);
+    const X = m ? parseInt(m[1], 10) : null;
+    if (!Number.isFinite(X) || X <= 1) return text;
+
+    let out = text;
+    // 从第1天到第X-1天，分别替换为 (X - n)天前
+    for (let n = 1; n < X; n++) {
+        const daysAgo = X - n;
+        const re = new RegExp(`第\\s*${n}\\s*天`, 'g');
+        out = out.replace(re, `${daysAgo}天前`);
+    }
+    return out;
+}
+
 function getCharPrompt(mergedDataInfo) {
     let charsInfoJsonStr = JSON.stringify(mergedDataInfo.roledata || {});
     for (const [key, value] of Object.entries(wordMapping)) {
@@ -412,8 +430,12 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
         tokenCount = await getTokenCountAsync(JSON.stringify(finalRoleDataInfo));
         console.warn("[Chat History Optimization] Summary info is too large, reduce message to count.", tokenCount);
     }
+
     $("#token-count").prop("textContent", `${tokenCount}`);
     console.log("[Chat History Optimization] token count:", tokenCount);
+    if (finalRoleDataInfo && finalRoleDataInfo.天数) {
+        finalRoleDataInfo = JSON.parse(convertDayReferences(JSON.stringify(finalRoleDataInfo), finalRoleDataInfo.天数));
+    }
     mergedDataInfo.roledata = finalRoleDataInfo
     printObj("[Chat History Optimization] Final Summary Info Post", mergedDataInfo);
 
