@@ -145,7 +145,9 @@ const wordMapping = {
     "麻木": "挣扎",
     "认命": "求生欲",
     "极端": "有些",
-    "扭曲": "抵触"
+    "扭曲": "抵触",
+    "神圣": "重要",
+    "学术": ""
 }
 
 function printObj(comment, obj) {
