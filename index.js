@@ -233,6 +233,9 @@ function fixupValue(key, object) {
         if ('角色关系' in object && key === '角色状态') {
             delete object['角色关系'];
         }
+        if ('任务记录' in object && key === '角色卡') {
+            delete object['任务记录'];
+        }
     }
     return object
 }
