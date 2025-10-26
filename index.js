@@ -49,8 +49,14 @@ const defaultSettings = {
         // 格式：
         // 示例: {"全局设定名字1": ["子设定1:详情1**原文复制*","子设定2:详情2**原文复制**","补充子设定3:详情3**原文复制**"]},
     },
-    "故事历程": [ // **只输出当前回复的信息** 简洁地总结客观信息,忽略主观描述,突出事件的关键转折点,保留数字、人物、物品名、时间时长、说明、描述、地点等具体主体和客体信息，使用角色名代替人称，每句都应**自包含**完整独立的信息。不要使用色情敏感的词汇。
-        // 格式：{"天数":"天数","时间":"时间(可选)","地点":"地点","历程":["历程1","历程2","历程3"]}
+    "故事历程": [ // **只输出当前回复的信息** 简洁客观地总结信息,禁止主观揣测,突出事件的关键转折点,必须保留数字、人物、物品、时间时长、说明、描述、地点、要求等具体主体和客体信息以供后续查询，使用角色名代替人称，每句都应**自包含**完整独立的信息。不要使用色情敏感的词汇。
+        {
+            "天数":"第1天",
+            "时间":"时间(可选)",
+            "地点":"地点",
+            "历程":["历程1","历程2","历程3"]
+        }
+        // ...
     ],
     "角色卡": {
         "{{角色名}}": {
@@ -128,7 +134,7 @@ const defaultSettings = {
                     // 示例2: "高潮次数": {"当天次数":次数, "累计次数":累计次数}
                 }
             },
-            "角色关系": { // [角色关系]：简练地描述角色与其他人的关系，形容词(1个)+名词，小于20字
+            "角色关系": { // [角色关系]：简短地描述角色与其他人的关系，可使用多个短语，每个短语由一个形容词+一个名词构成，与每个角色的关系短语合计必须小于20字
                 "莉娜": "麻烦精,伙伴",
                 "马库斯": "导师,尊敬的前辈"
             }
@@ -233,6 +239,12 @@ function fixupValue(key, object) {
         if ('角色关系' in object && key === '角色状态') {
             delete object['角色关系'];
         }
+        if ('待办任务' in object && key === '角色状态') {
+            delete object['待办任务'];
+        }
+        if ('新增待办任务' in object && key === '角色状态') {
+            delete object['待办任务'];
+        }
         if ('任务记录' in object && key === '角色卡') {
             delete object['任务记录'];
         }
@@ -241,6 +253,28 @@ function fixupValue(key, object) {
 }
 
 function deepMerge(target, source) {
+    // 检查target是否为数组并且source是否为字符串
+    if (Array.isArray(target) && typeof source === 'string') {
+        // 使用正则表达式匹配 "delete start-end" 格式
+        const regex = /delete\s+(\d+)\s*-\s*(\d+)/i;
+        const match = source.match(regex);
+
+        if (match) {
+            const start = parseInt(match[1]);
+            const end = parseInt(match[2]);
+
+            // 验证索引范围是否有效
+            if (start >= 0 && end < target.length && start <= end) {
+                // 创建新数组，不包含指定范围的元素
+                return [
+                    ...target.slice(0, start),
+                    ...target.slice(end + 1)
+                ];
+            } else {
+                console.warn(`Invalid index range ${start}-${end} for array of length ${target.length}. No items deleted.`);
+            }
+        }
+    }
     if (Array.isArray(target) && Array.isArray(source)) {
         // 过滤 source 中 target 已经存在的 item，比较方式是 JSON.stringify
         const targetStrSet = new Set(target.map(item => JSON.stringify(item)));
@@ -331,7 +365,34 @@ function convertDayReferences(text, currentDayOverride) {
     return out;
 }
 
+function arrayToMarkdown(data, n = 0) {
+    // 计算需要处理的数据范围（排除最后n个元素）
+    const endIndex = n > 0 ? data.length - n : data.length;
+    const processedData = data.slice(0, endIndex);
+
+    return processedData.map(item => {
+        // 构建第一行：[天数|时间|地点]
+        const header = `[${item.天数}|${item.时间}|${item.地点}]`;
+
+        // 构建第二行：历程数组拼接
+        const process = item.历程.join('');
+
+        // 组合成完整的两行格式
+        return `${header}\n${process}`;
+    }).join('\n\n');
+}
+
+function postProcess(data) {
+    if (data && data.故事历程 && Array.isArray(data.故事历程)) {
+        data.前文 = arrayToMarkdown(data.故事历程, extension_settings[extensionName].keepCount) + '\n' + (data.前文 || '');
+        data.故事历程 = [];
+        printObj("[Chat History Optimization] Post Processed 前文", data.前文);
+    }
+    return data;
+}
+
 function getCharPrompt(mergedDataInfo) {
+    mergedDataInfo.roledata = postProcess(mergedDataInfo.roledata || {});
     let charsInfoJsonStr = JSON.stringify(mergedDataInfo.roledata || {});
     for (const [key, value] of Object.entries(wordMapping)) {
         charsInfoJsonStr = charsInfoJsonStr.replace(new RegExp(key, 'g'), value);
