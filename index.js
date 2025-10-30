@@ -11,6 +11,8 @@ import { eventSource, event_types } from "../../../../script.js";
 
 const context = SillyTavern.getContext();
 
+let json_template = null;
+
 // Keep track of where your extension is located, name should match repo name
 const extensionName = "chat-history-optimization";
 const extensionFolderPath = `scripts/extensions/third-party/${extensionName}`;
@@ -37,11 +39,12 @@ const defaultSettings = {
             "任务状态": "已过期/进行中/已完成",
             "任务进度": "任务进度",
             "任务要求": {
-                "主要要求": "完整未删减的任务主要求",
-                "次要要求1": "(可选)完整未删减的任务次要要求1"
+                // "主要要求": "完整未删减的任务主要求",
+                // "次要要求1": "(可选)完整未删减的任务次要要求1"
                 // ... 其它次要要求
             },
-            "任务奖励": "任务奖励"
+            "任务奖励": "任务奖励",
+            "失败惩罚": "失败惩罚"
             // ... 其他任务信息
         }
         // ... 其他任务
@@ -133,8 +136,8 @@ const defaultSettings = {
                 }
             },
             "角色关系": { // [角色关系]：角色与其他人的社会关系，只能是一个名词
-                "莉娜": "伙伴",
-                "马库斯": "导师"
+                // "莉娜": "伙伴",
+                // "马库斯": "导师"
             }
         }
         // ... 其他角色
@@ -194,10 +197,12 @@ function onCharPromptInput(event) {
     let jsonStr = val.replace(/\/\/.*$/gm, '');
     let isValid = false;
     try {
-        JSON.parse(jsonStr);
+        json_template = JSON.parse(jsonStr);
+        printObj("[Chat History Optimization] Loaded char prompt template", json_template);
         isValid = true;
     } catch (e) {
         console.error(`[Chat History Optimization] JSON parse error`, jsonStr, e);
+        json_template = null;
         isValid = false;
     }
     // 设置 index.html 选中区标签内容
@@ -234,34 +239,62 @@ function fixupValue(key, object) {
         }
 
         // 错误格式特殊修正
-        if ('角色关系' in object && key === '角色状态') {
-            delete object['角色关系'];
-        }
-        if ('待办任务' in object && key === '角色状态') {
-            delete object['待办任务'];
-        }
-        if ('新增待办任务' in object && key === '角色状态') {
-            delete object['新增待办任务'];
-        }
-        if ('待办事项' in object && key === '角色状态') {
-            delete object['待办事项'];
-        }
-        if ('待办事项' in object && key === '角色状态') {
-            delete object['待办事项'];
-        }
-        if ('羞辱记录' in object && key === '角色状态') {
-            delete object['羞辱记录'];
-        }
+        // if ('角色关系' in object && key === '角色状态') {
+        //     delete object['角色关系'];
+        // }
+        // if ('待办任务' in object && key === '角色状态') {
+        //     delete object['待办任务'];
+        // }
+        // if ('新增待办任务' in object && key === '角色状态') {
+        //     delete object['新增待办任务'];
+        // }
+        // if ('待办事项' in object && key === '角色状态') {
+        //     delete object['待办事项'];
+        // }
+        // if ('待办事项' in object && key === '角色状态') {
+        //     delete object['待办事项'];
+        // }
+        // if ('羞辱记录' in object && key === '角色状态') {
+        //     delete object['羞辱记录'];
+        // }
     }
     return object
 }
 
-function deepMerge(target, source) {
+function checkPath(path) {
+    let current = json_template;
+    for (let j = 0; j < path.length; j++) {
+        let key = path[j];
+        if (key in current) {
+            if (typeof current[key] === 'object' && Object.keys(current[key]).length === 0) {
+                return true;
+            } else {
+                current = current[key];
+                continue;
+            }
+        }
+        if (typeof current === 'object' && Object.keys(current).length === 1 && Object.keys(current)[0].startsWith("{{") && Object.keys(current)[0].endsWith("}}")) {
+            // 动态键，继续深入
+            current = current[Object.keys(current)[0]];
+            continue;
+        }
+
+        // workaround for "和{{user}}的最新沟通"
+        if (key.includes("最新沟通") && "和{{user}}的最新沟通" in current) {
+            current = current["和{{user}}的最新沟通"];
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+function deepMerge(target, delta, path = []) {
     // 检查target是否为数组并且source是否为字符串
-    if (Array.isArray(target) && typeof source === 'string') {
+    if (Array.isArray(target) && typeof delta === 'string') {
         // 使用正则表达式匹配 "delete start-end" 格式
         const regex = /delete\s+(\d+)\s*-\s*(\d+)/i;
-        const match = source.match(regex);
+        const match = delta.match(regex);
 
         if (match) {
             const start = parseInt(match[1]);
@@ -279,20 +312,22 @@ function deepMerge(target, source) {
             }
         }
     }
-    if (Array.isArray(target) && Array.isArray(source)) {
+    if (Array.isArray(target) && Array.isArray(delta)) {
         // 过滤 source 中 target 已经存在的 item，比较方式是 JSON.stringify
         const targetStrSet = new Set(target.map(item => JSON.stringify(item)));
-        const filteredSource = source.filter(item => !targetStrSet.has(JSON.stringify(item)));
+        const filteredSource = delta.filter(item => !targetStrSet.has(JSON.stringify(item)));
         return target.concat(filteredSource);
     }
-    if (typeof target !== 'object' || target === null) return source;
-    if (typeof source !== 'object' || source === null) return target;
+    if (typeof target !== 'object' || target === null) return delta;
+    if (typeof delta !== 'object' || delta === null) return target;
     const result = { ...target };
-    for (const key of Object.keys(source)) {
+    for (const key of Object.keys(delta)) {
         if (key in target) {
-            result[key] = fixupValue(key, deepMerge(target[key], source[key]));
+            result[key] = fixupValue(key, deepMerge(target[key], delta[key], path.concat(key)));
+        } else if (checkPath(path.concat(key))) {
+            result[key] = delta[key];
         } else {
-            result[key] = source[key];
+            console.warn(`[Chat History Optimization] Skipping unknown key at path: ${path.concat(key).join(' -> ')}`);
         }
     }
     return result;
@@ -485,7 +520,7 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
             .filter(item => item && item.is_user === false)
             .map(item => {
                 if (!item || !item.mes) return '';
-                // 提取 </thinking> 到 <delta> 之间的内容（不包含标签本身）
+                // 提取 </thinking> 到 <post_thinking> 之间的内容（不包含标签本身）
                 const match = item.mes.match(/<\/thinking>([\s\S]*?)<post_thinking>/i);
                 return match ? match[1].trim() : item.mes;
             });
