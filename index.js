@@ -360,6 +360,7 @@ function mergeDataInfo(chat) {
                         failedChars.push(j);
                         continue;
                     }
+                    objMatch[0] = objMatch[0].replace(/<你好和谐>/g, '');
                     const itemObj = JSON.parse(objMatch[0]);
                     mergedRoleData = deepMerge(mergedRoleData, itemObj);
                     mergedRoleDataHistory[j] = mergedRoleData;
