@@ -279,11 +279,6 @@ function checkPath(path) {
             continue;
         }
 
-        // workaround for "和{{user}}的最新沟通"
-        if (key.includes("最新沟通") && "和{{user}}的最新沟通" in current) {
-            current = current["和{{user}}的最新沟通"];
-            continue;
-        }
         return false;
     }
     return true;
