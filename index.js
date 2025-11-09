@@ -157,6 +157,8 @@ const wordMapping = {
     "学术": ""
 }
 
+let nameMapping = {};
+
 function printObj(comment, obj) {
     console.log(`[${comment}]`, JSON.parse(JSON.stringify(obj, null, 2)));
 }
@@ -237,28 +239,8 @@ function fixupValue(key, object) {
         if ('精神' in object) {
             delete object['精神'];
         }
-
-        // 错误格式特殊修正
-        // if ('角色关系' in object && key === '角色状态') {
-        //     delete object['角色关系'];
-        // }
-        // if ('待办任务' in object && key === '角色状态') {
-        //     delete object['待办任务'];
-        // }
-        // if ('新增待办任务' in object && key === '角色状态') {
-        //     delete object['新增待办任务'];
-        // }
-        // if ('待办事项' in object && key === '角色状态') {
-        //     delete object['待办事项'];
-        // }
-        // if ('待办事项' in object && key === '角色状态') {
-        //     delete object['待办事项'];
-        // }
-        // if ('羞辱记录' in object && key === '角色状态') {
-        //     delete object['羞辱记录'];
-        // }
     }
-    return object
+    return object;
 }
 
 function checkPath(path) {
@@ -284,9 +266,9 @@ function checkPath(path) {
     return true;
 }
 
-function deepMerge(target, delta, path = []) {
+function deepMerge(merged, delta, path = []) {
     // 检查target是否为数组并且source是否为字符串
-    if (Array.isArray(target) && typeof delta === 'string') {
+    if (Array.isArray(merged) && typeof delta === 'string') {
         // 使用正则表达式匹配 "delete start-end" 格式
         const regex = /delete\s+(\d+)\s*-\s*(\d+)/i;
         const match = delta.match(regex);
@@ -296,36 +278,36 @@ function deepMerge(target, delta, path = []) {
             const end = parseInt(match[2]);
 
             // 验证索引范围是否有效
-            if (start >= 0 && end < target.length && start <= end) {
+            if (start >= 0 && end < merged.length && start <= end) {
                 // 创建新数组，不包含指定范围的元素
                 return [
-                    ...target.slice(0, start),
-                    ...target.slice(end + 1)
+                    ...merged.slice(0, start),
+                    ...merged.slice(end + 1)
                 ];
             } else {
-                console.warn(`Invalid index range ${start}-${end} for array of length ${target.length}. No items deleted.`);
+                console.warn(`Invalid index range ${start}-${end} for array of length ${merged.length}. No items deleted.`);
             }
         }
     }
-    if (Array.isArray(target) && Array.isArray(delta)) {
+    if (Array.isArray(merged) && Array.isArray(delta)) {
         // 过滤 source 中 target 已经存在的 item，比较方式是 JSON.stringify
-        const targetStrSet = new Set(target.map(item => JSON.stringify(item)));
+        const targetStrSet = new Set(merged.map(item => JSON.stringify(item)));
         const filteredSource = delta.filter(item => !targetStrSet.has(JSON.stringify(item)));
-        return target.concat(filteredSource);
+        return merged.concat(filteredSource);
     }
-    if (typeof target !== 'object' || target === null) return delta;
-    if (typeof delta !== 'object' || delta === null) return target;
-    const result = { ...target };
+    if (typeof merged !== 'object' || merged === null) return delta;
+    if (typeof delta !== 'object' || delta === null) return merged;
+    const result = { ...merged };
     for (const key of Object.keys(delta)) {
-        if (key in target) {
-            result[key] = fixupValue(key, deepMerge(target[key], delta[key], path.concat(key)));
+        if (key in merged) {
+            merged[key] = fixupValue(key, deepMerge(merged[key], delta[key], path.concat(key)));
         } else if (checkPath(path.concat(key))) {
-            result[key] = delta[key];
+            merged[key] = delta[key];
         } else {
             console.warn(`[Chat History Optimization] Skipping unknown key at path: ${path.concat(key).join(' -> ')}`);
         }
     }
-    return result;
+    return merged;
 }
 
 function mergeDataInfo(chat) {
@@ -358,6 +340,11 @@ function mergeDataInfo(chat) {
                     objMatch[0] = objMatch[0].replace(/<你好和谐>/g, '');
                     const itemObj = JSON.parse(objMatch[0]);
                     mergedRoleData = deepMerge(mergedRoleData, itemObj);
+                    for (const roleName of Object.keys(nameMapping)) {
+                        if (!mergedRoleData.角色卡 || !(roleName in mergedRoleData.角色卡)) continue;
+                        mergedRoleData.角色卡[nameMapping[roleName]] = mergedRoleData.角色卡[roleName];
+                        delete mergedRoleData.角色卡[roleName];
+                    }
                     mergedRoleDataHistory[j] = mergedRoleData;
                 } catch (e) {
                     console.error(`[Chat History Optimization] delta JSON parse error at chat[${j}]:`, e);
@@ -472,6 +459,15 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     let mergedDataInfo = mergeDataInfo(chat);
     let finalRoleDataInfo = mergedDataInfo.roledata || {};
 
+    // 处理角色别名信息
+    if (finalRoleDataInfo && finalRoleDataInfo.角色卡 && typeof finalRoleDataInfo.角色卡 === 'object') {
+        for (const roleName of Object.keys(finalRoleDataInfo.角色卡)) {
+            if (finalRoleDataInfo.角色卡[roleName] && finalRoleDataInfo.角色卡[roleName].角色设定 && finalRoleDataInfo.角色卡[roleName].角色设定.角色名 && roleName !== finalRoleDataInfo.角色卡[roleName].角色设定.角色名) {
+                nameMapping[roleName] = finalRoleDataInfo.角色卡[roleName].角色设定.角色名;
+            }
+        }
+    }
+    printObj("[Chat History Optimization] Mapped Role Names", nameMapping);
     // 更新角色下拉框和信息显示
     if (finalRoleDataInfo.角色卡 && typeof finalRoleDataInfo.角色卡 === 'object') {
         globalThis.updateRoleSelectAndInfo(JSON.parse(JSON.stringify(finalRoleDataInfo.角色卡)));
