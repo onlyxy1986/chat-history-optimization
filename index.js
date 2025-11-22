@@ -397,7 +397,15 @@ function arrayToMarkdown(data, n = 0) {
         const header = `[${item.天数}|${item.时间}|${item.地点}]`;
 
         // 构建第二行：历程数组拼接
-        const process = item.历程.join('');
+        const process = (Array.isArray(item.历程) ? item.历程 : [])
+            .map(entry => {
+                let s = entry == null ? '' : String(entry).trim();
+                if (s === '') return '';
+                // 如果不是以中文句号或英文句号结尾，则追加中文句号
+                if (!(/[。\.]$/.test(s))) s += '。';
+                return s;
+            })
+            .join('');
 
         // 组合成完整的两行格式
         return `${header}\n${process}`;
