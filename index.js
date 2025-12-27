@@ -239,6 +239,14 @@ function fixupValue(key, object) {
         if ('精神' in object) {
             delete object['精神'];
         }
+
+        if ('心理' in object) {
+            delete object['心理'];
+        }
+
+        if ('心态' in object) {
+            delete object['心态'];
+        }
     }
     return object;
 }
@@ -472,6 +480,9 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
         for (const roleName of Object.keys(finalRoleDataInfo.角色卡)) {
             if (finalRoleDataInfo.角色卡[roleName] && finalRoleDataInfo.角色卡[roleName].角色设定 && finalRoleDataInfo.角色卡[roleName].角色设定.角色名 && roleName !== finalRoleDataInfo.角色卡[roleName].角色设定.角色名) {
                 nameMapping[roleName] = finalRoleDataInfo.角色卡[roleName].角色设定.角色名;
+            }
+            if (finalRoleDataInfo.角色卡[roleName] && finalRoleDataInfo.角色卡[roleName].角色状态 && finalRoleDataInfo.角色卡[roleName].角色状态.短期身体特征) {
+                delete finalRoleDataInfo.角色卡[roleName].角色状态.短期身体特征;
             }
         }
     }
