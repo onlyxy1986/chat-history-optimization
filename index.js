@@ -6,8 +6,6 @@ import { extension_settings, getContext, loadExtensionSettings } from "../../../
 import { getTokenCountAsync } from '../../../tokenizers.js';
 //You'll likely need to import some other functions from the main script
 import { saveSettingsDebounced, this_chid, characters } from "../../../../script.js";
-import { getRegexedString, regex_placement } from '../../../extensions/regex/engine.js';
-import { eventSource, event_types } from "../../../../script.js";
 
 const context = SillyTavern.getContext();
 
@@ -305,7 +303,7 @@ function deepMerge(merged, delta, path = []) {
     }
     if (typeof merged !== 'object' || merged === null) return delta;
     if (typeof delta !== 'object' || delta === null) return merged;
-    const result = { ...merged };
+    const preDay = merged.天数 || null;
     for (const key of Object.keys(delta)) {
         if (key in merged) {
             merged[key] = fixupValue(key, deepMerge(merged[key], delta[key], path.concat(key)));
@@ -313,6 +311,17 @@ function deepMerge(merged, delta, path = []) {
             merged[key] = delta[key];
         } else {
             console.warn(`[Chat History Optimization] Skipping unknown key at path: ${path.concat(key).join(' -> ')}`);
+        }
+    }
+    const postDay = merged.天数 || null;
+    if (postDay && preDay !== postDay) {
+        console.log(`[Chat History Optimization] Day changed from ${preDay} to ${postDay}`);
+        if (merged && merged.角色卡 && typeof merged.角色卡 === 'object') {
+            for (const roleName of Object.keys(merged.角色卡)) {
+                if (merged.角色卡[roleName].角色状态 && merged.角色卡[roleName].角色状态.穿戴) {
+                    merged.角色卡[roleName].角色状态.穿戴 = {};
+                }
+            }
         }
     }
     return merged;
