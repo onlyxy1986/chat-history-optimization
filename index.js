@@ -525,7 +525,7 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     // 处理角色信息，只保留最近或将要提及的角色信息
     if (finalRoleDataInfo && finalRoleDataInfo.角色卡 && typeof finalRoleDataInfo.角色卡 === 'object') {
         for (const roleName of Object.keys(finalRoleDataInfo.角色卡)) {
-            if (!isCharNameRecent(chat, roleName, 10)) {
+            if (!isCharNameRecent(chat, roleName, 20)) {
                 finalRoleDataInfo.角色卡[roleName] = {};
             }
         }
