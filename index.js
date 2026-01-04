@@ -217,7 +217,7 @@ function fixupValue(key, object) {
         for (const key in object) {
             if (Object.prototype.hasOwnProperty.call(object, key)) {
                 const item = object[key];
-                if (item && typeof item === 'object' && '数量' in item && ((item.数量 == 0) || (item.数量 == "0"))) {
+                if (item && typeof item === 'object' && (('数量' in item && ((item.数量 == 0) || (item.数量 == "0"))) || ('物品说明' in item && !('数量' in item)))) {
                     delete object[key];
                 }
             }
@@ -432,8 +432,8 @@ function arrayToMarkdown(data, n = 0) {
         }
 
         // 组合成完整的两行格式
-        return `${header}\n${process}`;
-    }).join('\n\n');
+        return `${header.trim()}\n${process.trim()}`;
+    }).join('\n');
 }
 
 function postProcess(data) {
@@ -488,6 +488,11 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
         return;
     }
 
+    printObj("[Chat History Optimization] Original chat history:", chat);
+    let isFirstMessage = false;
+    if (chat.length == 2 && chat[0].is_user === false && chat[1].is_user === true) {
+        isFirstMessage = true;
+    }
     let mergedDataInfo = mergeDataInfo(chat);
     let finalRoleDataInfo = mergedDataInfo.roledata || {};
 
@@ -502,7 +507,7 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
             }
         }
     }
-    printObj("[Chat History Optimization] Mapped Role Names", nameMapping);
+
     // 更新角色下拉框和信息显示
     if (finalRoleDataInfo.角色卡 && typeof finalRoleDataInfo.角色卡 === 'object') {
         globalThis.updateRoleSelectAndInfo(JSON.parse(JSON.stringify(finalRoleDataInfo.角色卡)));
@@ -573,8 +578,8 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
 
     const mergedChat = [];
     chat[chat.length - 1]['mes'] = getCharPrompt(mergedDataInfo);
-    if (chat.length == 2 && chat[0].is_user === false && chat[1].is_user === true) {
-        chat[chat.length - 1]['mes'] = chat[chat.length - 1]['mes'] + "\n（此为首条信息，<delta>中需要参考`前文`和当前输出的信息）";
+    if (isFirstMessage) {
+        chat[chat.length - 1]['mes'] = chat[chat.length - 1]['mes'] + "\n（此为首条信息，<delta>中需要参考`前文`和当前输出的信息生成全量信息，尤其注意'故事历程'需额外添加`前文`的历程）";
     }
     mergedChat.push(chat[chat.length - 1])
 
