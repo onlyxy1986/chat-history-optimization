@@ -240,6 +240,11 @@ function checkPath(path) {
     return true;
 }
 
+function isPrimitive(val) {
+    return val === null || (typeof val !== 'object' && typeof val !== 'function');
+}
+
+
 function deepMerge(merged, delta, path = []) {
     if (path.length == 0 && delta.故事历程总结 && merged.故事历程) {
         merged.故事历程 = [];
@@ -280,7 +285,13 @@ function deepMerge(merged, delta, path = []) {
         if (key in merged) {
             merged[key] = fixupValue(key, deepMerge(merged[key], delta[key], path.concat(key)));
         } else if (checkPath(path.concat(key))) {
-            merged[key] = delta[key];
+            if (Array.isArray(delta[key])) {
+                merged[key] = fixupValue(key, deepMerge([], delta[key], path.concat(key)));
+            } else if (typeof delta[key] === 'object') {
+                merged[key] = fixupValue(key, deepMerge({}, delta[key], path.concat(key)));
+            } else {
+                merged[key] = delta[key];
+            }
         } else {
             console.warn(`[Chat History Optimization] Skipping unknown key at path: ${path.concat(key).join(' -> ')}`);
         }
@@ -334,7 +345,7 @@ function mergeDataInfo(chat) {
                         mergedRoleData.角色卡[nameMapping[roleName]] = mergedRoleData.角色卡[roleName];
                         delete mergedRoleData.角色卡[roleName];
                     }
-                    mergedRoleDataHistory[j] = mergedRoleData;
+                    mergedRoleDataHistory[j] = JSON.parse(JSON.stringify(mergedRoleData));
                 } catch (e) {
                     console.error(`[Chat History Optimization] delta JSON parse error at chat[${j}]:`, e);
                     failedChars.push(j);
