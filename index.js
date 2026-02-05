@@ -176,44 +176,6 @@ function onCharPromptInput(event) {
     saveSettingsDebounced();
 }
 
-function fixupValue(key, object) {
-    if (object && typeof object === 'object' && !Array.isArray(object)) {
-        // 移除 count 为 0 的 item
-        for (const key in object) {
-            if (Object.prototype.hasOwnProperty.call(object, key)) {
-                const item = object[key];
-                if (item && typeof item === 'object' && (('数量' in item && ((item.数量 == 0) || (item.数量 == "0"))) || ('物品说明' in item && !('数量' in item)))) {
-                    delete object[key];
-                }
-            }
-        }
-
-        if ('全身' in object) {
-            object['上身'] = object['全身'];
-            object['下身'] = object['全身'];
-            object['脚'] = object['全身'];
-            delete object['全身'];
-        }
-
-        if ('精神状态' in object) {
-            delete object['精神状态'];
-        }
-
-        if ('精神' in object) {
-            delete object['精神'];
-        }
-
-        if ('心理' in object) {
-            delete object['心理'];
-        }
-
-        if ('心态' in object) {
-            delete object['心态'];
-        }
-    }
-    return object;
-}
-
 function checkPath(path) {
     let current = json_template;
     if (path.length == 1 && path[0] === '故事历程总结') {
@@ -283,17 +245,20 @@ function deepMerge(merged, delta, path = []) {
     const preDay = merged.天数 || null;
     for (const key of Object.keys(delta)) {
         if (key in merged) {
-            merged[key] = fixupValue(key, deepMerge(merged[key], delta[key], path.concat(key)));
+            merged[key] = deepMerge(merged[key], delta[key], path.concat(key));
         } else if (checkPath(path.concat(key))) {
             if (Array.isArray(delta[key])) {
-                merged[key] = fixupValue(key, deepMerge([], delta[key], path.concat(key)));
+                merged[key] = deepMerge([], delta[key], path.concat(key));
             } else if (typeof delta[key] === 'object') {
-                merged[key] = fixupValue(key, deepMerge({}, delta[key], path.concat(key)));
+                merged[key] = deepMerge({}, delta[key], path.concat(key));
             } else {
                 merged[key] = delta[key];
             }
         } else {
             console.warn(`[Chat History Optimization] Skipping unknown key at path: ${path.concat(key).join(' -> ')}`);
+        }
+        if (merged[key] === "") {
+            delete merged[key];
         }
     }
     const postDay = merged.天数 || null;
