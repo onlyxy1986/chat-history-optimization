@@ -121,6 +121,7 @@ const wordMapping = {
 }
 
 let nameMapping = {};
+let keepMessageCount = 0;
 
 function printObj(comment, obj) {
     console.log(`[${comment}]`, JSON.parse(JSON.stringify(obj, null, 2)));
@@ -304,6 +305,10 @@ function mergeDataInfo(chat) {
                     }
                     objMatch[0] = objMatch[0].replace(/<你好和谐>/g, '');
                     const itemObj = JSON.parse(objMatch[0]);
+                    item.messageCount = 0;
+                    if (itemObj.故事历程) {
+                        item.messageCount = itemObj.故事历程.length;
+                    }
                     mergedRoleData = deepMerge(mergedRoleData, itemObj);
                     for (const roleName of Object.keys(nameMapping)) {
                         if (!mergedRoleData.角色卡 || !(roleName in mergedRoleData.角色卡)) continue;
@@ -386,7 +391,7 @@ function arrayToMarkdown(data, n = 0) {
 
 function postProcess(data) {
     if (data && data.故事历程 && Array.isArray(data.故事历程)) {
-        data.前文 = arrayToMarkdown(data.故事历程, extension_settings[extensionName].keepCount) + '\n' + (data.前文 || '');
+        data.前文 = arrayToMarkdown(data.故事历程, keepMessageCount) + '\n' + (data.前文 || '');
         data.故事历程 = [];
     }
     if (data && data.故事历程总结 && Array.isArray(data.故事历程总结)) {
@@ -414,7 +419,7 @@ ${charsInfoJsonStr}
 ${$("#char_prompt_textarea").val()}
 </ROLE_DATA_TEMPLATE>
 ------
-**在正文后生成<delta>信息，提取<ROLE_DATA>发生改变的字段（严格遵循<ROLE_DATA_TEMPLATE>字段注释中的规则），省略未改变字段，确保输出为有效JSON。**
+**在正文后生成<delta>信息，提取<ROLE_DATA>发生改变的字段（严格遵循<ROLE_DATA_TEMPLATE>字段注释中的规则），禁止输出未改变字段，确保输出为有效JSON。**
 <delta>
 //change of role data, output valid JSON only
 </delta>
@@ -440,6 +445,7 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
         return;
     }
 
+    keepMessageCount = 0;
     printObj("[Chat History Optimization] Original chat history:", chat);
     let isFirstMessage = false;
     if (chat.length == 2 && chat[0].is_user === false && chat[1].is_user === true) {
@@ -504,8 +510,12 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
             .filter(item => item && item.is_user === false)
             .map(item => {
                 if (!item || !item.mes) return '';
+                keepMessageCount += item.messageCount;
                 // 提取 </thinking> 到 <post_thinking> 之间的内容（不包含标签本身）
-                const match = item.mes.match(/<\/thinking>([\s\S]*?)<post_thinking>/i);
+                let match = item.mes.match(/<\/(?:think|thinking)>([\s\S]*?)<post_thinking>/i);
+                if (!match) {
+                    match = item.mes.match(/<\/(?:think|thinking)>([\s\S]*?)<delta>/i);
+                }
                 return match ? match[1].trim() : item.mes;
             });
         finalRoleDataInfo.前文 = tail.join('\n');
