@@ -340,7 +340,6 @@ function mergeDataInfo(chat) {
 }
 
 function convertDayReferences(text, currentDayOverride) {
-    return text;
     if (typeof text !== 'string' || text.length === 0) return text;
 
     // currentDayOverride 一定是 "第X天" 形式的字符串，直接提取数字
