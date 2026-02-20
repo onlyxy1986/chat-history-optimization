@@ -286,16 +286,14 @@ function mergeDataInfo(chat) {
         if (item && (("is_user" in item && !item.is_user) || (item.role && item.role == "assistant"))) {
             let matches = [];
             if (item.mes) {
-                let matchResult = item.mes
+                matches = [...item.mes
                     .replace(/\/\/.*$/gm, '')
-                    .match(/.*<delta>((?:(?!<delta>)[\s\S])*?)<\/delta>/i);
-                matches = matchResult ? [matchResult] : [];
+                    .matchAll(/<delta>((?:(?!<delta>)[\s\S])*?)<\/delta>/gi)];
             }
             if (matches.length == 0 && ("swipes" in item && "swipe_id" in item && item.swipes[item.swipe_id])) {
-                let matchResult = item.swipes[item.swipe_id]
+                matches = [...item.swipes[item.swipe_id]
                     .replace(/\/\/.*$/gm, '')
-                    .match(/.*<delta>((?:(?!<delta>)[\s\S])*?)<\/delta>/i);
-                matches = matchResult ? [matchResult] : [];
+                    .matchAll(/<delta>((?:(?!<delta>)[\s\S])*?)<\/delta>/gi)];
             }
             if (matches.length > 0) {
                 let jsonStr = matches[matches.length - 1][1].trim();
@@ -514,9 +512,9 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
                 if (!item || !item.mes) return '';
                 keepMessageCount += item.messageCount;
                 // 提取 </thinking> 到 <post_thinking> 之间的内容（不包含标签本身）
-                let match = item.mes.match(/.*<\/(?:think|thinking)>([\s\S]*?)<post_thinking>/i);
+                let match = item.mes.match(/<\/(?:think|thinking)>([\s\S]*?)<post_thinking>/i);
                 if (!match) {
-                    match = item.mes.match(/.*<\/(?:think|thinking)>([\s\S]*?)<delta>/i);
+                    match = item.mes.match(/<\/(?:think|thinking)>([\s\S]*?)<delta>/i);
                 }
                 return match ? match[1].trim() : item.mes;
             });
