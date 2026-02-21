@@ -525,7 +525,7 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     $("#token-count").prop("textContent", "4");
     let tokenCount = await getTokenCountAsync(JSON.stringify(finalRoleDataInfo));
     while (tokenCount > extension_settings[extensionName].tokenLimit) {
-        finalRoleDataInfo.故事历程 = finalRoleDataInfo.故事历程.slice(Math.floor(finalRoleDataInfo.故事历程.length / 10));
+        finalRoleDataInfo.故事历程 = finalRoleDataInfo.故事历程.slice(Math.floor(finalRoleDataInfo.故事历程.length / 50));
         tokenCount = await getTokenCountAsync(JSON.stringify(finalRoleDataInfo));
         console.warn("[Chat History Optimization] Summary info is too large, reduce message to count.", tokenCount);
     }
