@@ -511,12 +511,14 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
             .map(item => {
                 if (!item || !item.mes) return '';
                 keepMessageCount += item.messageCount;
-                // 提取 </thinking> 到 <post_thinking> 之间的内容（不包含标签本身）
-                let match = item.mes.match(/<\/(?:think|thinking)>([\s\S]*?)<post_thinking>/i);
-                if (!match) {
-                    match = item.mes.match(/<\/(?:think|thinking)>([\s\S]*?)<delta>/i);
+                const regex = /<\/(?:think|thinking)>([\s\S]*?)<(?:post_thinking|delta)>/gi;
+                const matches = Array.from(item.mes.matchAll(regex));
+                if (matches.length > 0) {
+                    // 取最后一个匹配的捕获组
+                    return matches[matches.length - 1][1].trim();
+                } else {
+                    return item.mes;
                 }
-                return match ? match[1].trim() : item.mes;
             });
         finalRoleDataInfo.前文 = tail.join('\n');
     } else {
