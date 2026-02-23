@@ -536,6 +536,9 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     console.log("[Chat History Optimization] token count:", tokenCount);
     if (finalRoleDataInfo && finalRoleDataInfo.天数) {
         finalRoleDataInfo.故事历程 = JSON.parse(convertDayReferences(JSON.stringify(finalRoleDataInfo.故事历程), finalRoleDataInfo.天数));
+        if (finalRoleDataInfo.故事历程总结) {
+            finalRoleDataInfo.故事历程总结 = JSON.parse(convertDayReferences(JSON.stringify(finalRoleDataInfo.故事历程总结), finalRoleDataInfo.天数));
+        }
     }
     mergedDataInfo.roledata = finalRoleDataInfo
     printObj("[Chat History Optimization] Final Summary Info Post", mergedDataInfo);
