@@ -511,7 +511,7 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
             .map(item => {
                 if (!item || !item.mes) return '';
                 keepMessageCount += item.messageCount;
-                const regex = /<\/(?:think|thinking)>([\s\S]*?)<(?:post_thinking|delta)>/gi;
+                const regex = /(?:<\/(?:think|thinking)>|^)([\s\S]*?)<(?:post_thinking|delta)>/gi;
                 const matches = Array.from(item.mes.matchAll(regex));
                 if (matches.length > 0) {
                     // 取最后一个匹配的捕获组
