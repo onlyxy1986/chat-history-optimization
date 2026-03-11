@@ -421,7 +421,7 @@ ${$("#char_prompt_textarea").val()}
 ------
 **在正文后生成<delta>信息，提取<ROLE_DATA>发生改变的字段（严格遵循<ROLE_DATA_TEMPLATE>字段注释中的规则），禁止输出未改变字段，确保输出为有效JSON。**
 <delta>
-//change of role data, output valid JSON only
+//只输出有**变更**的字段, output valid JSON only
 </delta>
 
 </ROLE_PLAY>
@@ -485,13 +485,57 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
             }
         }
     }
-    // 处理角色信息，只保留最近或将要提及的角色信息
+    // --- 优化后的角色卡管理：固定 10 槽位上限 ---
     if (finalRoleDataInfo && finalRoleDataInfo.角色卡 && typeof finalRoleDataInfo.角色卡 === 'object') {
-        for (const roleName of Object.keys(finalRoleDataInfo.角色卡)) {
-            if (!isCharNameRecent(chat, roleName, 20)) {
-                finalRoleDataInfo.角色卡[roleName] = {};
+        const MAX_SLOTS = 10;
+        const roleScores = [];
+        const userPrompt = chat[chat.length - 1]?.mes || "";
+        const roleNames = Object.keys(finalRoleDataInfo.角色卡);
+
+        for (const roleName of roleNames) {
+            const realName = nameMapping[roleName] || roleName;
+            let score = -1;
+
+            // 1. 意图驱动：如果最新 Prompt 提到了，给予极高优先级（确保唤醒）
+            if (userPrompt.includes(roleName) || (realName && userPrompt.includes(realName))) {
+                score = 1000000;
+            } else {
+                // 2. 活跃度：寻找最后一次出现的索引作为基础分
+                for (let i = chat.length - 1; i >= 0; i--) {
+                    const mes = chat[i].mes || "";
+                    if (mes.includes(roleName) || (realName && mes.includes(realName))) {
+                        score = i;
+                        break;
+                    }
+                }
+            }
+            roleScores.push({ name: roleName, score });
+        }
+
+        // 3. 排序并只保留前 10 个角色
+        const sortedRoles = roleScores
+            .sort((a, b) => b.score - a.score)
+            .slice(0, MAX_SLOTS);
+
+        const newRoleCards = {};
+        for (const item of sortedRoles) {
+            const roleName = item.name;
+            const originalData = finalRoleDataInfo.角色卡[roleName];
+
+            // 4. 特征蒸馏：如果角色虽然在前 10，但距离上次活跃已超过 30 条消息（且非当前提问提及）
+            // 则只保留核心设定，剔除角色状态（穿戴、物品、技能等动态高消耗字段）
+            const distance = chat.length - 1 - item.score;
+            if (item.score < 1000000 && distance > 30) {
+                newRoleCards[roleName] = {
+                    "角色设定": originalData.角色设定 || {}
+                };
+            } else {
+                newRoleCards[roleName] = originalData;
             }
         }
+
+        // 5. 替换为精简后的角色集合（物理删除不在槽位内的角色）
+        finalRoleDataInfo.角色卡 = newRoleCards;
     }
     $("#token-count").prop("textContent", "3");
     // 保留倒数第 keepCount 条 assistant 消息及其后的所有信息
