@@ -246,6 +246,9 @@ function deepMerge(merged, delta, path = []) {
     const preDay = merged.天数 || null;
     for (const key of Object.keys(delta)) {
         if (key in merged) {
+            if (path.concat(key).includes("角色设定") && merged[key] && typeof merged[key] === 'string' && !merged[key].includes("未知") && key != "处女") {
+                continue;
+            }
             merged[key] = deepMerge(merged[key], delta[key], path.concat(key));
         } else if (checkPath(path.concat(key))) {
             if (Array.isArray(delta[key])) {
