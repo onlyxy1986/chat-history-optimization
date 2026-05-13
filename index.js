@@ -163,7 +163,7 @@ function checkPath(path) {
     return true;
 }
 
-function deepMerge(merged, delta, path = []) {
+function deepMerge(merged, delta, path = [], allowUpdate = false) {
     if (path.length == 0 && delta.故事历程总结 && merged.故事历程) {
         merged.故事历程 = [];
         delta.故事历程 = [];
@@ -201,15 +201,15 @@ function deepMerge(merged, delta, path = []) {
     const preDay = merged.天数 || null;
     for (const key of Object.keys(delta)) {
         if (key in merged) {
-            if (path.concat(key).includes("角色设定") && merged[key] && typeof merged[key] === 'string' && !merged[key].includes("未知") && key != "处女") {
+            if (!allowUpdate && path.concat(key).includes("角色设定") && merged[key] && typeof merged[key] === 'string' && !merged[key].includes("未知") && key != "处女") {
                 continue;
             }
-            merged[key] = deepMerge(merged[key], delta[key], path.concat(key));
+            merged[key] = deepMerge(merged[key], delta[key], path.concat(key), allowUpdate);
         } else if (checkPath(path.concat(key))) {
             if (Array.isArray(delta[key])) {
-                merged[key] = deepMerge([], delta[key], path.concat(key));
+                merged[key] = deepMerge([], delta[key], path.concat(key), allowUpdate);
             } else if (typeof delta[key] === 'object') {
-                merged[key] = deepMerge({}, delta[key], path.concat(key));
+                merged[key] = deepMerge({}, delta[key], path.concat(key), allowUpdate);
             } else {
                 merged[key] = delta[key];
             }
@@ -260,7 +260,8 @@ function mergeDataInfo(chat) {
                     if (itemObj.故事历程) {
                         item.messageCount = itemObj.故事历程.length;
                     }
-                    mergedRoleData = deepMerge(mergedRoleData, itemObj);
+                    let allowUpdate = itemObj.allowUpdate || false;
+                    mergedRoleData = deepMerge(mergedRoleData, itemObj, [], allowUpdate);
                     for (const roleName of Object.keys(nameMapping)) {
                         if (!mergedRoleData.角色卡 || !(roleName in mergedRoleData.角色卡)) continue;
                         mergedRoleData.角色卡[nameMapping[roleName]] = mergedRoleData.角色卡[roleName];
@@ -378,16 +379,6 @@ ${$("#char_prompt_textarea").val()}
 </ROLE_PLAY>
 `
     return prompt;
-}
-
-function isCharNameRecent(chat, charName, recentThreshold = 10) {
-    for (let j = chat.length - 1; j >= 0 && j >= chat.length - recentThreshold; j--) {
-        const item = chat[j];
-        if (item && item.mes && item.mes.includes(charName)) {
-            return true;
-        }
-    }
-    return false;
 }
 
 globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, abort, type) {
