@@ -292,6 +292,7 @@ function mergeDataInfo(chat) {
 }
 
 function convertDayReferences(text, currentDayOverride) {
+    return text;
     if (typeof text !== 'string' || text.length === 0) return text;
 
     // currentDayOverride 一定是 "第X天" 形式的字符串，直接提取数字
@@ -351,7 +352,8 @@ function postProcess(data) {
         delete data.故事历程总结;
     }
     printObj("[Chat History Optimization] Post Processed 前文", data.前文);
-    return data;
+    const { 前文, ...rest } = data;
+    return { 前文, ...rest };
 }
 
 function getCharPrompt(mergedDataInfo) {
