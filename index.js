@@ -351,6 +351,7 @@ function postProcess(data) {
         data.前文 = arrayToMarkdown(data.故事历程总结, 0) + '\n' + (data.前文 || '');
         delete data.故事历程总结;
     }
+    data.前文 = data.前文.replace(/<delta>((?:(?!<delta>)[\s\S])*?)<\/delta>/gi, '').trim();
     printObj("[Chat History Optimization] Post Processed 前文", data.前文);
     const { 前文, ...rest } = data;
     return { 前文, ...rest };
