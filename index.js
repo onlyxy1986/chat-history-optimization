@@ -254,7 +254,6 @@ function mergeDataInfo(chat) {
                         failedChars.push(j);
                         continue;
                     }
-                    objMatch[0] = objMatch[0].replace(/<你好和谐>/g, '');
                     const itemObj = JSON.parse(objMatch[0]);
                     item.messageCount = 0;
                     if (itemObj.故事历程) {
@@ -418,15 +417,6 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     console.log("[Chat History Optimization] origin token count:", tokenCount_origin);
     printObj("[Chat History Optimization] Final Summary Info Pre", finalRoleDataInfo);
     $("#token-count").prop("textContent", "1");
-    // 过滤掉任务状态为'已完成'的任务
-    if (finalRoleDataInfo && finalRoleDataInfo.任务记录 && typeof finalRoleDataInfo.任务记录 === 'object') {
-        for (const key of Object.keys(finalRoleDataInfo.任务记录)) {
-            const task = finalRoleDataInfo.任务记录[key];
-            if (task && (task.任务状态 === '已完成' || task.任务状态 === '已失败' || task.任务状态 === '已取消')) {
-                delete finalRoleDataInfo.任务记录[key];
-            }
-        }
-    }
     // --- 优化后的角色卡管理：固定 10 槽位上限 ---
     if (finalRoleDataInfo && finalRoleDataInfo.角色卡 && typeof finalRoleDataInfo.角色卡 === 'object') {
         const MAX_SLOTS = 10;
