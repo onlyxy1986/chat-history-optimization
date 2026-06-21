@@ -309,36 +309,97 @@ function convertDayReferences(text, currentDayOverride) {
     return out;
 }
 
+function parseDayNumber(dayStr) {
+    if (typeof dayStr !== 'string') return null;
+    const m = dayStr.match(/第\s*(\d+)\s*天/);
+    return m ? parseInt(m[1], 10) : null;
+}
+
+function extractItemProcess(item) {
+    let process = '';
+    if (Array.isArray(item.历程)) {
+        process = item.历程
+            .map(entry => {
+                let s = entry == null ? '' : String(entry).trim();
+                if (s === '') return '';
+                // 如果不是以中文句号或英文句号结尾，则追加中文句号
+                if (!(/[。\.]$/.test(s))) s += '。';
+                return s;
+            })
+            .join('');
+    } else if (typeof item.历程 === 'string') {
+        let s = item.历程.trim();
+        if (s !== '' && !(/[。\.]$/.test(s))) s += '。';
+        process = s;
+    }
+    return process;
+}
+
 function arrayToMarkdown(data, n = 0) {
+    // 从完整数据中确定最新的天数（包含被n排除的尾部，以确保正确识别当前天）
+    let maxDay = 0;
+    for (const item of data) {
+        const day = parseDayNumber(item.天数);
+        if (day !== null && day > maxDay) maxDay = day;
+    }
+
     // 计算需要处理的数据范围（排除最后n个元素）
     const endIndex = n > 0 ? data.length - n : data.length;
     const processedData = data.slice(0, endIndex);
 
-    return processedData.map(item => {
-        // 构建第一行：[天数|时间|地点]
-        const header = `[${item.天数}|${item.时间}|${item.地点}]`;
+    // 回退：没有可解析的天数，所有事件使用详细格式
+    if (maxDay === 0) {
+        return processedData.map(item => {
+            const header = `[${item.天数}|${item.时间段}|${item.地点}]`;
+            const process = extractItemProcess(item);
+            return `${header.trim()}\n${process.trim()}`;
+        }).join('\n');
+    }
 
-        // 构建第二行：历程数组拼接
-        let process = '';
-        if (Array.isArray(item.历程)) {
-            process = item.历程
-                .map(entry => {
-                    let s = entry == null ? '' : String(entry).trim();
-                    if (s === '') return '';
-                    // 如果不是以中文句号或英文句号结尾，则追加中文句号
-                    if (!(/[。\.]$/.test(s))) s += '。';
-                    return s;
-                })
-                .join('');
-        } else if (typeof item.历程 === 'string') {
-            let s = item.历程.trim();
-            if (s !== '' && !(/[。\.]$/.test(s))) s += '。';
-            process = s;
+    // 按天数分组（无法解析的归入 -1）
+    const groups = {};
+    for (const item of processedData) {
+        const day = parseDayNumber(item.天数);
+        const key = day !== null ? day : -1;
+        if (!groups[key]) groups[key] = [];
+        groups[key].push(item);
+    }
+
+    // 按天数升序排列，构建输出
+    const sortedKeys = Object.keys(groups).map(Number).sort((a, b) => a - b);
+    const result = [];
+
+    for (const dayNum of sortedKeys) {
+        const items = groups[dayNum];
+
+        if (dayNum === -1 || dayNum === maxDay) {
+            // 当前天或无法解析的天：每个事件使用详细格式 [天数|时间段|地点]
+            for (const item of items) {
+                const header = `[${item.天数}|${item.时间段}|${item.地点}]`;
+                const process = extractItemProcess(item);
+                result.push(`${header.trim()}\n${process.trim()}`);
+            }
+        } else {
+            // 之前的天：聚合格式 [第X天]\n所有历程
+            const allProcess = items.map(item => extractItemProcess(item)).join('');
+            result.push(`[${items[0].天数}]\n${allProcess.trim()}`);
         }
+    }
 
-        // 组合成完整的两行格式
-        return `${header.trim()}\n${process.trim()}`;
-    }).join('\n');
+    return result.join('\n');
+}
+
+function generateTimeAnchor(dayStr) {
+    const dayNum = parseDayNumber(dayStr);
+    if (dayNum === null || dayNum <= 0) return '';
+
+    let anchor = '<时间锚点>\n';
+    anchor += `今天=${dayStr}, 昨天=第${dayNum - 1}天, 前天=第${dayNum - 2}天`;
+    for (let i = 3; i <= Math.min(dayNum - 1, 7); i++) {
+        anchor += `, ${i}天前=第${dayNum - i}天`;
+    }
+    anchor += '\n</时间锚点>';
+    return anchor;
 }
 
 function postProcess(data) {
@@ -351,6 +412,10 @@ function postProcess(data) {
         delete data.故事历程总结;
     }
     data.前文 = data.前文.replace(/<delta>((?:(?!<delta>)[\s\S])*?)<\/delta>/gi, '').trim();
+    // 在前文末尾附加时间锚点，方便AI将相对时间引用转换为绝对天数
+    if (data && data.天数) {
+        data.前文 += '\n\n' + generateTimeAnchor(data.天数);
+    }
     printObj("[Chat History Optimization] Post Processed 前文", data.前文);
     const { 前文, ...rest } = data;
     return { 前文, ...rest };
