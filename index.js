@@ -350,9 +350,9 @@ function arrayToMarkdown(data, n = 0) {
     // 回退：没有可解析的天数，所有事件使用详细格式
     if (maxDay === 0) {
         return processedData.map(item => {
-            const header = `[${item.天数}|${item.时间段}|${item.地点}]`;
+            const header = `# ${item.天数}|${item.时间段}|${item.地点}`;
             const process = extractItemProcess(item);
-            return `${header.trim()}\n${process.trim()}`;
+            return `${header.trim()}\n## ${process.trim()}`;
         }).join('\n');
     }
 
@@ -375,14 +375,14 @@ function arrayToMarkdown(data, n = 0) {
         if (dayNum === -1 || dayNum === maxDay) {
             // 当前天或无法解析的天：每个事件使用详细格式 [天数|时间段|地点]
             for (const item of items) {
-                const header = `[${item.天数}|${item.时间段}|${item.地点}]`;
+                const header = `# ${item.天数}|${item.时间段}|${item.地点}`;
                 const process = extractItemProcess(item);
-                result.push(`${header.trim()}\n${process.trim()}`);
+                result.push(`${header.trim()}\n## ${process.trim()}`);
             }
         } else {
             // 之前的天：聚合格式 [第X天]\n所有历程
             const allProcess = items.map(item => extractItemProcess(item)).join('');
-            result.push(`[${items[0].天数}]\n${allProcess.trim()}`);
+            result.push(`# ${items[0].天数}\n## ${allProcess.trim()}`);
         }
     }
 
@@ -393,12 +393,13 @@ function generateTimeAnchor(dayStr) {
     const dayNum = parseDayNumber(dayStr);
     if (dayNum === null || dayNum <= 0) return '';
 
-    let anchor = '<时间锚点>\n';
+    let anchor = '<日期换算表>\n';
+    anchor += '# 说明：以下为“相对日期”与“绝对天数（第X天）”的映射表，AI提及相对时间时请严格查表换算，注意天数推进时"昨天"会变成"前天"\n';
     anchor += `今天=${dayStr}, 昨天=第${dayNum - 1}天, 前天=第${dayNum - 2}天`;
     for (let i = 3; i <= Math.min(dayNum - 1, 7); i++) {
         anchor += `, ${i}天前=第${dayNum - i}天`;
     }
-    anchor += '\n</时间锚点>';
+    anchor += '\n</日期换算表>';
     return anchor;
 }
 
