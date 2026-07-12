@@ -163,6 +163,34 @@ function checkPath(path) {
     return true;
 }
 
+/**
+ * 生成角色名的所有搜索词（处理常见别名写法）
+ * 支持: A(B), A（B）, A·B, A.B 等格式
+ * 拆分后任意一部分匹配即算命中
+ */
+function getNameSearchTerms(name) {
+    if (!name || typeof name !== 'string') return [];
+    const terms = new Set();
+    terms.add(name); // 原始名称始终包含
+
+    // 按常见分隔符拆分：英文括号、中文括号、间隔号、英文句点
+    const parts = name.split(/[\(\)（）·\.]/).filter(p => p.trim().length > 0);
+    for (const part of parts) {
+        terms.add(part);
+    }
+
+    return [...terms];
+}
+
+/**
+ * 检查 name 的任意别名形式是否出现在 text 中
+ */
+function nameMatches(name, text) {
+    if (!name || !text) return false;
+    const terms = getNameSearchTerms(name);
+    return terms.some(term => text.includes(term));
+}
+
 function deepMerge(merged, delta, path = [], allowUpdate = false) {
     if (path.length == 0 && delta.故事历程总结 && merged.故事历程) {
         merged.故事历程 = [];
@@ -495,13 +523,13 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
             let score = -1;
 
             // 1. 意图驱动：如果最新 Prompt 提到了，给予极高优先级（确保唤醒）
-            if (userPrompt.includes(roleName) || (realName && userPrompt.includes(realName))) {
+            if (nameMatches(roleName, userPrompt) || nameMatches(realName, userPrompt)) {
                 score = 1000000;
             } else {
                 // 2. 活跃度：寻找最后一次出现的索引作为基础分
                 for (let i = chat.length - 1; i >= 0; i--) {
                     const mes = chat[i].mes || "";
-                    if (mes.includes(roleName) || (realName && mes.includes(realName))) {
+                    if (nameMatches(roleName, mes) || nameMatches(realName, mes)) {
                         score = i;
                         break;
                     }
