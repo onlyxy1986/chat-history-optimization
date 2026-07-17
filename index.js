@@ -184,11 +184,51 @@ function getNameSearchTerms(name) {
 
 /**
  * 检查 name 的任意别名形式是否出现在 text 中
+ * @param {string} name - 要搜索的角色名
+ * @param {string} text - 被搜索的文本
+ * @param {string[]} [allRoleNames] - 可选，所有已知角色名列表，用于消歧义：
+ *   当 name 是另一个更长角色名的子串时（如"沈梦" vs "沈梦瑶"），
+ *   检查每次出现是否被更长名字"吞掉"。只有至少一次出现是独立命中时才返回 true。
  */
-function nameMatches(name, text) {
+function nameMatches(name, text, allRoleNames) {
     if (!name || !text) return false;
     const terms = getNameSearchTerms(name);
-    return terms.some(term => text.includes(term));
+
+    for (const term of terms) {
+        if (!text.includes(term)) continue;
+
+        // 如果没有提供消歧义名单，简单包含匹配即可
+        if (!allRoleNames || allRoleNames.length === 0) return true;
+
+        // 找出所有包含当前 term 的更长的已知角色名
+        // （例如 term="沈梦"，更长名="沈梦瑶"）
+        const superNames = allRoleNames.filter(
+            rn => rn !== name && rn.length > term.length && rn.includes(term)
+        );
+
+        // 没有更长名字包含它，命中有效
+        if (superNames.length === 0) return true;
+
+        // 遍历 term 在 text 中的每次出现，检查是否被更长名字"吞掉"
+        let pos = -1;
+        while ((pos = text.indexOf(term, pos + 1)) !== -1) {
+            let subsumed = false;
+            for (const superName of superNames) {
+                const offset = superName.indexOf(term);
+                const superStart = pos - offset;
+                if (superStart >= 0 &&
+                    superStart + superName.length <= text.length &&
+                    text.substring(superStart, superStart + superName.length) === superName) {
+                    subsumed = true;
+                    break;
+                }
+            }
+            if (!subsumed) return true; // 找到了至少一次独立出现
+        }
+        // 当前 term 的所有出现都被更长名字吞掉，继续检查下一个 term
+    }
+
+    return false; // 所有 term 的出现都被吞掉
 }
 
 function deepMerge(merged, delta, path = [], allowUpdate = false) {
@@ -518,18 +558,25 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
         const userPrompt = chat[chat.length - 1]?.mes || "";
         const roleNames = Object.keys(finalRoleDataInfo.角色卡);
 
+        // 构建所有已知角色名集合，用于消歧义：
+        // 当"沈梦"和"沈梦瑶"同时存在时，"沈梦"在文本中的匹配不会被"沈梦瑶"吞掉才算真正命中
+        const allKnownNames = [...new Set([
+            ...roleNames,
+            ...Object.values(nameMapping),
+        ])];
+
         for (const roleName of roleNames) {
             const realName = nameMapping[roleName] || roleName;
             let score = -1;
 
             // 1. 意图驱动：如果最新 Prompt 提到了，给予极高优先级（确保唤醒）
-            if (nameMatches(roleName, userPrompt) || nameMatches(realName, userPrompt)) {
+            if (nameMatches(roleName, userPrompt, allKnownNames) || nameMatches(realName, userPrompt, allKnownNames)) {
                 score = 1000000;
             } else {
                 // 2. 活跃度：寻找最后一次出现的索引作为基础分
                 for (let i = chat.length - 1; i >= 0; i--) {
                     const mes = chat[i].mes || "";
-                    if (nameMatches(roleName, mes) || nameMatches(realName, mes)) {
+                    if (nameMatches(roleName, mes, allKnownNames) || nameMatches(realName, mes, allKnownNames)) {
                         score = i;
                         break;
                     }
