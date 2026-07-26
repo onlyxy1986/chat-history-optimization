@@ -418,9 +418,9 @@ function arrayToMarkdown(data, n = 0) {
     // 回退：没有可解析的天数，所有事件使用详细格式
     if (maxDay === 0) {
         return processedData.map(item => {
-            const header = `${item.天数}|${item.时间段}|${item.地点}`;
+            const header = `# ${item.天数}|${item.时间段}|${item.地点}`;
             const process = extractItemProcess(item);
-            return `<${header.trim()}>${process.trim()}</${header.trim()}>`;
+            return `${header.trim()}\n## ${process.trim()}`;
         }).join('\n');
     }
 
@@ -443,14 +443,14 @@ function arrayToMarkdown(data, n = 0) {
         if (dayNum === -1 || dayNum === maxDay) {
             // 当前天或无法解析的天：每个事件使用详细格式 [天数|时间段|地点]
             for (const item of items) {
-                const header = `${item.天数}|${item.时间段}|${item.地点}`;
+                const header = `# ${item.天数}|${item.时间段}|${item.地点}`;
                 const process = extractItemProcess(item);
-                result.push(`<${header.trim()}>${process.trim()}</${header.trim()}>`);
+                result.push(`${header.trim()}\n## ${process.trim()}`);
             }
         } else {
             // 之前的天：聚合格式 [第X天]\n所有历程
             const allProcess = items.map(item => extractItemProcess(item)).join('');
-            result.push(`<${items[0].天数}>${allProcess.trim()}</${items[0].天数}>`);
+            result.push(`# ${items[0].天数}\n## ${allProcess.trim()}`);
         }
     }
 
