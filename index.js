@@ -486,12 +486,18 @@ function postProcess(data) {
         data.前文 += '\n\n' + generateTimeAnchor(data.天数);
     }
     printObj("[Chat History Optimization] Post Processed 前文", data.前文);
-    const { 前文, ...rest } = data;
-    return { 前文, ...rest };
+    return data;
 }
 
 function getCharPrompt(mergedDataInfo) {
     mergedDataInfo.roledata = postProcess(mergedDataInfo.roledata || {});
+    // 将前文从roledata中剥离，单独放入HISTORY
+    let historyContent = mergedDataInfo.roledata.前文 || '';
+    delete mergedDataInfo.roledata.前文;
+    // 对前文也应用敏感词替换
+    for (const [key, value] of Object.entries(wordMapping)) {
+        historyContent = historyContent.replace(new RegExp(key, 'g'), value);
+    }
     let charsInfoJsonStr = JSON.stringify(mergedDataInfo.roledata || {});
     for (const [key, value] of Object.entries(wordMapping)) {
         charsInfoJsonStr = charsInfoJsonStr.replace(new RegExp(key, 'g'), value);
@@ -499,6 +505,10 @@ function getCharPrompt(mergedDataInfo) {
 
     const prompt = `
 <ROLE_PLAY>
+
+<HISTORY>
+${historyContent}
+</HISTORY>
 
 <ROLE_DATA>
 ${charsInfoJsonStr}
