@@ -43,7 +43,7 @@ Two independent domain states, merged and processed separately:
 
 `HISTORY_DATA` — Story timeline:
 - `正文出场或提及到的角色` — Comma-separated role names mentioned in the current text
-- `故事历程` — Array of story events, each with `天数`, `时间`, `地点`, `历程` (string or array of strings). Note: each event carries its own `天数` (the current day is derived from events, not tracked at top level)
+- `故事历程` — Array of story events, each with `天数`, `时间段`, `地点`, `历程` (string or array of strings). Note: each event carries its own `天数` (the current day is derived from events, not tracked at top level)
 - `故事历程总结` — Alternative/merged story summary (deleted after post-processing into `前文`)
 - `前文` — Generated context string (markdown-format story events + tail messages)
 
