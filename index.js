@@ -503,6 +503,71 @@ function postProcess(data) {
     return data;
 }
 
+/**
+ * 从模板文本中剔除顶层 "角色卡": {...} 段落，其余文本（含 // 注释与排版）原样保留
+ * 单次正向扫描：跳过字符串（防 {{占位符}} 干扰）与注释，按花括号深度识别根对象层级的键
+ */
+function stripRoleCardSection(templateText) {
+    if (typeof templateText !== 'string') return templateText;
+    let depth = 0;
+    let inStr = false;
+    let keyStart = -1;      // "角色卡" 键的起始位置
+    let lastComma = -1;     // 根对象层级最近一次逗号位置（用于连同前导逗号一起删除）
+    let end = -1;           // 值对象的结束位置（含闭合 '}'）
+    for (let i = 0; i < templateText.length; i++) {
+        const c = templateText[i];
+        const next = templateText[i + 1];
+        if (inStr) {
+            if (c === '\\') { i++; continue; }
+            if (c === '"') inStr = false;
+            continue;
+        }
+        if (c === '"') {
+            inStr = true;
+            if (depth === 1 && keyStart === -1 && templateText.startsWith('"角色卡"', i)) {
+                keyStart = i;
+            }
+            continue;
+        }
+        if (c === '/' && next === '/') { while (i < templateText.length && templateText[i] !== '\n') i++; continue; }
+        if (c === '/' && next === '*') { i += 2; while (i < templateText.length && !(templateText[i] === '*' && templateText[i + 1] === '/')) i++; i++; continue; }
+        if (c === '{') {
+            depth++;
+            continue;
+        }
+        if (c === '}') {
+            if (keyStart !== -1 && depth === 2 && end === -1) end = i + 1;
+            depth--;
+            continue;
+        }
+        if (c === ',' && depth === 1 && keyStart === -1) lastComma = i;
+    }
+    if (end === -1 || depth !== 0) return templateText; // 未找到键或括号不配对，安全返回原文
+
+    // 跳过空白与注释，返回 s 中第一个有效字符的位置
+    const skipJunk = (s, i) => {
+        while (i < s.length) {
+            const c = s[i];
+            if (/\s/.test(c)) { i++; continue; }
+            if (c === '/' && s[i + 1] === '/') { while (i < s.length && s[i] !== '\n') i++; continue; }
+            if (c === '/' && s[i + 1] === '*') { i += 2; while (i < s.length && !(s[i] === '*' && s[i + 1] === '/')) i++; i++; continue; }
+            break;
+        }
+        return i;
+    };
+
+    let start = keyStart;
+    if (lastComma !== -1 && lastComma < keyStart) {
+        // 有前导逗号：连同逗号一起删除（值后的逗号留给下一个键）
+        start = lastComma;
+    } else {
+        // 角色卡是根对象首键：值后紧跟的逗号（跳过空白/注释）也要删掉
+        const t = skipJunk(templateText, end);
+        if (templateText[t] === ',') end = t + 1;
+    }
+    return templateText.slice(0, start) + templateText.slice(end);
+}
+
 function getCharPrompt(mergedDataInfo) {
     mergedDataInfo.roledata = postProcess(mergedDataInfo.roledata || {});
     // 将前文从roledata中剥离，单独放入HISTORY
@@ -517,6 +582,10 @@ function getCharPrompt(mergedDataInfo) {
         charsInfoJsonStr = charsInfoJsonStr.replace(new RegExp(key, 'g'), value);
     }
 
+    // 角色卡功能关闭时，从模板中剔除角色卡段落
+    const roleCardEnabled = isRoleCardEnabled();
+    const roleCardTemplate = roleCardEnabled ? $("#char_prompt_textarea").val() : stripRoleCardSection($("#char_prompt_textarea").val());
+
     const prompt = `
 <ROLE_PLAY>
 
@@ -528,7 +597,7 @@ ${historyContent}
 ${charsInfoJsonStr}
 </ROLE_DATA>
 <ROLE_DATA_TEMPLATE> // **ROLE_DATA的字段指引模板**
-${$("#char_prompt_textarea").val()}
+${roleCardTemplate}
 </ROLE_DATA_TEMPLATE>
 ------
 **在回复最末尾必须生成<delta>信息，确保输出为有效JSON。**
