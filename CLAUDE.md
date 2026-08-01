@@ -42,11 +42,10 @@ Two functions are exposed on `globalThis` because they need to be callable from 
 Two independent domain states, merged and processed separately:
 
 `HISTORY_DATA` — Story timeline:
-- `天数`, `日期`, `星期` — Time tracking
 - `正文出场或提及到的角色` — Comma-separated role names mentioned in the current text
-- `故事历程` — Array of story events, each with `天数`, `时间`, `地点`, `历程` (string or array of strings)
+- `故事历程` — Array of story events, each with `天数`, `时间`, `地点`, `历程` (string or array of strings). Note: each event carries its own `天数` (the current day is derived from events, not tracked at top level)
 - `故事历程总结` — Alternative/merged story summary (deleted after post-processing into `前文`)
-- `前文` — Generated context string (markdown-format story events + tail messages + time anchor)
+- `前文` — Generated context string (markdown-format story events + tail messages)
 
 `CHARACTER_DATA` — Character card map:
 - `角色名 → { 角色设定: {...}, 角色状态: {...} }` (no `角色卡` wrapper key — the section is the domain)
@@ -67,7 +66,7 @@ Recursively merges `delta` into `merged` with special behaviors:
 Scans `chat[1..]` for assistant messages containing `<NEW_STORY_DATA>` blocks, extracting `<NEW_HISTORY>` (mandatory — missing counts as a failed floor) and `<NEW_CHARACTER_CARD>` (optional — legitimately absent when no new characters appear or the role card toggle is off) sections. Returns `{ historyData, characterData }`. Applies `nameMapping` to normalize character names in the character domain. Does **not** recognize legacy `<delta>` blocks.
 
 **`postProcessHistory(data)`**
-Converts `故事历程` array to markdown `前文` string via `arrayToMarkdown()`, appending existing `前文` if any. Deletes `故事历程` and `故事历程总结` after conversion. Strips any remaining `<NEW_STORY_DATA>`/`<delta>` tags from `前文`, appends the day-conversion anchor table.
+Converts `故事历程` array to markdown `前文` string via `arrayToMarkdown()`, appending existing `前文` if any. Deletes `故事历程` and `故事历程总结` after conversion. Strips any remaining `<NEW_STORY_DATA>`/`<delta>` tags from `前文`.
 
 **`processCharacterData(characterData, chat, nameMapping)`**
 Evicts/distills the character card map: 10-slot cap, current-prompt-mention priority (score 1,000,000), >30-message inactivity → keep only `角色设定`. Returns the trimmed map.
@@ -79,7 +78,7 @@ Wraps the processed domains in a `<STORY_DATA>` prompt with `<HISTORY>` (markdow
 Validates that a JSON key path exists in the given domain template (`history_json_template` or `character_json_template`), supporting `{{placeholder}}` dynamic keys. Returns `true` if the path is valid (including the special `故事历程总结` path). This prevents arbitrary keys from being injected into the merged state.
 
 **`convertDayReferences(text, currentDayOverride)`**
-Currently **disabled** — returns `text` unmodified on line 295. The implementation below (lines 296-311) converts absolute "第N天" references to relative "X天前" format, but is skipped via early return.
+Currently **disabled and uncalled** — returns `text` unmodified via early return. Its caller gated on the top-level `天数` field, which was removed. The implementation below converts absolute "第N天" references to relative "X天前" format.
 
 ### Character Card Eviction Strategy
 

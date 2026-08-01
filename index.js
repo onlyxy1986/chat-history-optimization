@@ -22,12 +22,7 @@ const defaultSettings = {
     tokenLimit: 50 * 1024,
     historyPrompt: `{
     // **注意** 所有时间表述都**必须**用第X天Y点的表述
-    // 天数: 第1天开始计数的天数
-    // 日期: 世界观下当前日期,如无日期信息,则从第1天开始
     // 地点: 用.分隔大小地点，如“图书馆.三楼.阅览室”、“酒馆.二楼.卫生间”
-    "天数": "第1天",
-    "日期": "日期",
-    "星期": "星期一",
     "正文出场或提及到的角色": "{{角色名1}},{{角色名2}},{{角色名3}},...",
     "故事历程": [ // **每次回复强制输出**
         {
@@ -300,7 +295,6 @@ function deepMerge(merged, delta, path = [], allowUpdate = false, template = nul
     }
     if (typeof merged !== 'object' || merged === null) return delta;
     if (typeof delta !== 'object' || delta === null) return merged;
-    const preDay = merged.天数 || null;
     for (const key of Object.keys(delta)) {
         if (key in merged) {
             if (!allowUpdate && path.concat(key).includes("角色设定") && merged[key] && typeof merged[key] === 'string' && !merged[key].includes("未知") && key != "处女") {
@@ -321,10 +315,6 @@ function deepMerge(merged, delta, path = [], allowUpdate = false, template = nul
         if (merged[key] === "") {
             delete merged[key];
         }
-    }
-    const postDay = merged.天数 || null;
-    if (postDay && preDay !== postDay) {
-        console.log(`[Chat History Optimization] Day changed from ${preDay} to ${postDay}`);
     }
     return merged;
 }
@@ -522,20 +512,6 @@ function arrayToMarkdown(data, n = 0) {
     return result.join('\n');
 }
 
-function generateTimeAnchor(dayStr) {
-    const dayNum = parseDayNumber(dayStr);
-    if (dayNum === null || dayNum <= 0) return '';
-
-    let anchor = '<日期换算表>\n';
-    anchor += '# 说明：以下为“相对日期”与“绝对天数（第X天）”的映射表，AI提及相对时间时请严格查表换算，注意天数推进时"昨天"会变成"前天"\n';
-    anchor += `今天=${dayStr}, 昨天=第${dayNum - 1}天, 前天=第${dayNum - 2}天`;
-    for (let i = 3; i <= Math.min(dayNum - 1, 7); i++) {
-        anchor += `, ${i}天前=第${dayNum - i}天`;
-    }
-    anchor += '\n</日期换算表>';
-    return anchor;
-}
-
 function postProcessHistory(data) {
     if (data && data.故事历程 && Array.isArray(data.故事历程)) {
         data.前文 = arrayToMarkdown(data.故事历程, keepMessageCount) + '\n' + (data.前文 || '');
@@ -546,10 +522,6 @@ function postProcessHistory(data) {
         delete data.故事历程总结;
     }
     data.前文 = data.前文.replace(/<(?:NEW_STORY_DATA|delta)>((?:(?!<(?:NEW_STORY_DATA|delta)>)[\s\S])*?)<\/(?:NEW_STORY_DATA|delta)>/gi, '').trim();
-    // 在前文末尾附加时间锚点，方便AI将相对时间引用转换为绝对天数
-    if (data && data.天数) {
-        data.前文 += '\n\n' + generateTimeAnchor(data.天数);
-    }
     printObj("[Chat History Optimization] Post Processed 前文", data.前文);
     return data;
 }
@@ -750,12 +722,6 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
 
     $("#token-count").prop("textContent", `${tokenCount}`);
     console.log("[Chat History Optimization] token count:", tokenCount);
-    if (historyData && historyData.天数) {
-        historyData.故事历程 = JSON.parse(convertDayReferences(JSON.stringify(historyData.故事历程), historyData.天数));
-        if (historyData.故事历程总结) {
-            historyData.故事历程总结 = JSON.parse(convertDayReferences(JSON.stringify(historyData.故事历程总结), historyData.天数));
-        }
-    }
     printObj("[Chat History Optimization] Final Summary Info Post", { historyData, characterData });
 
     const mergedChat = [];
