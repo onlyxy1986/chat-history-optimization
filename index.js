@@ -335,6 +335,8 @@ function mergeDataInfo(chat) {
                         continue;
                     }
                     const itemObj = JSON.parse(objMatch[0]);
+                    // 角色卡功能关闭时，不合并角色卡数据
+                    if (!isRoleCardEnabled()) delete itemObj.角色卡;
                     item.messageCount = 0;
                     if (itemObj.故事历程) {
                         item.messageCount = itemObj.故事历程.length;
