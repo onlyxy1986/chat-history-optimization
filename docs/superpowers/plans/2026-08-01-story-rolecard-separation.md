@@ -362,8 +362,8 @@ const charTpl = JSON.parse(`{"{{角色名}}":{"角色设定":{"角色名":"x","�
 // 故事域：数组去重
 let h = deepMerge({"故事历程":[{"天数":"第1天","历程":"A"}]}, {"故事历程":[{"天数":"第1天","历程":"A"},{"天数":"第1天","历程":"B"}]}, [], false, histTpl);
 if (h.故事历程.length !== 2) { console.error("FAIL: 故事数组去重", JSON.stringify(h.故事历程)); process.exit(1); }
-// 故事域：delete 区间
-h = deepMerge(h, "delete 0-0", ["故事历程"], false, histTpl);
+// 故事域：delete 区间（必须通过键递归进入数组——deepMerge 的 delete 分支要求 merged 是数组）
+h = deepMerge(h, {"故事历程": "delete 0-0"}, [], false, histTpl);
 if (h.故事历程.length !== 1 || h.故事历程[0].历程 !== "B") { console.error("FAIL: delete 区间"); process.exit(1); }
 // 角色域：角色设定不可变
 let c = deepMerge({"Alice":{"角色设定":{"角色名":"Alice","性别":"女"}}}, {"Alice":{"角色设定":{"性别":"男"}}}, [], false, charTpl);
