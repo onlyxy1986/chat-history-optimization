@@ -21,9 +21,8 @@ const defaultSettings = {
     keepCount: 3,
     tokenLimit: 50 * 1024,
     historyPrompt: `{
-    // **注意** 所有时间表述都**必须**用第X天Y点的表述
+    // **注意** 所有时间表述都**必须**用第X天+时间段的表述，如：第3天傍晚
     // 地点: 用.分隔大小地点，如“图书馆.三楼.阅览室”、“酒馆.二楼.卫生间”
-    "正文出场或提及到的角色": "{{角色名1}},{{角色名2}},{{角色名3}},...",
     "故事历程": [ // **每次回复强制输出，仅针对最新回复做历程记录**
         {
             "天数":"第1天",
@@ -555,7 +554,7 @@ ${charsInfoJsonStr}
 ` : ''}
 </STORY_DATA>
 
-**在回复最末尾必须生成当前正文的NEW_STORY_DATA信息。**
+**在回复最末尾必须生成当前正文的NEW_STORY_DATA信息。若本次回复没有新角色出现或角色信息无变化，可省略NEW_CHARACTER_CARD区段。**
 <NEW_STORY_DATA>
 <NEW_HISTORY> // **新HISTORY信息的模板**
 ${newHistoryTemplate}
