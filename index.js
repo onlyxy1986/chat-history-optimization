@@ -9,7 +9,9 @@ import { saveSettingsDebounced, this_chid, characters } from "../../../../script
 
 const context = SillyTavern.getContext();
 
-let json_template = null;
+let json_template = null; // 过渡期兼容别名，Task 2 删除
+let history_json_template = null;
+let character_json_template = null;
 
 // Keep track of where your extension is located, name should match repo name
 const extensionName = "chat-history-optimization";
@@ -19,7 +21,7 @@ const defaultSettings = {
     roleCardToggle: true, // 角色卡功能开关，默认启用
     keepCount: 3,
     tokenLimit: 50 * 1024,
-    charPrompt: `{
+    historyPrompt: `{
     // **注意** 所有时间表述都**必须**用第X天Y点的表述
     // 天数: 第1天开始计数的天数
     // 日期: 世界观下当前日期,如无日期信息,则从第1天开始
@@ -36,36 +38,36 @@ const defaultSettings = {
             "历程":"{{总结当前消息要点，需用词明确 要求:1.必须保留所有关键信息，比如重要动作、暗示、数字、人物、物品、时间、日期、日程安排、说明、描述、地点、要求、承诺、言语、规则、事实、推断、招式名、对话、安排等 2.使用角色名代替人称 3.NSFW场景用词需极简 4.记录相对时间时必须附上绝对时间，例如:相约明天(第13天)去逛街}}"
         }
         // ...
-    ],
-    "角色卡": { // **仅新角色出现时输出**
-        "{{角色名}}": { //所有角色都必须有完整的角色卡
-            "角色设定": { // [角色设定]：此部分包含角色的**不可更改的**核心基础设定，是判断角色行为是否OOC的最高依据。
-                "角色名": "{{角色名}}",
-                "职业": "{{职业}}",
-                "年龄": "{{年龄}}",
-                "性别": "男/女",
-                "背景": {
-                    "概述": "{{以一句话客观概括人物在故事开始前的人生经历，不涉及人物主观想法，不随故事更新}}"
-                },
-                "永久身体特征": { // 身体的固有特征或不可逆的改变，填充时自选格式:
-                    // 格式1. "部位1":"特征描述"
-                    // 格式2. "部位2": {"特征1":"特征描述", "特征2":"特征描述"}
-                    // 示例1: "面容": "棱角分明的刀削面庞，冷白皮，狭长的凤眼"
-                    // 示例2: "手": "白玉似的手，指节泛白"
-                    // 示例3: "身高": "172cm"
-                    // 示例4: "臀部": {"尺寸": "94cm", "特征": "蜜桃一般，弹性十足"}
-                    // 示例5: "处女": "是/否，由XX破处"
-                    // 示例6: "胸部": {"尺寸": "110cm", "罩杯": "G罩杯", "特征": "白嫩，能看到青色血管" }
-                },
-                "性癖": "性癖A,性癖B,…",
-                "场景人格":{ // 角色不同情境时所展现出的、相对固定的、独特的性格侧面与行为模式，不同场景的影响**独立**，互不影响
-                    "SFW场景人格": "{{用三个词描述角色在SFW场景下的表现}}",
-                    "NSFW场景人格": "{{用三个词描述角色在NSFW场景下的表现}}"
-		}
+    ]
+}`,
+    characterPrompt: `{ // **仅新角色出现时输出**
+    "{{角色名}}": { //所有角色都必须有完整的角色卡
+        "角色设定": { // [角色设定]：此部分包含角色的**不可更改的**核心基础设定，是判断角色行为是否OOC的最高依据。
+            "角色名": "{{角色名}}",
+            "职业": "{{职业}}",
+            "年龄": "{{年龄}}",
+            "性别": "男/女",
+            "背景": {
+                "概述": "{{以一句话客观概括人物在故事开始前的人生经历，不涉及人物主观想法，不随故事更新}}"
+            },
+            "永久身体特征": { // 身体的固有特征或不可逆的改变，填充时自选格式:
+                // 格式1. "部位1":"特征描述"
+                // 格式2. "部位2": {"特征1":"特征描述", "特征2":"特征描述"}
+                // 示例1: "面容": "棱角分明的刀削面庞，冷白皮，狭长的凤眼"
+                // 示例2: "手": "白玉似的手，指节泛白"
+                // 示例3: "身高": "172cm"
+                // 示例4: "臀部": {"尺寸": "94cm", "特征": "蜜桃一般，弹性十足"}
+                // 示例5: "处女": "是/否，由XX破处"
+                // 示例6: "胸部": {"尺寸": "110cm", "罩杯": "G罩杯", "特征": "白嫩，能看到青色血管" }
+            },
+            "性癖": "性癖A,性癖B,…",
+            "场景人格":{ // 角色不同情境时所展现出的、相对固定的、独特的性格侧面与行为模式，不同场景的影响**独立**，互不影响
+                "SFW场景人格": "{{用三个词描述角色在SFW场景下的表现}}",
+                "NSFW场景人格": "{{用三个词描述角色在NSFW场景下的表现}}"
             }
         }
-        // ... 其他角色
     }
+    // ... 其他角色
 }`,
 };
 
@@ -96,8 +98,9 @@ async function loadSettings() {
     $("#extension_toggle").prop("checked", extension_settings[extensionName].extensionToggle ?? defaultSettings.extensionToggle).trigger("input");
     $("#role_card_toggle").prop("checked", extension_settings[extensionName].roleCardToggle ?? defaultSettings.roleCardToggle).trigger("input");
     $("#keep_count").prop("value", extension_settings[extensionName].keepCount ?? defaultSettings.keepCount).trigger("input");
-    // 加载 charPrompt 到 textarea
-    $("#char_prompt_textarea").prop("value", extension_settings[extensionName].charPrompt ?? defaultSettings.charPrompt).trigger("input");
+    // 加载 historyPrompt / characterPrompt 到各自的 textarea
+    $("#history_prompt_textarea").prop("value", extension_settings[extensionName].historyPrompt ?? defaultSettings.historyPrompt).trigger("input");
+    $("#character_prompt_textarea").prop("value", extension_settings[extensionName].characterPrompt ?? defaultSettings.characterPrompt).trigger("input");
     $("#token_limit").prop("value", extension_settings[extensionName].tokenLimit ?? defaultSettings.tokenLimit).trigger("input");
 }
 
@@ -129,23 +132,45 @@ function onKeepCountInput(event) {
     saveSettingsDebounced();
 }
 
-function onCharPromptInput(event) {
+function onHistoryPromptInput(event) {
     let val = $(event.target).val();
     // 移除//开头的注释
     let jsonStr = val.replace(/\/\/.*$/gm, '');
     let isValid = false;
     try {
-        json_template = JSON.parse(jsonStr);
-        printObj("[Chat History Optimization] Loaded char prompt template", json_template);
+        history_json_template = JSON.parse(jsonStr);
+        json_template = history_json_template; // 过渡期兼容别名，Task 2 删除
+        printObj("[Chat History Optimization] Loaded history prompt template", history_json_template);
         isValid = true;
     } catch (e) {
         console.error(`[Chat History Optimization] JSON parse error`, jsonStr, e);
+        history_json_template = null;
         json_template = null;
         isValid = false;
     }
     // 设置 index.html 选中区标签内容
-    $("#char_prompt_validity").text(isValid ? "(有效)" : "(无效)");
-    extension_settings[extensionName].charPrompt = val;
+    $("#history_prompt_validity").text(isValid ? "(有效)" : "(无效)");
+    extension_settings[extensionName].historyPrompt = val;
+    saveSettingsDebounced();
+}
+
+function onCharacterPromptInput(event) {
+    let val = $(event.target).val();
+    // 移除//开头的注释
+    let jsonStr = val.replace(/\/\/.*$/gm, '');
+    let isValid = false;
+    try {
+        character_json_template = JSON.parse(jsonStr);
+        printObj("[Chat History Optimization] Loaded character prompt template", character_json_template);
+        isValid = true;
+    } catch (e) {
+        console.error(`[Chat History Optimization] JSON parse error`, jsonStr, e);
+        character_json_template = null;
+        isValid = false;
+    }
+    // 设置 index.html 选中区标签内容
+    $("#character_prompt_validity").text(isValid ? "(有效)" : "(无效)");
+    extension_settings[extensionName].characterPrompt = val;
     saveSettingsDebounced();
 }
 
@@ -587,25 +612,27 @@ function getCharPrompt(mergedDataInfo) {
     const roleCardTemplate = roleCardEnabled ? $("#char_prompt_textarea").val() : stripRoleCardSection($("#char_prompt_textarea").val());
 
     const prompt = `
-<ROLE_PLAY>
+<STORY_DATA>
 
 <HISTORY>
 ${historyContent}
 </HISTORY>
 
-<ROLE_DATA>
+<CHARACTER_CARD>
 ${charsInfoJsonStr}
-</ROLE_DATA>
-<ROLE_DATA_TEMPLATE> // **ROLE_DATA的字段指引模板**
-${roleCardTemplate}
-</ROLE_DATA_TEMPLATE>
-------
-**在回复最末尾必须生成<delta>信息，确保输出为有效JSON。**
-<delta>
-//......
-</delta>
+</CHARACTER_CARD>
 
-</ROLE_PLAY>
+</STORY_DATA>
+
+**在回复最末尾必须生成当前正文的NEW_STORY_DATA信息。**
+<NEW_STORY_DATA>
+<NEW_HISTORY> // **新HISTORY信息的模板**
+${newHistoryTemplate}
+</NEW_HISTORY>
+<NEW_CHARACTER_CARD> // **新CHARACTER_CARD信息的模板**
+${newCharacterCardTemplate}
+</NEW_CHARACTER_CARD>
+</NEW_STORY_DATA>
 `
     return prompt;
 }
@@ -782,11 +809,14 @@ jQuery(async () => {
     $("#extension_toggle").on("input", onToggleInput);
     $("#role_card_toggle").on("input", onRoleCardToggleInput);
     $("#keep_count").on("input", onKeepCountInput);
-    $("#char_prompt_textarea").on("input", onCharPromptInput);
+    $("#history_prompt_textarea").on("input", onHistoryPromptInput);
+    $("#character_prompt_textarea").on("input", onCharacterPromptInput);
     $("#token_limit").on("input", onTokenLimitInput);
-    $("#char_prompt_reset").on("click", function () {
-        // 恢复为默认模板
-        $("#char_prompt_textarea").val(defaultSettings.charPrompt).trigger("input");
+    $("#history_prompt_reset").on("click", function () {
+        $("#history_prompt_textarea").val(defaultSettings.historyPrompt).trigger("input");
+    });
+    $("#character_prompt_reset").on("click", function () {
+        $("#character_prompt_textarea").val(defaultSettings.characterPrompt).trigger("input");
     });
 
     // 角色信息显示相关逻辑
