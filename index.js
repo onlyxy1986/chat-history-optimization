@@ -16,6 +16,7 @@ const extensionName = "chat-history-optimization";
 const extensionFolderPath = `scripts/extensions/third-party/${extensionName}`;
 const defaultSettings = {
     extensionToggle: false,
+    roleCardToggle: true, // 角色卡功能开关，默认启用
     keepCount: 3,
     tokenLimit: 50 * 1024,
     charPrompt: `{
@@ -93,6 +94,7 @@ async function loadSettings() {
     extension_settings[extensionName] = extension_settings[extensionName] || {};
     // Updating settings in the UI
     $("#extension_toggle").prop("checked", extension_settings[extensionName].extensionToggle ?? defaultSettings.extensionToggle).trigger("input");
+    $("#role_card_toggle").prop("checked", extension_settings[extensionName].roleCardToggle ?? defaultSettings.roleCardToggle).trigger("input");
     $("#keep_count").prop("value", extension_settings[extensionName].keepCount ?? defaultSettings.keepCount).trigger("input");
     // 加载 charPrompt 到 textarea
     $("#char_prompt_textarea").prop("value", extension_settings[extensionName].charPrompt ?? defaultSettings.charPrompt).trigger("input");
@@ -103,6 +105,16 @@ function onToggleInput(event) {
     const value = Boolean($(event.target).prop("checked"));
     extension_settings[extensionName].extensionToggle = value;
     saveSettingsDebounced();
+}
+
+function onRoleCardToggleInput(event) {
+    const value = Boolean($(event.target).prop("checked"));
+    extension_settings[extensionName].roleCardToggle = value;
+    saveSettingsDebounced();
+}
+
+function isRoleCardEnabled() {
+    return extension_settings[extensionName].roleCardToggle ?? defaultSettings.roleCardToggle;
 }
 
 function onTokenLimitInput(event) {
@@ -697,6 +709,7 @@ jQuery(async () => {
     $("#extensions_settings").append(settingsHtml);
 
     $("#extension_toggle").on("input", onToggleInput);
+    $("#role_card_toggle").on("input", onRoleCardToggleInput);
     $("#keep_count").on("input", onKeepCountInput);
     $("#char_prompt_textarea").on("input", onCharPromptInput);
     $("#token_limit").on("input", onTokenLimitInput);
