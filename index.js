@@ -522,7 +522,7 @@ function postProcessHistory(data) {
         data.前文 = arrayToMarkdown(data.故事历程总结, 0) + '\n' + (data.前文 || '');
         delete data.故事历程总结;
     }
-    data.前文 = data.前文.replace(/<(?:NEW_STORY_DATA|delta)>((?:(?!<(?:NEW_STORY_DATA|delta)>)[\s\S])*?)<\/(?:NEW_STORY_DATA|delta)>/gi, '').trim();
+    // data.前文 = data.前文.replace(/<(?:NEW_STORY_DATA|delta)>((?:(?!<(?:NEW_STORY_DATA|delta)>)[\s\S])*?)<\/(?:NEW_STORY_DATA|delta)>/gi, '').trim();
     printObj("[Chat History Optimization] Post Processed 前文", data.前文);
     return data;
 }
@@ -644,6 +644,10 @@ function processCharacterData(characterData, chat, nameMapping) {
 }
 
 globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, abort, type) {
+    if (!chat || !Array.isArray(chat) || chat.length === 0) {
+        console.warn("[Chat History Optimization] No chat history to process.");
+        return;
+    }
     if (!extension_settings[extensionName].extensionToggle) {
         console.info("[Chat History Optimization] extension is disabled.")
         return;
@@ -696,14 +700,7 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
             .map(item => {
                 if (!item || !item.mes) return '';
                 keepMessageCount += item.messageCount;
-                const regex = /(?:<\/(?:think|thinking)>|^)([\s\S]*?)<(?:post_thinking|delta|NEW_STORY_DATA)>/gi;
-                const matches = Array.from(item.mes.matchAll(regex));
-                if (matches.length > 0) {
-                    // 取最后一个匹配的捕获组
-                    return matches[matches.length - 1][1].trim();
-                } else {
-                    return item.mes;
-                }
+                return item.mes;
             });
         historyData.前文 = tail.join('\n');
     } else {
