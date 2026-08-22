@@ -626,11 +626,6 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     }
 
     keepMessageCount = 0;
-    // 捕获改写前的原始用户消息，供 {{lastUserReact}} 使用
-    const lastMsg = chat[chat.length - 1];
-    if (lastMsg && lastMsg.is_user && !lastMsg.is_system) {
-        lastRawUserMessage = lastMsg.mes || '';
-    }
     printObj("[Chat History Optimization] Original chat history:", chat);
     let isFirstMessage = false;
     if (chat.length == 2 && chat[0].is_user === false && chat[1].is_user === true) {
@@ -722,25 +717,6 @@ jQuery(async () => {
     $("#history_prompt_textarea").on("input", onHistoryPromptInput);
     $("#character_prompt_textarea").on("input", onCharacterPromptInput);
     $("#token_limit").on("input", onTokenLimitInput);
-    $("#react_rules_textarea").on("input", onReactRulesInput);
-    $("#react_default").on("input", onReactDefaultInput);
-    $("#react_rules_reset").on("click", function () {
-        $("#react_rules_textarea").val(defaultSettings.reactRules).trigger("input");
-        $("#react_default").val(defaultSettings.reactDefault).trigger("input");
-    });
-
-    // 注册 {{lastUserReact}}：根据最后一条用户消息匹配规则返回对应值
-    macros.register('lastUserReact', {
-        category: MacroCategory.CHAT,
-        description: '根据最后一条用户消息匹配 Chat History Optimization 扩展中配置的第一条规则，返回其值；无匹配时返回默认值。',
-        returns: '匹配规则的值或默认值',
-        exampleUsage: ['{{lastUserReact}}'],
-        handler: () => {
-            const matched = matchReactRules(getReactSourceMessage());
-            return matched ?? (extension_settings[extensionName].reactDefault ?? '');
-        },
-    });
-
     $("#history_prompt_reset").on("click", function () {
         $("#history_prompt_textarea").val(defaultSettings.historyPrompt).trigger("input");
     });
