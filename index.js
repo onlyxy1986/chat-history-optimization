@@ -78,7 +78,6 @@ const wordMapping = {
     "学术": ""
 }
 
-let nameMapping = {};
 let keepMessageCount = 0;
 
 function printObj(comment, obj) {
@@ -370,7 +369,7 @@ function mergeDataInfo(chat) {
                 // --- NEW_CHARACTER_CARD 区段：可选（无新角色/开关关闭时合法缺失）---
                 if (isRoleCardEnabled()) {
                     const charMatch = block.match(/<NEW_CHARACTER_CARD>((?:(?!<NEW_CHARACTER_CARD>)[\s\S])*?)<\/NEW_CHARACTER_CARD>/i);
-                    if (charMatch) {
+                    if (charMatch && charMatch[1].trim()) {
                         const objMatch = charMatch[1].trim().match(/\{[\s\S]*\}/);
                         if (objMatch) {
                             try {
@@ -378,11 +377,6 @@ function mergeDataInfo(chat) {
                                 let allowUpdate = charObj.allowUpdate || false;
                                 delete charObj.allowUpdate;
                                 characterData = deepMerge(characterData, charObj, [], allowUpdate, character_json_template);
-                                for (const roleName of Object.keys(nameMapping)) {
-                                    if (!characterData || !(roleName in characterData)) continue;
-                                    characterData[nameMapping[roleName]] = characterData[roleName];
-                                    delete characterData[roleName];
-                                }
                             } catch (e) {
                                 console.error(`[Chat History Optimization] NEW_CHARACTER_CARD JSON parse error at chat[${j}]:`, e);
                                 console.error(`[Chat History Optimization] NEW_CHARACTER_CARD content:`, objMatch[0]);
@@ -562,10 +556,9 @@ ${newCharacterCardTemplate}
  * 超过 30 条消息未活跃（且非当前提问提及）的角色只保留核心设定
  * @param {object} characterData - 角色卡映射 { 角色名: {...} }
  * @param {object[]} chat - 原始聊天记录
- * @param {object} nameMapping - 别名映射
  * @returns {object} 精简后的角色卡映射
  */
-function processCharacterData(characterData, chat, nameMapping) {
+function processCharacterData(characterData, chat) {
     const MAX_SLOTS = 10;
     if (!characterData || typeof characterData !== 'object') return characterData;
 
@@ -575,23 +568,19 @@ function processCharacterData(characterData, chat, nameMapping) {
 
     // 构建所有已知角色名集合，用于消歧义：
     // 当"沈梦"和"沈梦瑶"同时存在时，"沈梦"在文本中的匹配不会被"沈梦瑶"吞掉才算真正命中
-    const allKnownNames = [...new Set([
-        ...roleNames,
-        ...Object.values(nameMapping),
-    ])];
+    const allKnownNames = [...new Set(roleNames)];
 
     for (const roleName of roleNames) {
-        const realName = nameMapping[roleName] || roleName;
         let score = -1;
 
         // 1. 意图驱动：如果最新 Prompt 提到了，给予极高优先级（确保唤醒）
-        if (nameMatches(roleName, userPrompt, allKnownNames) || nameMatches(realName, userPrompt, allKnownNames)) {
+        if (nameMatches(roleName, userPrompt, allKnownNames)) {
             score = 1000000;
         } else {
             // 2. 活跃度：寻找最后一次出现的索引作为基础分
             for (let i = chat.length - 1; i >= 0; i--) {
                 const mes = chat[i].mes || "";
-                if (nameMatches(roleName, mes, allKnownNames) || nameMatches(realName, mes, allKnownNames)) {
+                if (nameMatches(roleName, mes, allKnownNames)) {
                     score = i;
                     break;
                 }
@@ -646,15 +635,6 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     let historyData = mergedDataInfo.historyData || {};
     let characterData = mergedDataInfo.characterData || {};
 
-    // 处理角色别名信息
-    if (characterData && typeof characterData === 'object') {
-        for (const roleName of Object.keys(characterData)) {
-            if (characterData[roleName] && characterData[roleName].角色设定 && characterData[roleName].角色设定.角色名 && roleName !== characterData[roleName].角色设定.角色名) {
-                nameMapping[roleName] = characterData[roleName].角色设定.角色名;
-            }
-        }
-    }
-
     // 更新角色下拉框和信息显示
     globalThis.updateRoleSelectAndInfo(JSON.parse(JSON.stringify(characterData || {})));
 
@@ -663,7 +643,7 @@ globalThis.replaceChatHistoryWithDetails = async function (chat, contextSize, ab
     printObj("[Chat History Optimization] Final Summary Info Pre", { historyData, characterData });
     $("#token-count").prop("textContent", "1");
     // --- 优化后的角色卡管理：固定 10 槽位上限 ---
-    characterData = processCharacterData(characterData, chat, nameMapping);
+    characterData = processCharacterData(characterData, chat);
 
     $("#token-count").prop("textContent", "3");
     // 保留倒数第 keepCount 条 assistant 消息及其后的所有信息

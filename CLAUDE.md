@@ -62,12 +62,12 @@ Recursively merges `delta` into `merged` with special behaviors:
 - **Empty value cleanup**: Keys set to `""` are deleted from the object.
 
 **`mergeDataInfo(chat)`**
-Scans `chat[1..]` for assistant messages containing `<NEW_STORY_DATA>` blocks, extracting `<NEW_HISTORY>` (mandatory — missing counts as a failed floor) and `<NEW_CHARACTER_CARD>` (optional — legitimately absent when no new characters appear or the role card toggle is off) sections. Returns `{ historyData, characterData }`. Applies `nameMapping` to normalize character names in the character domain. Does **not** recognize legacy `<delta>` blocks.
+Scans `chat[1..]` for assistant messages containing `<NEW_STORY_DATA>` blocks, extracting `<NEW_HISTORY>` (mandatory — missing counts as a failed floor) and `<NEW_CHARACTER_CARD>` (optional — legitimately absent when no new characters appear or the role card toggle is off) sections. Returns `{ historyData, characterData }`. Does **not** recognize legacy `<delta>` blocks.
 
 **`postProcessHistory(data)`**
 Converts `故事历程` array to markdown `前文` string via `arrayToMarkdown()`, appending existing `前文` if any. Deletes `故事历程` and `故事历程总结` after conversion. Strips any remaining `<NEW_STORY_DATA>`/`<delta>` tags from `前文`.
 
-**`processCharacterData(characterData, chat, nameMapping)`**
+**`processCharacterData(characterData, chat)`**
 Evicts/distills the character card map: 10-slot cap, current-prompt-mention priority (score 1,000,000), >30-message inactivity → keep only `角色设定`. Returns the trimmed map.
 
 **`getCharPrompt(historyData, characterData)`**
@@ -85,10 +85,6 @@ Currently **disabled and uncalled** — returns `text` unmodified via early retu
 - **Scoring**: Characters mentioned in the current user prompt get score 1,000,000 (guaranteed retention). Others score by their last appearance index in chat history.
 - **Distillation**: Characters inactive for >30 messages (and not in the current prompt) have all fields except `角色设定` stripped — dynamic state (equipment, skills, status) is discarded.
 - **Hard removal**: Characters outside the top 10 are physically deleted from `角色卡`.
-
-### Name Alias Resolution (`nameMapping`)
-
-After merging, if a character's `角色设定.角色名` differs from its key in `角色卡`, the key is renamed. This handles cases where the same character is referenced by different names across messages.
 
 ### Token Trimming Algorithm
 
