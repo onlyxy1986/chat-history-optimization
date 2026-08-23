@@ -974,6 +974,10 @@
                 onStatsChanged();
             });
             updateRetrieverStatus();
+            // ragToggle 是持久化的，页面刷新/ST 重启后模型需要重新加载
+            if (Settings.get('ragToggle') && !NS.Retriever.isReady()) {
+                NS.Retriever.init().catch(() => { });
+            }
         }
         startExtensionEntryRetry();
     }
