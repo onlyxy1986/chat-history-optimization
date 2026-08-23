@@ -1,0 +1,1037 @@
+/* ============================================================================
+   chat-optimization-v2 window styles.
+   Layout: top bar + left sidebar (feature tabs) + workspace pane,
+    borrowed from yuzuki-Memory. Design tokens + glassmorphism shell,
+    single dark theme.
+   All window styles are scoped under #coo-root to avoid leaking into ST.
+   ========================================================================== */
+
+#coo-root {
+    position: fixed !important;
+    inset: 0 !important;
+    top: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    width: 100vw !important;
+    height: 100vh !important;
+    height: 100dvh !important;
+    z-index: 30000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    pointer-events: none;
+    box-sizing: border-box;
+
+    --coo-bg: rgba(13, 16, 29, 0.94);
+    --coo-panel-bg: rgba(21, 25, 44, 0.6);
+    --coo-surface: rgba(29, 34, 58, 0.72);
+    --coo-surface-strong: rgba(37, 43, 72, 0.85);
+    --coo-row-bg: rgba(25, 30, 52, 0.6);
+    --coo-input-bg: rgba(255, 255, 255, 0.06);
+    --coo-textarea-bg: rgba(255, 255, 255, 0.05);
+    --coo-input-border: rgba(148, 163, 216, 0.35);
+    --coo-text: #eef0f8;
+    --coo-muted: rgba(205, 212, 238, 0.6);
+    --coo-icon: #93a0d8;
+    --coo-border: rgba(148, 163, 216, 0.22);
+    --coo-border-soft: rgba(148, 163, 216, 0.12);
+    --coo-hover: rgba(129, 140, 248, 0.14);
+    --coo-active-bg: linear-gradient(135deg, #8b5cf6, #6366f1);
+    --coo-active-text: #ffffff;
+    --coo-active-shadow: 0 10px 24px rgba(99, 102, 241, 0.35);
+    --coo-selected-color: #818cf8;
+    --coo-shadow: 0 24px 70px rgba(2, 6, 23, 0.6);
+    --coo-valid: #34d399;
+    --coo-valid-soft: rgba(52, 211, 153, 0.1);
+    --coo-valid-border: rgba(52, 211, 153, 0.3);
+    --coo-invalid: #fb7185;
+    --coo-invalid-soft: rgba(251, 113, 133, 0.1);
+    --coo-invalid-border: rgba(251, 113, 133, 0.3);
+    --coo-muted-badge: rgba(148, 163, 216, 0.14);
+    --coo-scrollbar: rgba(148, 163, 216, 0.3);
+    --coo-group-label: #8b96c9;
+    --coo-group-line: rgba(139, 150, 201, 0.22);
+    --coo-sidebar-width: 210px;
+}
+
+#coo-root [hidden] {
+    display: none !important;
+}
+
+/* ------------------------------ shell ---------------------------------- */
+
+#coo-root .coo-shell {
+    position: relative;
+    width: min(1120px, 100%);
+    height: min(860px, calc(100vh - 48px));
+    height: min(860px, calc(100dvh - 48px));
+    overflow: hidden;
+    pointer-events: auto;
+    display: flex;
+    flex-direction: column;
+    background: var(--coo-bg);
+    color: var(--coo-text);
+    border: 1px solid var(--coo-border);
+    border-radius: 14px;
+    box-sizing: border-box;
+    box-shadow: var(--coo-shadow);
+    backdrop-filter: blur(18px) saturate(128%);
+    -webkit-backdrop-filter: blur(18px) saturate(128%);
+}
+
+#coo-root .coo-shell-bar {
+    position: relative;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex: 0 0 auto;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--coo-border-soft);
+}
+
+#coo-root .coo-shell-brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+}
+
+#coo-root .coo-shell-logo {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    flex: 0 0 auto;
+    border-radius: 9px;
+    background: var(--coo-active-bg);
+    color: var(--coo-active-text);
+    font-size: 14px;
+    box-shadow: var(--coo-active-shadow);
+}
+
+#coo-root .coo-shell-title {
+    font-weight: 600;
+    font-size: 15px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+#coo-root .coo-version-badge {
+    flex: 0 0 auto;
+    font-size: 11px;
+    line-height: 1;
+    padding: 4px 7px;
+    border-radius: 999px;
+    color: var(--coo-muted);
+    background: var(--coo-muted-badge);
+    border: 1px solid var(--coo-border-soft);
+}
+
+#coo-root .coo-shell-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 0 0 auto;
+}
+
+#coo-root .coo-icon-button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 9px;
+    background: transparent;
+    color: var(--coo-icon);
+    font-size: 13px;
+    cursor: pointer;
+    transition: background 160ms ease, color 160ms ease, border-color 160ms ease, transform 160ms ease;
+}
+
+#coo-root .coo-icon-button:hover,
+#coo-root .coo-icon-button:focus-visible {
+    background: var(--coo-hover);
+    color: var(--coo-text);
+    border-color: var(--coo-border);
+    transform: translateY(-1px);
+    outline: none;
+}
+
+/* ------------------------------ shell body grid ------------------------- */
+
+#coo-root .coo-shell-body {
+    position: relative;
+    display: grid;
+    grid-template-columns: var(--coo-sidebar-width) 12px minmax(0, 1fr);
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow: hidden;
+    overscroll-behavior: contain;
+}
+
+#coo-root .coo-shell-body.coo-sidebar-collapsed {
+    grid-template-columns: 0 12px minmax(0, 1fr);
+}
+
+#coo-root .coo-shell-body.coo-sidebar-collapsed .coo-sidebar {
+    padding: 0;
+    overflow: hidden;
+    border-right: 0;
+}
+
+#coo-root .coo-shell-body.coo-sidebar-collapsed .coo-sidebar-status {
+    display: none;
+}
+
+/* ------------------------------ sidebar --------------------------------- */
+
+#coo-root .coo-sidebar {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    min-width: 0;
+    overflow: hidden;
+    background: var(--coo-panel-bg);
+    border-right: 1px solid var(--coo-border-soft);
+    box-sizing: border-box;
+    overscroll-behavior: contain;
+    touch-action: pan-y;
+}
+
+#coo-root .coo-sidebar-main {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    gap: 4px;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 12px 10px;
+    overscroll-behavior: contain;
+    scrollbar-width: none;
+}
+
+#coo-root .coo-sidebar-main::-webkit-scrollbar {
+    display: none;
+}
+
+#coo-root .coo-sidebar-status {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    flex: 0 0 auto;
+    min-width: 0;
+    padding: 8px 12px 10px;
+    border-top: 1px solid var(--coo-border-soft);
+    font-size: 11px;
+}
+
+#coo-root .coo-sidebar-status-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 2px;
+    color: var(--coo-muted);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+}
+
+#coo-root .coo-sidebar-status-head > i {
+    color: var(--coo-icon);
+    font-size: 10px;
+}
+
+#coo-root .coo-sidebar-status .coo-stat-row {
+    min-height: 18px;
+}
+
+#coo-root .coo-sidebar-status .coo-row-label {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+}
+
+#coo-root .coo-sidebar-status .coo-stat-value {
+    flex: 0 0 auto;
+    max-width: 50%;
+    font-size: 11px;
+}
+
+#coo-root .coo-sidebar-group-label {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    width: 100%;
+    min-width: 0;
+    margin: 4px 2px 6px;
+    color: var(--coo-group-label);
+    font-size: 9px;
+    line-height: 1.2;
+    white-space: nowrap;
+}
+
+#coo-root .coo-sidebar-group-label::before,
+#coo-root .coo-sidebar-group-label::after {
+    content: "";
+    flex: 1 1 auto;
+    height: 1px;
+    min-width: 0;
+    background: var(--coo-group-line);
+}
+
+#coo-root .coo-sidebar-group-label span {
+    position: relative;
+    flex: 0 0 auto;
+    max-width: 74px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+#coo-root .coo-sidebar-group-label span::before,
+#coo-root .coo-sidebar-group-label span::after {
+    content: "";
+    display: inline-block;
+    width: 4px;
+    height: 4px;
+    margin: 0 6px 1px;
+    background: currentColor;
+    border-radius: 1px;
+    opacity: 0.78;
+    transform: rotate(45deg);
+}
+
+/* ------------------------------ nav items ------------------------------- */
+
+#coo-root .coo-nav-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    min-height: 34px;
+    padding: 0 12px;
+    border: 1px solid transparent;
+    border-radius: 9px;
+    background: transparent;
+    color: var(--coo-text);
+    font-size: 13px;
+    font-family: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: background 160ms ease, color 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+}
+
+#coo-root .coo-nav-item > i {
+    flex: 0 0 auto;
+    width: 16px;
+    text-align: center;
+    color: var(--coo-icon);
+    font-size: 13px;
+    transition: color 160ms ease;
+}
+
+#coo-root .coo-nav-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#coo-root .coo-nav-item:hover,
+#coo-root .coo-nav-item:focus-visible {
+    background: var(--coo-hover);
+    outline: none;
+}
+
+#coo-root .coo-nav-item-active,
+#coo-root .coo-nav-item-active:hover {
+    color: var(--coo-active-text);
+    background: var(--coo-active-bg);
+    border-color: transparent;
+    box-shadow: var(--coo-active-shadow);
+}
+
+#coo-root .coo-nav-item-active > i {
+    color: inherit;
+}
+
+/* ------------------------------ sidebar toggle -------------------------- */
+
+#coo-root .coo-sidebar-toggle {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 12px;
+    min-width: 12px;
+    height: 100%;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    border-right: 1px solid var(--coo-border-soft);
+    border-radius: 0;
+    cursor: col-resize;
+    touch-action: none;
+    user-select: none;
+}
+
+#coo-root .coo-sidebar-toggle::before {
+    content: "";
+    position: absolute;
+    right: -1px;
+    top: 42%;
+    width: 16px;
+    height: 64px;
+    background: var(--coo-surface);
+    border: 1px solid var(--coo-border);
+    border-right: 0;
+    border-radius: 8px 0 0 8px;
+    box-shadow: 0 8px 18px rgba(83, 106, 198, 0.12);
+    transform: translateY(-50%);
+    transition: background 160ms ease, border-color 160ms ease;
+}
+
+#coo-root .coo-sidebar-toggle i {
+    position: absolute;
+    right: 2px;
+    top: 42%;
+    z-index: 1;
+    color: var(--coo-icon);
+    font-size: 10px;
+    transform: translateY(-50%);
+    opacity: 0;
+    transition: opacity 160ms ease;
+    pointer-events: none;
+}
+
+#coo-root .coo-sidebar-toggle:hover::before,
+#coo-root .coo-sidebar-toggle:focus-visible::before {
+    background: var(--coo-hover);
+    border-color: var(--coo-icon);
+}
+
+#coo-root .coo-sidebar-toggle:hover i,
+#coo-root .coo-sidebar-toggle:focus-visible i {
+    opacity: 1;
+}
+
+#coo-root .coo-sidebar-toggle:focus-visible {
+    outline: none;
+}
+
+/* ------------------------------ workspace ------------------------------- */
+
+#coo-root .coo-workspace {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    min-width: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 14px;
+    overscroll-behavior: contain;
+    touch-action: pan-y;
+    scrollbar-width: thin;
+    scrollbar-color: var(--coo-scrollbar) transparent;
+}
+
+#coo-root .coo-workspace::-webkit-scrollbar {
+    width: 8px;
+}
+
+#coo-root .coo-workspace::-webkit-scrollbar-thumb {
+    background: var(--coo-scrollbar);
+    border-radius: 999px;
+}
+
+#coo-root .coo-workspace::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+#coo-root .coo-tab-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    min-height: 100%;
+}
+
+#coo-root .coo-tab-panel > .coo-section {
+    flex: 1 0 auto;
+}
+
+/* ------------------------------ sections ------------------------------- */
+
+#coo-root .coo-section {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px 12px 14px;
+    border: 1px solid var(--coo-border-soft);
+    border-radius: 12px;
+    background: var(--coo-surface);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+}
+
+#coo-root .coo-section-header {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-bottom: 8px;
+    margin-bottom: 2px;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    color: var(--coo-muted);
+}
+
+#coo-root .coo-section-header > i {
+    color: var(--coo-icon);
+    font-size: 12px;
+}
+
+#coo-root .coo-section-header::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 1px;
+    background: linear-gradient(90deg, var(--coo-border), transparent 70%);
+}
+
+/* ------------------------------ rows ----------------------------------- */
+
+#coo-root .coo-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    min-height: 30px;
+}
+
+#coo-root .coo-row-label {
+    font-size: 13px;
+    color: var(--coo-text);
+}
+
+#coo-root .coo-row-hint {
+    display: block;
+    font-size: 11px;
+    color: var(--coo-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+#coo-root .coo-label-box {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+/* ------------------------------ switch ---------------------------------- */
+
+#coo-root .coo-switch-row {
+    cursor: pointer;
+    user-select: none;
+}
+
+#coo-root .coo-switch {
+    position: relative;
+    display: inline-flex;
+    flex: 0 0 auto;
+}
+
+#coo-root .coo-switch input {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    opacity: 0;
+    cursor: pointer;
+}
+
+#coo-root .coo-switch-track {
+    position: relative;
+    display: inline-block;
+    width: 38px;
+    height: 22px;
+    border-radius: 999px;
+    background: var(--coo-input-bg);
+    border: 1px solid var(--coo-border);
+    transition: background 160ms ease, border-color 160ms ease;
+}
+
+#coo-root .coo-switch-thumb {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 16px;
+    height: 16px;
+    border-radius: 999px;
+    background: #ffffff;
+    box-shadow: 0 2px 6px rgba(78, 98, 160, 0.35);
+    transition: transform 160ms ease, background 160ms ease;
+}
+
+#coo-root .coo-switch input:checked + .coo-switch-track {
+    background: var(--coo-active-bg);
+    border-color: transparent;
+    box-shadow: var(--coo-active-shadow);
+}
+
+#coo-root .coo-switch input:checked + .coo-switch-track .coo-switch-thumb {
+    transform: translateX(16px);
+}
+
+#coo-root .coo-switch input:focus-visible + .coo-switch-track {
+    outline: 2px solid var(--coo-selected-color);
+    outline-offset: 2px;
+}
+
+/* ------------------------------ inputs ---------------------------------- */
+
+#coo-root .coo-input {
+    flex: 1 1 auto;
+    width: auto;
+    max-width: 45%;
+    min-width: 0;
+    padding: 6px 10px;
+    border: 1px solid var(--coo-input-border);
+    border-radius: 9px;
+    background: var(--coo-input-bg);
+    color: var(--coo-text);
+    caret-color: var(--coo-text);
+    user-select: text;
+    -webkit-user-select: text;
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.05);
+    font-size: 13px;
+    font-family: inherit;
+    transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+#coo-root .coo-input:hover {
+    border-color: var(--coo-selected-color);
+}
+
+#coo-root .coo-input:focus {
+    outline: none;
+    border-color: var(--coo-selected-color);
+    box-shadow: 0 0 0 3px var(--coo-hover);
+}
+
+#coo-root .coo-select {
+    width: 100%;
+    padding: 7px 10px;
+    border: 1px solid var(--coo-input-border);
+    border-radius: 9px;
+    background: var(--coo-input-bg);
+    color: var(--coo-text);
+    font-size: 13px;
+    font-family: inherit;
+    cursor: pointer;
+    transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+#coo-root .coo-select:hover {
+    border-color: var(--coo-selected-color);
+}
+
+#coo-root .coo-select:focus {
+    outline: none;
+    border-color: var(--coo-selected-color);
+    box-shadow: 0 0 0 3px var(--coo-hover);
+}
+
+/* ------------------------------ stats ----------------------------------- */
+
+#coo-root .coo-stat-row {
+    min-height: 24px;
+}
+
+#coo-root .coo-stat-value {
+    flex: 0 1 auto;
+    max-width: 70%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 13px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--coo-text);
+}
+
+#coo-root .coo-stat-value.coo-stat-bad {
+    color: var(--coo-invalid);
+}
+
+/* ------------------------------ templates ------------------------------- */
+
+#coo-root .coo-template-block {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    flex: 1 1 0;
+    min-height: 0;
+    padding: 10px;
+    border: 1px solid var(--coo-border-soft);
+    border-radius: 10px;
+    background: var(--coo-row-bg);
+}
+
+#coo-root .coo-template-head {
+    display: flex;
+    align-items: center;
+    flex: 0 0 auto;
+    gap: 8px;
+}
+
+#coo-root .coo-template-head .coo-row-label {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+#coo-root .coo-textarea {
+    flex: 1 1 auto;
+    width: 100%;
+    padding: 8px 10px;
+    border: 1px solid var(--coo-input-border);
+    border-radius: 9px;
+    background: var(--coo-textarea-bg);
+    color: var(--coo-text);
+    caret-color: var(--coo-text);
+    user-select: text;
+    -webkit-user-select: text;
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.05);
+    font-size: 12px;
+    line-height: 1.55;
+    font-family: 'Cascadia Code', 'JetBrains Mono', Consolas, monospace;
+    resize: vertical;
+    min-height: 96px;
+    transition: border-color 160ms ease, box-shadow 160ms ease;
+}
+
+#coo-root .coo-textarea:hover {
+    border-color: var(--coo-selected-color);
+}
+
+#coo-root .coo-textarea:focus {
+    outline: none;
+    border-color: var(--coo-selected-color);
+    box-shadow: 0 0 0 3px var(--coo-hover);
+}
+
+/* ------------------------------ badges ---------------------------------- */
+
+#coo-root .coo-badge {
+    flex: 0 0 auto;
+    font-size: 11px;
+    line-height: 1;
+    padding: 4px 8px;
+    border-radius: 999px;
+    border: 1px solid transparent;
+}
+
+#coo-root .coo-badge-muted {
+    color: var(--coo-muted);
+    background: var(--coo-muted-badge);
+}
+
+#coo-root .coo-badge-valid {
+    color: var(--coo-valid);
+    background: var(--coo-valid-soft);
+    border-color: var(--coo-valid-border);
+}
+
+#coo-root .coo-badge-invalid {
+    color: var(--coo-invalid);
+    background: var(--coo-invalid-soft);
+    border-color: var(--coo-invalid-border);
+}
+
+/* ------------------------------ buttons --------------------------------- */
+
+#coo-root .coo-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 6px 12px;
+    border: 1px solid var(--coo-border);
+    border-radius: 9px;
+    background: var(--coo-surface-strong);
+    color: var(--coo-text);
+    font-size: 12px;
+    font-family: inherit;
+    cursor: pointer;
+    transition: background 160ms ease, border-color 160ms ease, color 160ms ease, transform 160ms ease, box-shadow 160ms ease;
+}
+
+#coo-root .coo-button:hover,
+#coo-root .coo-button:focus-visible {
+    border-color: var(--coo-selected-color);
+    box-shadow: var(--coo-active-shadow);
+    transform: translateY(-1px);
+    outline: none;
+}
+
+#coo-root .coo-button-ghost {
+    background: transparent;
+    color: var(--coo-muted);
+    border-color: transparent;
+}
+
+#coo-root .coo-button-ghost:hover,
+#coo-root .coo-button-ghost:focus-visible {
+    background: var(--coo-hover);
+    color: var(--coo-text);
+    border-color: var(--coo-border);
+    box-shadow: none;
+}
+
+#coo-root .coo-button-sm {
+    padding: 4px 9px;
+    font-size: 11px;
+}
+
+/* ------------------------------ role viewer ----------------------------- */
+
+#coo-root .coo-role-info {
+    flex: 1 1 auto;
+    min-height: 42px;
+    min-width: 0;
+    margin-top: 4px;
+    padding: 10px;
+    border: 1px solid var(--coo-border-soft);
+    border-radius: 10px;
+    background: var(--coo-row-bg);
+    font-size: 12.5px;
+    line-height: 1.7;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--coo-scrollbar) transparent;
+}
+
+#coo-root .coo-role-info::-webkit-scrollbar {
+    width: 8px;
+}
+
+#coo-root .coo-role-info::-webkit-scrollbar-thumb {
+    background: var(--coo-scrollbar);
+    border-radius: 999px;
+}
+
+#coo-root .coo-role-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    column-gap: 6px;
+    row-gap: 2px;
+}
+
+#coo-root .coo-role-key {
+    flex: 0 0 auto;
+    color: var(--coo-selected-color);
+    font-weight: 600;
+}
+
+#coo-root .coo-role-value {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+#coo-root .coo-role-children {
+    flex: 0 0 100%;
+}
+
+#coo-root .coo-role-value {
+    color: var(--coo-text);
+    word-break: break-word;
+}
+
+#coo-root .coo-role-empty {
+    color: var(--coo-muted);
+}
+
+/* ------------------------------ story viewer ---------------------------- */
+
+#coo-root .coo-story-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+#coo-root .coo-story-range-field {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+#coo-root .coo-story-range-field .coo-input {
+    flex: 0 0 auto;
+    width: 88px;
+    max-width: 88px;
+}
+
+#coo-root .coo-story-info {
+    font-size: 12px;
+    color: var(--coo-muted);
+}
+
+#coo-root .coo-story-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 4px;
+}
+
+#coo-root .coo-story-item {
+    padding: 10px 12px;
+    border: 1px solid var(--coo-border-soft);
+    border-radius: 10px;
+    background: var(--coo-row-bg);
+}
+
+#coo-root .coo-story-item-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+}
+
+#coo-root .coo-story-floor {
+    flex: 0 0 auto;
+    font-size: 11px;
+    line-height: 1;
+    padding: 4px 8px;
+    border-radius: 999px;
+    color: var(--coo-selected-color);
+    background: var(--coo-hover);
+    border: 1px solid var(--coo-border);
+    font-variant-numeric: tabular-nums;
+}
+
+#coo-root .coo-story-item-meta {
+    min-width: 0;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--coo-text);
+}
+
+#coo-root .coo-story-item-body {
+    font-size: 12.5px;
+    line-height: 1.7;
+    color: var(--coo-text);
+    word-break: break-word;
+}
+
+/* ------------------------------ wand menu entry ------------------------- */
+
+.coo-extension-entry {
+    width: 100%;
+    cursor: pointer;
+}
+
+.coo-extension-row {
+    align-items: center;
+    justify-content: flex-start;
+}
+
+.coo-extension-row > .coo-extension-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: inherit !important;
+    font-size: 0.9em;
+    line-height: 1;
+    margin-left: 0;
+    transform: translateY(0.02em);
+}
+
+.coo-extension-label {
+    line-height: 1.2;
+}
+
+/* ------------------------------ responsive ------------------------------ */
+
+@media (max-width: 760px) {
+    #coo-root {
+        --coo-sidebar-width: 56px;
+        padding: 0;
+        align-items: stretch;
+        justify-content: stretch;
+    }
+
+    #coo-root .coo-shell {
+        width: 100%;
+        height: 100%;
+        border-radius: 0;
+        border: none;
+    }
+
+    #coo-root .coo-sidebar-main {
+        padding: 12px 6px;
+    }
+
+    #coo-root .coo-sidebar-group-label span {
+        display: none;
+    }
+
+    #coo-root .coo-nav-item {
+        justify-content: center;
+        padding: 0;
+    }
+
+    #coo-root .coo-nav-label {
+        display: none;
+    }
+
+    #coo-root .coo-workspace {
+        padding: 12px;
+    }
+
+    #coo-root .coo-input {
+        flex-basis: 110px;
+    }
+
+    #coo-root .coo-sidebar-status {
+        align-items: center;
+        padding: 8px 4px 10px;
+    }
+
+    #coo-root .coo-sidebar-status-head span {
+        display: none;
+    }
+
+    #coo-root .coo-sidebar-status .coo-stat-row {
+        flex-direction: column;
+        align-items: center;
+        gap: 1px;
+    }
+
+    #coo-root .coo-sidebar-status .coo-row-label {
+        display: none;
+    }
+
+    #coo-root .coo-sidebar-status .coo-stat-value {
+        max-width: 100%;
+        font-size: 10px;
+    }
+}
