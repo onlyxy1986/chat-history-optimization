@@ -26,11 +26,14 @@
         "学术": ""
     };
 
-    let keepMessageCount = 0;
+    const RAG_TOP_K = 6;
+    const RAG_MIN_SCORE = 0.3;
+
     let lastStats = {
         tokenCount: 0,
         failedFloors: [],
         roles: {},
+        rag: null,
     };
     const statsListeners = new Set();
 
@@ -76,6 +79,7 @@
             tokenCount: lastStats.tokenCount,
             failedFloors: [...lastStats.failedFloors],
             roles: JSON.parse(JSON.stringify(lastStats.roles)),
+            rag: lastStats.rag ? JSON.parse(JSON.stringify(lastStats.rag)) : null,
         };
     }
 
@@ -351,21 +355,27 @@
         return process;
     }
 
-    function arrayToMarkdown(data, n = 0) {
-        // 从完整数据中确定最新的天数（包含被n排除的尾部，以确保正确识别当前天）
+    function computeMaxDay(entries) {
         let maxDay = 0;
-        for (const item of data) {
-            const day = parseDayNumber(item.天数);
+        if (!Array.isArray(entries)) return maxDay;
+        for (const item of entries) {
+            const day = parseDayNumber(item && item.天数);
             if (day !== null && day > maxDay) maxDay = day;
         }
+        return maxDay;
+    }
 
-        // 计算需要处理的数据范围（排除最后n个元素）
-        const endIndex = n > 0 ? data.length - n : data.length;
-        const processedData = data.slice(0, endIndex);
+    /**
+     * 将一组故事历程条目渲染为 markdown。
+     * maxDay 必须从完整历程（含被窗口排除的部分）计算，以正确识别"当前天"。
+     * 早于 maxDay 的天聚合格式；maxDay 与无法解析的天使用详细格式。
+     */
+    function renderJourneyMarkdown(entries, maxDay) {
+        if (!Array.isArray(entries) || entries.length === 0) return '';
 
         // 回退：没有可解析的天数，所有事件使用详细格式
         if (maxDay === 0) {
-            return processedData.map(item => {
+            return entries.map(item => {
                 const header = `# ${item.天数}|${item.时间段}|${item.地点}`;
                 const process = extractItemProcess(item);
                 return `${header.trim()}\n## ${process.trim()}`;
@@ -374,7 +384,7 @@
 
         // 按天数分组（无法解析的归入 -1）
         const groups = {};
-        for (const item of processedData) {
+        for (const item of entries) {
             const day = parseDayNumber(item.天数);
             const key = day !== null ? day : -1;
             if (!groups[key]) groups[key] = [];
@@ -405,17 +415,18 @@
         return result.join('\n');
     }
 
-    function postProcessHistory(data) {
-        if (data && data.故事历程 && Array.isArray(data.故事历程)) {
-            data.前文 = arrayToMarkdown(data.故事历程, keepMessageCount) + '\n' + (data.前文 || '');
-            data.故事历程 = [];
-        }
-        if (data && data.故事历程总结 && Array.isArray(data.故事历程总结)) {
-            data.前文 = arrayToMarkdown(data.故事历程总结, 0) + '\n' + (data.前文 || '');
-            delete data.故事历程总结;
-        }
-        printObj("[Chat History Optimization] Post Processed 前文", data.前文);
-        return data;
+    /**
+     * 单条历程条目 → RAG 文档文本（用于嵌入与展示）。
+     */
+    function entryToDocText(entry) {
+        const meta = [entry && entry.天数, entry && entry.时间段, entry && entry.地点]
+            .map(s => (s == null ? '' : String(s).trim())).filter(Boolean).join(' ');
+        const process = extractItemProcess(entry).trim();
+        return [meta, process].filter(Boolean).join(' ');
+    }
+
+    function joinNonEmpty(parts) {
+        return parts.map(s => (s || '').trim()).filter(Boolean).join('\n');
     }
 
     /**
@@ -505,24 +516,40 @@
         return { entries: entries, startFloor: start, endFloor: end, totalFloors: totalFloors };
     }
 
-    function getCharPrompt(historyData, characterData) {
-        historyData = postProcessHistory(historyData || {});
+    /**
+     * 将敏感词替换应用到文本。
+     */
+    function applyWordMapping(text) {
+        let result = text || '';
+        for (const [key, value] of Object.entries(wordMapping)) {
+            result = result.replace(new RegExp(key, 'g'), value);
+        }
+        return result;
+    }
+
+    /**
+     * 构建注入 prompt。historyData.前文 已是最终装配文本（总结+中段+正文），
+     * ragSection 为 RAG 远端记忆区段内容（可为空）。
+     */
+    function getCharPrompt(historyData, characterData, ragSection) {
+        historyData = historyData || {};
         // 将前文从历史数据中剥离，单独放入HISTORY
-        let historyContent = historyData.前文 || '';
+        let historyContent = applyWordMapping(historyData.前文 || '');
         delete historyData.前文;
-        // 对前文也应用敏感词替换
-        for (const [key, value] of Object.entries(wordMapping)) {
-            historyContent = historyContent.replace(new RegExp(key, 'g'), value);
-        }
-        let charsInfoJsonStr = JSON.stringify(characterData || {});
-        for (const [key, value] of Object.entries(wordMapping)) {
-            charsInfoJsonStr = charsInfoJsonStr.replace(new RegExp(key, 'g'), value);
-        }
+        let relatedMemory = applyWordMapping(ragSection || '');
+        let charsInfoJsonStr = applyWordMapping(JSON.stringify(characterData || {}));
 
         // 角色卡功能关闭时，不注入角色卡区段与模板
         const roleCardEnabled = isRoleCardEnabled();
         const newHistoryTemplate = Settings.get('historyPrompt');
         const newCharacterCardTemplate = roleCardEnabled ? Settings.get('characterPrompt') : '';
+
+        const relatedMemoryBlock = relatedMemory
+            ? `<RELATED_MEMORY>
+${relatedMemory}
+</RELATED_MEMORY>
+`
+            : '';
 
         const prompt = `
 <STORY_DATA>
@@ -531,6 +558,7 @@
 ${historyContent}
 </HISTORY>
 
+${relatedMemoryBlock}
 ${roleCardEnabled ? `<CHARACTER_CARD>
 ${charsInfoJsonStr}
 </CHARACTER_CARD>
@@ -617,51 +645,168 @@ ${newCharacterCardTemplate}
     }
 
     /**
-     * 只读解析当前聊天记录并刷新统计（失败楼层/角色卡/Token 数），
-     * 用于 UI 打开前拿到最新数据。不修改 ST 的 chat 数组。
+     * 分层注入核心：把故事数据装配为 总结 + 中段历程 + 正文（verbatim 尾部）。
+     *
+     * - 正文：倒数第 keepCount 条 assistant 回复起的原文（其 messageCount 对应的
+     *   历程条目已被正文覆盖，从历程中排除，避免重复）。
+     * - 中段：历程中未被正文覆盖的条目；RAG 触发时二分搜索最大后缀窗口，
+     *   使 窗口+总结+正文+角色卡 ≤ tokenLimit - ragBudget。
+     * - RAG：触发时（ragToggle 且模型就绪且 全量 > tokenLimit×(1-ragRatio)），
+     *   窗口外的远端条目按与最新用户消息的余弦相似度 topK 注入 <RELATED_MEMORY>，
+     *   预算 ragBudget = tokenLimit × ragRatio。
+     * - 未触发：全量注入，不裁剪。
+     *
+     * @param {object[]} chatCopy - 聊天记录的深拷贝（mergeDataInfo 会写入 messageCount）
+     * @param {{runRag?: boolean}} options - runRag=false 时只判断是否触发，不执行检索
      */
-    async function refreshStats() {
-        const sourceChat = NS.bridge && NS.bridge.getCurrentChat ? NS.bridge.getCurrentChat() : null;
-        if (!sourceChat || !Array.isArray(sourceChat) || sourceChat.length === 0) return;
-        // 深拷贝：mergeDataInfo 会写入 item.messageCount，不能污染 ST 数据
-        const chat = JSON.parse(JSON.stringify(sourceChat));
-        const historyTemplate = parseTemplate(Settings.get('historyPrompt'));
-        const characterTemplate = isRoleCardEnabled() ? parseTemplate(Settings.get('characterPrompt')) : null;
-        const mergedDataInfo = mergeDataInfo(chat, historyTemplate, characterTemplate);
+    async function buildPromptData(chatCopy, options) {
+        const runRag = Boolean(options && options.runRag);
+        const historyTemplate = parseTemplate(Settings.get('historyPrompt'), true);
+        const characterTemplate = isRoleCardEnabled() ? parseTemplate(Settings.get('characterPrompt'), true) : null;
+        if (historyTemplate === null || (isRoleCardEnabled() && characterTemplate === null)) {
+            console.error('[Chat History Optimization] 模板解析失败，生成可能异常，请在"模板"选项卡检查 JSON');
+        }
+        const mergedDataInfo = mergeDataInfo(chatCopy, historyTemplate, characterTemplate);
         const historyData = mergedDataInfo.historyData || {};
-        const rawCharacterData = mergedDataInfo.characterData || {};
-        let characterData = processCharacterData(rawCharacterData, chat);
+        const characterData = processCharacterData(mergedDataInfo.characterData || {}, chatCopy);
+        const charJson = JSON.stringify(characterData);
 
+        // --- 正文：倒数第 keepCount 条 assistant 消息及其后的原文 ---
         let assistantIdxArr = [];
-        for (let i = 0; i < chat.length; i++) {
-            if (!chat[i].is_user) assistantIdxArr.push(i);
+        for (let i = 0; i < chatCopy.length; i++) {
+            if (!chatCopy[i].is_user) assistantIdxArr.push(i);
         }
         let keepCount = Settings.get('keepCount');
         if (typeof keepCount !== 'number' || isNaN(keepCount)) keepCount = Settings.defaultSettings.keepCount;
         if (keepCount == 0 && assistantIdxArr.length == 1) keepCount = 1;
         if (keepCount > assistantIdxArr.length) keepCount = assistantIdxArr.length;
+        let tailText = '';
+        let tailCovered = 0;
         if (keepCount > 0) {
             const startIdx = assistantIdxArr[assistantIdxArr.length - keepCount];
-            let tail = chat
+            tailText = chatCopy
                 .slice(startIdx)
                 .filter(item => item && item.is_user === false)
-                .map(item => (item && item.mes) || '');
-            historyData.前文 = tail.join('\n');
-        } else {
-            historyData.前文 = "";
-        }
-        let tokenLimit = Settings.get('tokenLimit');
-        if (typeof tokenLimit !== 'number' || isNaN(tokenLimit)) tokenLimit = Settings.defaultSettings.tokenLimit;
-        let tokenCount = await getTokenCountAsync(JSON.stringify(historyData) + JSON.stringify(characterData));
-        while (tokenCount > tokenLimit && historyData.故事历程 && historyData.故事历程.length > 0) {
-            historyData.故事历程 = historyData.故事历程.slice(Math.floor(historyData.故事历程.length / 50));
-            tokenCount = await getTokenCountAsync(JSON.stringify(historyData) + JSON.stringify(characterData));
+                .map(item => {
+                    if (!item || !item.mes) return '';
+                    tailCovered += item.messageCount || 0;
+                    return item.mes;
+                })
+                .join('\n');
         }
 
-        notifyStats({
+        // --- 历程拆分：maxDay 从完整历程计算；正文覆盖的尾部条目从中段排除 ---
+        const fullJourney = Array.isArray(historyData.故事历程) ? historyData.故事历程 : [];
+        const summaryEntries = Array.isArray(historyData.故事历程总结) ? historyData.故事历程总结 : [];
+        const midEntries = tailCovered > 0
+            ? fullJourney.slice(0, Math.max(0, fullJourney.length - tailCovered))
+            : [...fullJourney];
+        const midMaxDay = computeMaxDay(fullJourney);
+        const summaryMarkdown = renderJourneyMarkdown(summaryEntries, computeMaxDay(summaryEntries));
+        delete historyData.故事历程;
+        delete historyData.故事历程总结;
+
+        let tokenLimit = Settings.get('tokenLimit');
+        if (typeof tokenLimit !== 'number' || isNaN(tokenLimit)) tokenLimit = Settings.defaultSettings.tokenLimit;
+        let ragRatio = Settings.get('ragRatio');
+        if (typeof ragRatio !== 'number' || isNaN(ragRatio) || ragRatio <= 0) ragRatio = Settings.defaultSettings.ragRatio;
+
+        const fullMidMarkdown = renderJourneyMarkdown(midEntries, midMaxDay);
+        const fullTokens = await getTokenCountAsync(joinNonEmpty([summaryMarkdown, fullMidMarkdown, tailText]) + charJson);
+
+        const ragReady = NS.Retriever ? NS.Retriever.isReady() : false;
+        const ragWillActivate = Boolean(Settings.get('ragToggle')) && ragReady
+            && fullTokens > tokenLimit * (1 - ragRatio);
+        console.log(`[Chat History Optimization] 全量 ${fullTokens} tokens，tokenLimit=${tokenLimit}，ragRatio=${ragRatio}，RAG ${ragWillActivate ? '将启用' : '不启用'}（toggle=${Settings.get('ragToggle')}, ready=${ragReady}）`);
+
+        let rag = {
+            active: false,
+            willActivate: ragWillActivate,
+            hits: [],
+            windowCount: midEntries.length,
+            farCount: 0,
+            query: '',
+        };
+        let midMarkdown = fullMidMarkdown;
+        let ragSection = '';
+
+        if (ragWillActivate && runRag && midEntries.length > 0) {
+            const ragBudget = Math.max(1, Math.round(tokenLimit * ragRatio));
+            const midBudget = tokenLimit - ragBudget;
+            // 二分搜索最大后缀窗口 k：tokens(窗口markdown + 总结 + 正文 + 角色卡) ≤ midBudget
+            let lo = 0, hi = midEntries.length, bestK = 0;
+            while (lo <= hi) {
+                const k = (lo + hi) >> 1;
+                const windowMarkdown = k === 0 ? '' : renderJourneyMarkdown(midEntries.slice(midEntries.length - k), midMaxDay);
+                const tokens = await getTokenCountAsync(joinNonEmpty([summaryMarkdown, windowMarkdown, tailText]) + charJson);
+                if (tokens <= midBudget) {
+                    bestK = k;
+                    lo = k + 1;
+                } else {
+                    hi = k - 1;
+                }
+            }
+            const farEntries = midEntries.slice(0, midEntries.length - bestK);
+            midMarkdown = bestK === 0 ? '' : renderJourneyMarkdown(midEntries.slice(midEntries.length - bestK), midMaxDay);
+            rag.windowCount = bestK;
+            rag.farCount = farEntries.length;
+
+            const query = (chatCopy[chatCopy.length - 1] && chatCopy[chatCopy.length - 1].mes) || '';
+            rag.query = query;
+            if (farEntries.length > 0 && query && NS.Retriever) {
+                try {
+                    const docs = farEntries.map(entryToDocText);
+                    const hits = await NS.Retriever.retrieve(query, docs, RAG_TOP_K, RAG_MIN_SCORE);
+                    // 按预算贪心装入命中条目
+                    let used = 0;
+                    const lines = [];
+                    for (const hit of hits) {
+                        const t = await getTokenCountAsync(hit.text);
+                        if (used + t > ragBudget) break;
+                        lines.push(hit.text);
+                        used += t;
+                        rag.hits.push({ text: hit.text, score: hit.score });
+                    }
+                    if (lines.length > 0) {
+                        ragSection = lines.join('\n');
+                        rag.active = true;
+                    }
+                } catch (e) {
+                    console.error('[Chat History Optimization] RAG retrieval failed, fallback to no-RAG', e);
+                    rag = { active: false, willActivate: false, hits: [], windowCount: midEntries.length, farCount: 0, query: '' };
+                    midMarkdown = fullMidMarkdown;
+                    ragSection = '';
+                }
+            }
+        }
+
+        historyData.前文 = joinNonEmpty([summaryMarkdown, midMarkdown, tailText]);
+        const tokenCount = await getTokenCountAsync(historyData.前文 + ragSection + charJson);
+
+        return {
+            historyData,
+            characterData,
             failedFloors: mergedDataInfo.failedFloors,
-            roles: JSON.parse(JSON.stringify(rawCharacterData)),
+            ragSection,
             tokenCount,
+            rag,
+        };
+    }
+
+    /**
+     * 只读解析当前聊天记录并刷新统计（失败楼层/角色卡/Token 数），
+     * 用于 UI 打开前拿到最新数据。不执行 RAG 检索，不修改 ST 的 chat 数组。
+     */
+    async function refreshStats() {
+        const sourceChat = NS.bridge && NS.bridge.getCurrentChat ? NS.bridge.getCurrentChat() : null;
+        if (!sourceChat || !Array.isArray(sourceChat) || sourceChat.length === 0) return;
+        const chatCopy = JSON.parse(JSON.stringify(sourceChat));
+        const result = await buildPromptData(chatCopy, { runRag: false });
+        notifyStats({
+            failedFloors: result.failedFloors,
+            roles: JSON.parse(JSON.stringify(result.characterData)),
+            tokenCount: result.tokenCount,
+            rag: result.rag,
         });
     }
 
@@ -675,74 +820,33 @@ ${newCharacterCardTemplate}
             return;
         }
 
-        keepMessageCount = 0;
         printObj("[Chat History Optimization] Original chat history:", chat);
         let isFirstMessage = false;
         if (chat.length == 2 && chat[0].is_user === false && chat[1].is_user === true) {
             isFirstMessage = true;
         }
-        const historyTemplate = parseTemplate(Settings.get('historyPrompt'), true);
-        const characterTemplate = isRoleCardEnabled() ? parseTemplate(Settings.get('characterPrompt'), true) : null;
-        if (historyTemplate === null || (isRoleCardEnabled() && characterTemplate === null)) {
-            console.error('[Chat History Optimization] 模板解析失败，生成可能异常，请在"模板"选项卡检查 JSON');
-        }
-        let mergedDataInfo = mergeDataInfo(chat, historyTemplate, characterTemplate);
-        let historyData = mergedDataInfo.historyData || {};
-        let characterData = mergedDataInfo.characterData || {};
+
+        // 深拷贝：mergeDataInfo 会写入 item.messageCount，不能污染 ST 数据
+        const chatCopy = JSON.parse(JSON.stringify(chat));
+        const result = await buildPromptData(chatCopy, { runRag: true });
+        const historyData = result.historyData;
+        const characterData = result.characterData;
 
         notifyStats({
-            failedFloors: mergedDataInfo.failedFloors,
-            roles: JSON.parse(JSON.stringify(characterData || {})),
+            failedFloors: result.failedFloors,
+            roles: JSON.parse(JSON.stringify(characterData)),
+            tokenCount: result.tokenCount,
+            rag: result.rag,
         });
 
-        const tokenCount_origin = await getTokenCountAsync(JSON.stringify(historyData) + JSON.stringify(characterData));
-        console.log("[Chat History Optimization] origin token count:", tokenCount_origin);
-        printObj("[Chat History Optimization] Final Summary Info Pre", { historyData, characterData });
-        // --- 优化后的角色卡管理：固定 10 槽位上限 ---
-        characterData = processCharacterData(characterData, chat);
-
-        // 保留倒数第 keepCount 条 assistant 消息及其后的所有信息
-        let assistantIdxArr = [];
-        for (let i = 0; i < chat.length; i++) {
-            if (!chat[i].is_user) assistantIdxArr.push(i);
+        console.log("[Chat History Optimization] token count:", result.tokenCount);
+        printObj("[Chat History Optimization] Final Summary Info", { historyData, characterData, ragSection: result.ragSection });
+        if (!result.rag.active && result.tokenCount > Settings.get('tokenLimit')) {
+            console.warn("[Chat History Optimization] 内容超出 token 限制且 RAG 未生效（未开启或模型未就绪），按全量注入。");
         }
-        let keepCount = Settings.get('keepCount');
-        if (typeof keepCount !== 'number' || isNaN(keepCount)) keepCount = Settings.defaultSettings.keepCount;
-        if (keepCount == 0 && assistantIdxArr.length == 1) keepCount = 1;
-        if (keepCount > assistantIdxArr.length) keepCount = assistantIdxArr.length;
-        if (keepCount > 0) {
-            const startIdx = assistantIdxArr[assistantIdxArr.length - keepCount];
-            let tail = chat
-                .slice(startIdx)
-                .filter(item => item && item.is_user === false)
-                .map(item => {
-                    if (!item || !item.mes) return '';
-                    keepMessageCount += item.messageCount;
-                    return item.mes;
-                });
-            historyData.前文 = tail.join('\n');
-        } else {
-            historyData.前文 = "";
-        }
-        let tokenLimit = Settings.get('tokenLimit');
-        if (typeof tokenLimit !== 'number' || isNaN(tokenLimit)) tokenLimit = Settings.defaultSettings.tokenLimit;
-        let tokenCount = await getTokenCountAsync(JSON.stringify(historyData) + JSON.stringify(characterData));
-        // 超限裁剪：剪故事历程；故事历程已空仍超限则停止（硬停守卫，旧代码会无限循环）
-        while (tokenCount > tokenLimit && historyData.故事历程 && historyData.故事历程.length > 0) {
-            historyData.故事历程 = historyData.故事历程.slice(Math.floor(historyData.故事历程.length / 50));
-            tokenCount = await getTokenCountAsync(JSON.stringify(historyData) + JSON.stringify(characterData));
-            console.warn("[Chat History Optimization] Summary info is too large, reduce message to count.", tokenCount);
-        }
-        if (tokenCount > tokenLimit) {
-            console.warn("[Chat History Optimization] Summary info still exceeds token limit after trimming history.");
-        }
-
-        notifyStats({ tokenCount });
-        console.log("[Chat History Optimization] token count:", tokenCount);
-        printObj("[Chat History Optimization] Final Summary Info Post", { historyData, characterData });
 
         const mergedChat = [];
-        chat[chat.length - 1]['mes'] = getCharPrompt(historyData, characterData);
+        chat[chat.length - 1]['mes'] = getCharPrompt(historyData, characterData, result.ragSection);
         if (isFirstMessage) {
             chat[chat.length - 1]['mes'] = chat[chat.length - 1]['mes'] + "\n（此为首条信息，<NEW_STORY_DATA>中需要参考前文和当前输出的信息生成全量信息，尤其注意'故事历程'需额外添加前文的历程）";
         }

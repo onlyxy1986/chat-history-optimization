@@ -11,12 +11,13 @@ import { getTokenCountAsync } from '../../../tokenizers.js';
     'use strict';
 
     const NAMESPACE = 'ChatOptimizationV2';
-    const VERSION = '2.1.0';
+    const VERSION = '2.2.0';
     const baseUrl = new URL('./', import.meta.url).href;
 
     const MODULES = [
         'config/settings.js',
         'config/engine.js',
+        'config/retrieval.js',
         'ui/coo-window.js',
     ];
 
