@@ -624,6 +624,7 @@
         if (!select) return;
 
         const roles = stats.roles || {};
+        const activeNames = new Set(stats.activeRoleNames || []);
         const names = Object.keys(roles);
         if (selectedRoleName && !roles[selectedRoleName]) selectedRoleName = '';
 
@@ -636,7 +637,7 @@
         for (const name of names) {
             const option = document.createElement('option');
             option.value = name;
-            option.textContent = name;
+            option.textContent = activeNames.has(name) ? `${name} <活跃角色>` : name;
             select.appendChild(option);
         }
         select.value = selectedRoleName || (names.includes(previous) ? previous : '');

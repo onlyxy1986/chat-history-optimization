@@ -33,6 +33,7 @@
         tokenCount: 0,
         failedFloors: [],
         roles: {},
+        activeRoleNames: [],
         rag: null,
     };
     const statsListeners = new Set();
@@ -79,6 +80,7 @@
             tokenCount: lastStats.tokenCount,
             failedFloors: [...lastStats.failedFloors],
             roles: JSON.parse(JSON.stringify(lastStats.roles)),
+            activeRoleNames: [...lastStats.activeRoleNames],
             rag: lastStats.rag ? JSON.parse(JSON.stringify(lastStats.rag)) : null,
         };
     }
@@ -89,9 +91,6 @@
 
     function checkPath(path, template) {
         let current = template;
-        if (path.length == 1 && path[0] === '故事历程总结') {
-            return true;
-        }
         for (let j = 0; j < path.length; j++) {
             let key = path[j];
             if (key in current) {
@@ -182,10 +181,6 @@
     }
 
     function deepMerge(merged, delta, path = [], allowUpdate = false, template = null) {
-        if (path.length == 0 && delta.故事历程总结 && merged.故事历程) {
-            merged.故事历程 = [];
-            delta.故事历程 = [];
-        }
         // 检查target是否为数组并且source是否为字符串
         if (Array.isArray(merged) && typeof delta === 'string') {
             // 使用正则表达式匹配 "delete start-end" 格式
@@ -528,7 +523,7 @@
     }
 
     /**
-     * 构建注入 prompt。historyData.前文 已是最终装配文本（总结+中段+正文），
+     * 构建注入 prompt。historyData.前文 已是最终装配文本（中段+正文），
      * ragSection 为 RAG 远端记忆区段内容（可为空）。
      */
     function getCharPrompt(historyData, characterData, ragSection) {
@@ -644,15 +639,16 @@ ${newCharacterCardTemplate}
     }
 
     /**
-     * 分层注入核心：把故事数据装配为 总结 + 中段历程 + 正文（verbatim 尾部）。
+     * 分层注入核心：把故事数据装配为 中段历程 + 正文（verbatim 尾部）。
      *
      * - 正文：倒数第 keepCount 条 assistant 回复起的原文（其 messageCount 对应的
      *   历程条目已被正文覆盖，从历程中排除，避免重复）。
      * - 中段：历程中未被正文覆盖的条目；RAG 触发时二分搜索最大后缀窗口，
-     *   使 窗口+总结+正文+角色卡 ≤ tokenLimit - ragBudget。
+     *   使 窗口+正文+角色卡 ≤ tokenLimit - ragBudget。
      * - RAG：触发时（ragToggle 且模型就绪且 全量 > tokenLimit×(1-ragRatio)），
-     *   窗口外的远端条目按与最新用户消息的余弦相似度 topK 注入 <RELATED_MEMORY>，
-     *   预算 ragBudget = tokenLimit × ragRatio。
+     *   以 最新用户消息 + 窗口历程条目（最新→次新→…）为查询序列逐个检索，
+     *   窗口外的远端条目按余弦相似度 topK 贪心装入，直到预算装满，
+     *   注入 <RELATED_MEMORY>，预算 ragBudget = tokenLimit × ragRatio。
      * - 未触发：全量注入，不裁剪。
      *
      * @param {object[]} chatCopy - 聊天记录的深拷贝（mergeDataInfo 会写入 messageCount）
@@ -696,14 +692,11 @@ ${newCharacterCardTemplate}
 
         // --- 历程拆分：maxDay 从完整历程计算；正文覆盖的尾部条目从中段排除 ---
         const fullJourney = Array.isArray(historyData.故事历程) ? historyData.故事历程 : [];
-        const summaryEntries = Array.isArray(historyData.故事历程总结) ? historyData.故事历程总结 : [];
         const midEntries = tailCovered > 0
             ? fullJourney.slice(0, Math.max(0, fullJourney.length - tailCovered))
             : [...fullJourney];
         const midMaxDay = computeMaxDay(fullJourney);
-        const summaryMarkdown = renderJourneyMarkdown(summaryEntries, computeMaxDay(summaryEntries));
         delete historyData.故事历程;
-        delete historyData.故事历程总结;
 
         let tokenLimit = Settings.get('tokenLimit');
         if (typeof tokenLimit !== 'number' || isNaN(tokenLimit)) tokenLimit = Settings.defaultSettings.tokenLimit;
@@ -711,7 +704,7 @@ ${newCharacterCardTemplate}
         if (typeof ragRatio !== 'number' || isNaN(ragRatio) || ragRatio <= 0) ragRatio = Settings.defaultSettings.ragRatio;
 
         const fullMidMarkdown = renderJourneyMarkdown(midEntries, midMaxDay);
-        const fullTokens = await getTokenCountAsync(joinNonEmpty([summaryMarkdown, fullMidMarkdown, tailText]) + charJson);
+        const fullTokens = await getTokenCountAsync(joinNonEmpty([fullMidMarkdown, tailText]) + charJson);
 
         const ragReady = NS.Retriever ? NS.Retriever.isReady() : false;
         const ragWillActivate = Boolean(Settings.get('ragToggle')) && ragReady
@@ -732,12 +725,12 @@ ${newCharacterCardTemplate}
         if (ragWillActivate && runRag && midEntries.length > 0) {
             const ragBudget = Math.max(1, Math.round(tokenLimit * ragRatio));
             const midBudget = tokenLimit - ragBudget;
-            // 二分搜索最大后缀窗口 k：tokens(窗口markdown + 总结 + 正文 + 角色卡) ≤ midBudget
+            // 二分搜索最大后缀窗口 k：tokens(窗口markdown + 正文 + 角色卡) ≤ midBudget
             let lo = 0, hi = midEntries.length, bestK = 0;
             while (lo <= hi) {
                 const k = (lo + hi) >> 1;
                 const windowMarkdown = k === 0 ? '' : renderJourneyMarkdown(midEntries.slice(midEntries.length - k), midMaxDay);
-                const tokens = await getTokenCountAsync(joinNonEmpty([summaryMarkdown, windowMarkdown, tailText]) + charJson);
+                const tokens = await getTokenCountAsync(joinNonEmpty([windowMarkdown, tailText]) + charJson);
                 if (tokens <= midBudget) {
                     bestK = k;
                     lo = k + 1;
@@ -752,19 +745,33 @@ ${newCharacterCardTemplate}
 
             const query = (chatCopy[chatCopy.length - 1] && chatCopy[chatCopy.length - 1].mes) || '';
             rag.query = query;
-            if (farEntries.length > 0 && query && NS.Retriever) {
+            // 查询序列：最新用户消息在前，随后按 最新→次新→… 取窗口历程条目
+            const queries = [query, ...midEntries.slice(midEntries.length - bestK).reverse().map(entryToDocText)]
+                .filter((q) => q);
+            if (farEntries.length > 0 && queries.length > 0 && NS.Retriever) {
                 try {
                     const docs = farEntries.map(entryToDocText);
-                    const hits = await NS.Retriever.retrieve(query, docs, RAG_TOP_K, RAG_MIN_SCORE);
-                    // 按预算贪心装入命中条目
+                    const uniqueDocCount = new Set(docs).size;
                     let used = 0;
+                    let minDocTokens = Infinity;
                     const lines = [];
-                    for (const hit of hits) {
-                        const t = await getTokenCountAsync(hit.text);
-                        if (used + t > ragBudget) break;
-                        lines.push(hit.text);
-                        used += t;
-                        rag.hits.push({ text: hit.text, score: hit.score });
+                    const packed = new Set();
+                    for (const q of queries) {
+                        // 预算装满 / 远端条目已全部装入 / 剩余预算装不下已见最小条目 时停止
+                        if (used >= ragBudget || packed.size >= uniqueDocCount
+                            || (minDocTokens !== Infinity && used + minDocTokens > ragBudget)) break;
+                        const hits = await NS.Retriever.retrieve(q, docs, RAG_TOP_K, RAG_MIN_SCORE);
+                        // 按预算贪心装入该查询的命中条目
+                        for (const hit of hits) {
+                            if (packed.has(hit.text)) continue;
+                            const t = await getTokenCountAsync(hit.text);
+                            if (t < minDocTokens) minDocTokens = t;
+                            if (used + t > ragBudget) break;
+                            lines.push(hit.text);
+                            packed.add(hit.text);
+                            used += t;
+                            rag.hits.push({ text: hit.text, score: hit.score });
+                        }
                     }
                     if (lines.length > 0) {
                         ragSection = lines.join('\n');
@@ -779,12 +786,14 @@ ${newCharacterCardTemplate}
             }
         }
 
-        historyData.前文 = joinNonEmpty([summaryMarkdown, midMarkdown, tailText]);
+        historyData.前文 = joinNonEmpty([midMarkdown, tailText]);
         const tokenCount = await getTokenCountAsync(historyData.前文 + ragSection + charJson);
 
         return {
             historyData,
             characterData,
+            allCharacterData: mergedDataInfo.characterData,
+            activeRoleNames: Object.keys(characterData),
             failedFloors: mergedDataInfo.failedFloors,
             ragSection,
             tokenCount,
@@ -803,7 +812,8 @@ ${newCharacterCardTemplate}
         const result = await buildPromptData(chatCopy, { runRag: false });
         notifyStats({
             failedFloors: result.failedFloors,
-            roles: JSON.parse(JSON.stringify(result.characterData)),
+            roles: JSON.parse(JSON.stringify(result.allCharacterData)),
+            activeRoleNames: [...result.activeRoleNames],
             tokenCount: result.tokenCount,
             rag: result.rag,
         });
@@ -833,7 +843,8 @@ ${newCharacterCardTemplate}
 
         notifyStats({
             failedFloors: result.failedFloors,
-            roles: JSON.parse(JSON.stringify(characterData)),
+            roles: JSON.parse(JSON.stringify(result.allCharacterData)),
+            activeRoleNames: [...result.activeRoleNames],
             tokenCount: result.tokenCount,
             rag: result.rag,
         });
