@@ -365,7 +365,7 @@
         section.appendChild(createSwitchRow('启用 RAG 远端记忆', 'ragToggle'));
         section.appendChild(createNumberRow('正文深度', '（保留的AI最后回复的完整消息数量）', 'keepCount', { min: 0, max: 100, step: 1 }));
         section.appendChild(createNumberRow('Token 限制', '（超限且RAG可用时启用分层注入）', 'tokenLimit', { min: 0, max: 2000000, step: 1024 }));
-        section.appendChild(createSliderRow('RAG 记忆预算', '（<RELATED_MEMORY> 区段占 Token 限制的比例）', 'ragRatio', { min: 0.1, max: 0.9, step: 0.05 }));
+        section.appendChild(createSliderRow('RAG 记忆预算', '（RAG 远端历程区段占 Token 限制的比例）', 'ragRatio', { min: 0.1, max: 0.9, step: 0.05 }));
         section.appendChild(buildRetrieverStatusRow());
 
         const settings = Settings.getSettings();

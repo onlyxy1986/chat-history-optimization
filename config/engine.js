@@ -523,33 +523,24 @@
     }
 
     /**
-     * 构建注入 prompt。historyData.前文 已是最终装配文本（中段+正文），
-     * ragSection 为 RAG 远端记忆区段内容（可为空）。
+     * 构建注入 prompt。historyData.前文 已是最终装配文本（RAG 远端条目+中段+正文）。
      */
-    function getCharPrompt(historyData, characterData, ragSection) {
+    function getCharPrompt(historyData, characterData) {
         historyData = historyData || {};
         // 将前文从历史数据中剥离，单独放入HISTORY
-        let historyContent = applyWordMapping(historyData.前文 || '');
+        const historyContent = applyWordMapping(historyData.前文 || '');
         delete historyData.前文;
-        let relatedMemory = applyWordMapping(ragSection || '');
-        let charsInfoJsonStr = applyWordMapping(JSON.stringify(characterData || {}));
+        const charsInfoJsonStr = applyWordMapping(JSON.stringify(characterData || {}));
 
         // 角色卡功能关闭时，不注入角色卡区段与模板
         const roleCardEnabled = isRoleCardEnabled();
         const newHistoryTemplate = Settings.get('historyPrompt');
         const newCharacterCardTemplate = roleCardEnabled ? Settings.get('characterPrompt') : '';
 
-        const relatedMemoryBlock = relatedMemory
-            ? `<RELATED_MEMORY>
-${relatedMemory}
-</RELATED_MEMORY>
-`
-            : '';
-
         const prompt = `
 <STORY_DATA>
 
-${relatedMemoryBlock}<HISTORY>
+<HISTORY>
 ${historyContent}
 </HISTORY>
 
@@ -648,7 +639,8 @@ ${newCharacterCardTemplate}
      * - RAG：触发时（ragToggle 且模型就绪且 全量 > tokenLimit×(1-ragRatio)），
      *   以 最新用户消息 + 窗口历程条目（最新→次新→…）为查询序列逐个检索，
      *   窗口外的远端条目按余弦相似度 topK 贪心装入，直到预算装满，
-     *   注入 <RELATED_MEMORY>，预算 ragBudget = tokenLimit × ragRatio。
+     *   按时间顺序渲染为历程 markdown 放在 <HISTORY> 头部（与中段格式一致），
+     *   预算 ragBudget = tokenLimit × ragRatio。
      * - 未触发：全量注入，不裁剪。
      *
      * @param {object[]} chatCopy - 聊天记录的深拷贝（mergeDataInfo 会写入 messageCount）
@@ -720,7 +712,7 @@ ${newCharacterCardTemplate}
             query: '',
         };
         let midMarkdown = fullMidMarkdown;
-        let ragSection = '';
+        let ragMarkdown = '';
 
         if (ragWillActivate && runRag && midEntries.length > 0) {
             const ragBudget = Math.max(1, Math.round(tokenLimit * ragRatio));
@@ -766,21 +758,22 @@ ${newCharacterCardTemplate}
                         if (used >= ragBudget || packedSet.size >= uniqueDocCount
                             || (minDocTokens !== Infinity && used + minDocTokens > ragBudget)) break;
                         const hits = await NS.Retriever.retrieve(q, docs, RAG_TOP_K, RAG_MIN_SCORE);
-                        // 按预算贪心装入该查询的命中条目
+                        // 按预算贪心装入该查询的命中条目（按单条详细 markdown 成本计费，即单条最大成本）
                         for (const hit of hits) {
                             if (packedSet.has(hit.text)) continue;
-                            const t = await getTokenCountAsync(hit.text);
+                            const entry = farEntries[docOrder.get(hit.text) ?? 0];
+                            const t = await getTokenCountAsync(renderJourneyMarkdown([entry], 0));
                             if (t < minDocTokens) minDocTokens = t;
                             if (used + t > ragBudget) break;
                             packedSet.add(hit.text);
-                            packed.push({ text: hit.text, score: hit.score, order: docOrder.get(hit.text) ?? Infinity });
+                            packed.push({ text: hit.text, score: hit.score, order: docOrder.get(hit.text) ?? Infinity, entry });
                             used += t;
                         }
                     }
-                    // 按 farEntries 原始顺序（时间顺序）输出，避免多查询命中导致日期错乱
+                    // 按 farEntries 原始顺序（时间顺序）渲染为与中段一致的历程 markdown，放到 <HISTORY> 头部
                     if (packed.length > 0) {
                         packed.sort((a, b) => a.order - b.order);
-                        ragSection = packed.map((p) => p.text).join('\n');
+                        ragMarkdown = renderJourneyMarkdown(packed.map((p) => p.entry), midMaxDay);
                         rag.hits = packed.map((p) => ({ text: p.text, score: p.score }));
                         rag.active = true;
                     }
@@ -788,13 +781,13 @@ ${newCharacterCardTemplate}
                     console.error('[Chat History Optimization] RAG retrieval failed, fallback to no-RAG', e);
                     rag = { active: false, willActivate: false, hits: [], windowCount: midEntries.length, farCount: 0, query: '' };
                     midMarkdown = fullMidMarkdown;
-                    ragSection = '';
+                    ragMarkdown = '';
                 }
             }
         }
 
-        historyData.前文 = joinNonEmpty([midMarkdown, tailText]);
-        const tokenCount = await getTokenCountAsync(historyData.前文 + ragSection + charJson);
+        historyData.前文 = joinNonEmpty([ragMarkdown, midMarkdown, tailText]);
+        const tokenCount = await getTokenCountAsync(historyData.前文 + charJson);
 
         return {
             historyData,
@@ -802,7 +795,7 @@ ${newCharacterCardTemplate}
             allCharacterData: mergedDataInfo.characterData,
             activeRoleNames: Object.keys(characterData),
             failedFloors: mergedDataInfo.failedFloors,
-            ragSection,
+            ragMarkdown,
             tokenCount,
             rag,
         };
@@ -810,19 +803,25 @@ ${newCharacterCardTemplate}
 
     /**
      * 只读解析当前聊天记录并刷新统计（失败楼层/角色卡/Token 数），
-     * 用于 UI 打开前拿到最新数据。不执行 RAG 检索，不修改 ST 的 chat 数组。
+     * 用于 UI 打开前拿到最新数据。不修改 ST 的 chat 数组。
+     * 预览不执行 RAG 检索：若上次生成实际用了 RAG 且当前聊天仍会触发，
+     * 保留该次生成的真实命中结果展示，避免显示回退成"将在下次生成时启用"。
      */
     async function refreshStats() {
         const sourceChat = NS.bridge && NS.bridge.getCurrentChat ? NS.bridge.getCurrentChat() : null;
         if (!sourceChat || !Array.isArray(sourceChat) || sourceChat.length === 0) return;
         const chatCopy = JSON.parse(JSON.stringify(sourceChat));
         const result = await buildPromptData(chatCopy, { runRag: false });
+        const lastRag = lastStats.rag;
+        const rag = (lastRag && lastRag.active && result.rag.willActivate)
+            ? { ...lastRag }
+            : result.rag;
         notifyStats({
             failedFloors: result.failedFloors,
             roles: JSON.parse(JSON.stringify(result.allCharacterData)),
             activeRoleNames: [...result.activeRoleNames],
             tokenCount: result.tokenCount,
-            rag: result.rag,
+            rag,
         });
     }
 
@@ -857,13 +856,13 @@ ${newCharacterCardTemplate}
         });
 
         console.log("[Chat History Optimization] token count:", result.tokenCount);
-        printObj("[Chat History Optimization] Final Summary Info", { historyData, characterData, ragSection: result.ragSection });
+        printObj("[Chat History Optimization] Final Summary Info", { historyData, characterData, ragMarkdown: result.ragMarkdown });
         if (!result.rag.active && result.tokenCount > Settings.get('tokenLimit')) {
             console.warn("[Chat History Optimization] 内容超出 token 限制且 RAG 未生效（未开启或模型未就绪），按全量注入。");
         }
 
         const mergedChat = [];
-        chat[chat.length - 1]['mes'] = getCharPrompt(historyData, characterData, result.ragSection);
+        chat[chat.length - 1]['mes'] = getCharPrompt(historyData, characterData);
         if (isFirstMessage) {
             chat[chat.length - 1]['mes'] = chat[chat.length - 1]['mes'] + "\n（此为首条信息，<NEW_STORY_DATA>中需要参考前文和当前输出的信息生成全量信息，尤其注意'故事历程'需额外添加前文的历程）";
         }

@@ -16,7 +16,7 @@
         keepCount: 3,
         tokenLimit: 50 * 1024,
         ragToggle: false, // RAG 远端记忆分层注入开关，默认关闭
-        ragRatio: 0.3, // <RELATED_MEMORY> 区段占 tokenLimit 的预算比例
+        ragRatio: 0.3, // RAG 远端历程区段占 tokenLimit 的预算比例
         historyPrompt: `{
     // **注意** 所有时间表述都**必须**用第X天+时间段的表述，如：第3天傍晚
     // 地点: 用.分隔大小地点，如“图书馆.三楼.阅览室”、“酒馆.二楼.卫生间”
