@@ -9,7 +9,8 @@
 
     const NS = window.ChatOptimizationV2 = window.ChatOptimizationV2 || {};
 
-    const MODEL_REL = 'lib/models/bge-small-zh-v1.5/';
+    const MODEL_DIR_REL = 'lib/models/';
+    const MODEL_ID = 'bge-small-zh-v1.5';
     const TRANSFORMERS_REL = 'lib/transformers.min.js';
     const WASM_MJS_REL = 'lib/ort/ort-wasm-simd-threaded.jsep.mjs';
     const WASM_WASM_REL = 'lib/ort/ort-wasm-simd-threaded.jsep.wasm';
@@ -78,7 +79,7 @@
                 const tjs = await loadTransformers();
                 const { env, pipeline: createPipeline } = tjs;
                 env.useBrowserCache = false;
-                env.allowLocalModels = true;
+                env.allowLocalModels = false;
                 if (env.backends && env.backends.onnx && env.backends.onnx.wasm) {
                     env.backends.onnx.wasm.wasmPaths = {
                         mjs: new URL(WASM_MJS_REL, NS.baseUrl).href,
@@ -89,7 +90,11 @@
                     }
                 }
                 setStatus('loading', '加载模型 bge-small-zh-v1.5…');
-                pipeline = await createPipeline('feature-extraction', new URL(MODEL_REL, NS.baseUrl).href, {
+                // v3 不支持把完整 URL 当 model_id：改用 repo 风格 ID，
+                // 把 remoteHost 指到本地 lib/models/ 目录，模板直接接 {model}/
+                env.remoteHost = new URL(MODEL_DIR_REL, NS.baseUrl).href;
+                env.remotePathTemplate = '{model}/';
+                pipeline = await createPipeline('feature-extraction', MODEL_ID, {
                     dtype: 'q8',
                 });
                 setStatus('ready', '');
