@@ -554,11 +554,10 @@ ${relatedMemory}
         const prompt = `
 <STORY_DATA>
 
-<HISTORY>
+${relatedMemoryBlock}<HISTORY>
 ${historyContent}
 </HISTORY>
 
-${relatedMemoryBlock}
 ${roleCardEnabled ? `<CHARACTER_CARD>
 ${charsInfoJsonStr}
 </CHARACTER_CARD>
@@ -857,7 +856,7 @@ ${newCharacterCardTemplate}
         for (const item of mergedChat) {
             chat.push(item);
         }
-        console.log("[Chat History Optimization] new chat history:", chat);
+        console.log("[Chat History Optimization] Final last message:", chat[chat.length - 1]['mes']);
     };
 
     NS.Engine = Object.freeze({
