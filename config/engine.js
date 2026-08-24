@@ -751,30 +751,37 @@ ${newCharacterCardTemplate}
             if (farEntries.length > 0 && queries.length > 0 && NS.Retriever) {
                 try {
                     const docs = farEntries.map(entryToDocText);
-                    const uniqueDocCount = new Set(docs).size;
+                    // 记录每条远端条目在 farEntries 中的原始（时间）顺序，用于最终排序
+                    const docOrder = new Map();
+                    docs.forEach((text, i) => {
+                        if (text && !docOrder.has(text)) docOrder.set(text, i);
+                    });
+                    const uniqueDocCount = docOrder.size;
                     let used = 0;
                     let minDocTokens = Infinity;
-                    const lines = [];
-                    const packed = new Set();
+                    const packed = [];
+                    const packedSet = new Set();
                     for (const q of queries) {
                         // 预算装满 / 远端条目已全部装入 / 剩余预算装不下已见最小条目 时停止
-                        if (used >= ragBudget || packed.size >= uniqueDocCount
+                        if (used >= ragBudget || packedSet.size >= uniqueDocCount
                             || (minDocTokens !== Infinity && used + minDocTokens > ragBudget)) break;
                         const hits = await NS.Retriever.retrieve(q, docs, RAG_TOP_K, RAG_MIN_SCORE);
                         // 按预算贪心装入该查询的命中条目
                         for (const hit of hits) {
-                            if (packed.has(hit.text)) continue;
+                            if (packedSet.has(hit.text)) continue;
                             const t = await getTokenCountAsync(hit.text);
                             if (t < minDocTokens) minDocTokens = t;
                             if (used + t > ragBudget) break;
-                            lines.push(hit.text);
-                            packed.add(hit.text);
+                            packedSet.add(hit.text);
+                            packed.push({ text: hit.text, score: hit.score, order: docOrder.get(hit.text) ?? Infinity });
                             used += t;
-                            rag.hits.push({ text: hit.text, score: hit.score });
                         }
                     }
-                    if (lines.length > 0) {
-                        ragSection = lines.join('\n');
+                    // 按 farEntries 原始顺序（时间顺序）输出，避免多查询命中导致日期错乱
+                    if (packed.length > 0) {
+                        packed.sort((a, b) => a.order - b.order);
+                        ragSection = packed.map((p) => p.text).join('\n');
+                        rag.hits = packed.map((p) => ({ text: p.text, score: p.score }));
                         rag.active = true;
                     }
                 } catch (e) {
