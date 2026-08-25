@@ -1053,6 +1053,39 @@
     word-break: break-word;
 }
 
+/* ------------------------------ send preview ---------------------------- */
+
+#coo-root .coo-preview-hint {
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--co-muted);
+}
+
+#coo-root .coo-preview-text {
+    flex: 0 0 auto;
+    min-height: 160px;
+    margin: 0;
+    padding: 10px 12px;
+    border: 1px solid var(--coo-border-soft);
+    border-radius: 10px;
+    background: var(--coo-row-bg);
+    font-size: 12px;
+    line-height: 1.6;
+    font-family: 'Cascadia Code', 'JetBrains Mono', Consolas, monospace;
+    color: var(--coo-text);
+    white-space: pre-wrap;
+    word-break: break-word;
+    user-select: text;
+    -webkit-user-select: text;
+}
+
+#coo-root .coo-preview-text.coo-preview-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--co-muted);
+}
+
 /* ------------------------------ wand menu entry ------------------------- */
 
 .coo-extension-entry {

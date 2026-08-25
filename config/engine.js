@@ -35,6 +35,7 @@
         roles: {},
         activeRoleNames: [],
         rag: null,
+        lastMessage: '',
     };
     const statsListeners = new Set();
 
@@ -82,6 +83,7 @@
             roles: JSON.parse(JSON.stringify(lastStats.roles)),
             activeRoleNames: [...lastStats.activeRoleNames],
             rag: lastStats.rag ? JSON.parse(JSON.stringify(lastStats.rag)) : null,
+            lastMessage: lastStats.lastMessage || '',
         };
     }
 
@@ -526,10 +528,11 @@
      * 构建注入 prompt。historyData.前文 已是最终装配文本（RAG 远端条目+中段+正文）。
      */
     function getCharPrompt(historyData, characterData) {
-        historyData = historyData || {};
+        // 浅拷贝：不修改调用方的 historyData（前文需保留给统计/日志/预览）
+        const history = { ...(historyData || {}) };
         // 将前文从历史数据中剥离，单独放入HISTORY
-        const historyContent = applyWordMapping(historyData.前文 || '');
-        delete historyData.前文;
+        const historyContent = applyWordMapping(history.前文 || '');
+        delete history.前文;
         const charsInfoJsonStr = applyWordMapping(JSON.stringify(characterData || {}));
 
         // 角色卡功能关闭时，不注入角色卡区段与模板
@@ -787,7 +790,10 @@ ${newCharacterCardTemplate}
         }
 
         historyData.前文 = joinNonEmpty([ragMarkdown, midMarkdown, tailText]);
-        const tokenCount = await getTokenCountAsync(historyData.前文 + charJson);
+        // token 数按最终拼接的最后一条消息（含 STORY_DATA 包装与 NEW_STORY_DATA 模板）计算，
+        // 与实际发送给模型的内容一致
+        const lastMessage = getCharPrompt(historyData, characterData);
+        const tokenCount = await getTokenCountAsync(lastMessage);
 
         return {
             historyData,
@@ -796,32 +802,48 @@ ${newCharacterCardTemplate}
             activeRoleNames: Object.keys(characterData),
             failedFloors: mergedDataInfo.failedFloors,
             ragMarkdown,
+            lastMessage,
             tokenCount,
             rag,
         };
     }
 
+    const FIRST_MESSAGE_SUFFIX = "\n（此为首条信息，<NEW_STORY_DATA>中需要参考前文和当前输出的信息生成全量信息，尤其注意'故事历程'需额外添加前文的历程）";
+
     /**
-     * 只读解析当前聊天记录并刷新统计（失败楼层/角色卡/Token 数），
-     * 用于 UI 打开前拿到最新数据。不修改 ST 的 chat 数组。
-     * 预览不执行 RAG 检索：若上次生成实际用了 RAG 且当前聊天仍会触发，
-     * 保留该次生成的真实命中结果展示，避免显示回退成"将在下次生成时启用"。
+     * 生成与 UI 刷新共用的最终装配：buildPromptData → 首条信息后缀 → 重新计数。
+     * 两条路径由此保证产出完全一致的 last message 与 token 数。
+     */
+    async function assembleFinalPrompt(chatCopy, options) {
+        const result = await buildPromptData(chatCopy, options);
+        let lastMessage = result.lastMessage;
+        let tokenCount = result.tokenCount;
+        const isFirstMessage = chatCopy.length == 2 && chatCopy[0].is_user === false && chatCopy[1].is_user === true;
+        if (isFirstMessage) {
+            lastMessage = lastMessage + FIRST_MESSAGE_SUFFIX;
+            tokenCount = await getTokenCountAsync(lastMessage);
+        }
+        return Object.assign({ isFirstMessage }, result, { lastMessage, tokenCount });
+    }
+
+    /**
+     * 只读解析当前聊天记录并刷新统计（失败楼层/角色卡/Token 数/发送预览），
+     * 用于 UI 打开时拿到最新数据。与正常生成走同一装配逻辑
+     * （含 RAG 检索与首条信息后缀），保证预览与"现在生成会发送的内容"一致。
+     * 不修改 ST 的 chat 数组。
      */
     async function refreshStats() {
         const sourceChat = NS.bridge && NS.bridge.getCurrentChat ? NS.bridge.getCurrentChat() : null;
         if (!sourceChat || !Array.isArray(sourceChat) || sourceChat.length === 0) return;
         const chatCopy = JSON.parse(JSON.stringify(sourceChat));
-        const result = await buildPromptData(chatCopy, { runRag: false });
-        const lastRag = lastStats.rag;
-        const rag = (lastRag && lastRag.active && result.rag.willActivate)
-            ? { ...lastRag }
-            : result.rag;
+        const result = await assembleFinalPrompt(chatCopy, { runRag: true });
         notifyStats({
             failedFloors: result.failedFloors,
             roles: JSON.parse(JSON.stringify(result.allCharacterData)),
             activeRoleNames: [...result.activeRoleNames],
             tokenCount: result.tokenCount,
-            rag,
+            rag: result.rag,
+            lastMessage: result.lastMessage,
         });
     }
 
@@ -836,16 +858,14 @@ ${newCharacterCardTemplate}
         }
 
         printObj("[Chat History Optimization] Original chat history:", chat);
-        let isFirstMessage = false;
-        if (chat.length == 2 && chat[0].is_user === false && chat[1].is_user === true) {
-            isFirstMessage = true;
-        }
 
         // 深拷贝：mergeDataInfo 会写入 item.messageCount，不能污染 ST 数据
         const chatCopy = JSON.parse(JSON.stringify(chat));
-        const result = await buildPromptData(chatCopy, { runRag: true });
+        const result = await assembleFinalPrompt(chatCopy, { runRag: true });
         const historyData = result.historyData;
         const characterData = result.characterData;
+
+        chat[chat.length - 1]['mes'] = result.lastMessage;
 
         notifyStats({
             failedFloors: result.failedFloors,
@@ -853,6 +873,7 @@ ${newCharacterCardTemplate}
             activeRoleNames: [...result.activeRoleNames],
             tokenCount: result.tokenCount,
             rag: result.rag,
+            lastMessage: result.lastMessage,
         });
 
         console.log("[Chat History Optimization] token count:", result.tokenCount);
@@ -862,10 +883,6 @@ ${newCharacterCardTemplate}
         }
 
         const mergedChat = [];
-        chat[chat.length - 1]['mes'] = getCharPrompt(historyData, characterData);
-        if (isFirstMessage) {
-            chat[chat.length - 1]['mes'] = chat[chat.length - 1]['mes'] + "\n（此为首条信息，<NEW_STORY_DATA>中需要参考前文和当前输出的信息生成全量信息，尤其注意'故事历程'需额外添加前文的历程）";
-        }
         mergedChat.push(chat[chat.length - 1])
 
         // 用 mergedChat 替换 chat 的内容

@@ -25,6 +25,7 @@
         { id: 'templates', label: '模板', icon: 'fa-solid fa-file-code' },
         { id: 'roles', label: '角色查看', icon: 'fa-solid fa-id-card' },
         { id: 'story', label: '故事历程', icon: 'fa-solid fa-route' },
+        { id: 'preview', label: '发送预览', icon: 'fa-solid fa-paper-plane' },
     ];
 
     let extensionRetryTimer = null;
@@ -506,11 +507,32 @@
         queryStoryRange(section, 1, '');
     }
 
+    function renderPreviewText(scope) {
+        const box = scope.querySelector('[data-coo-field="previewText"]');
+        if (!box) return;
+        const text = Engine.getStats().lastMessage;
+        box.textContent = text || '暂无数据（打开窗口或生成一次后自动刷新）';
+        box.classList.toggle('coo-preview-empty', !text);
+    }
+
+    function renderPreviewTab(panel) {
+        const section = createSection('fa-solid fa-paper-plane', '发送预览');
+        section.appendChild(createText('div', 'coo-preview-hint', '与正常生成同一逻辑，按当前聊天实时拼接的最后一条消息（若现在生成将原样发送）'));
+        const box = document.createElement('pre');
+        box.className = 'coo-preview-text';
+        box.dataset.cooField = 'previewText';
+        box.setAttribute('aria-label', '发送预览内容');
+        section.appendChild(box);
+        panel.appendChild(section);
+        renderPreviewText(panel);
+    }
+
     const TAB_RENDERERS = {
         settings: renderSettingsTab,
         templates: renderTemplatesTab,
         roles: renderRolesTab,
         story: renderStoryTab,
+        preview: renderPreviewTab,
     };
 
     function renderActiveTab(shell) {
@@ -554,6 +576,7 @@
             token.textContent = String(stats.tokenCount);
         });
         updateRagDisplay(scope, stats.rag);
+        renderPreviewText(scope);
     }
 
     function updateRagDisplay(scope, rag) {
