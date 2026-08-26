@@ -12,10 +12,13 @@
     const BM25_K1 = 1.5;
     const BM25_B = 0.75;
     const DEFAULT_TOP_K = 6;
+    // 常见虚词单字：只过滤单字形态，包含它们的 bigram 照常产出（如"在校"保留）
+    // 不/没/有 等承载语义（否定、存在）的字不过滤
+    const STOP_UNI = new Set('的了着在和与及或是等都就还又很太更最被把让向对从到为之其此该这那它我你他她吗吧啊呀嘛呢么'.split(''));
 
     /**
      * 轻量分词（无需词典）：
-     * - 中文连续片段：单字 + 双字（bigram），单字符片段只出单字
+     * - 中文连续片段：单字（停用虚词除外）+ 双字（bigram，不过滤），单字符片段只出单字
      * - 英文/数字：整词（小写，保留内部 . _ - 连接的形态，如 3.14）
      * 其余字符（标点、空白）丢弃。
      * @param {string} text
@@ -30,7 +33,8 @@
             if (m[1] !== undefined) {
                 const run = m[1];
                 for (let i = 0; i < run.length; i++) {
-                    tokens.push(run[i]);
+                    const ch = run[i];
+                    if (!STOP_UNI.has(ch)) tokens.push(ch);
                 }
                 for (let i = 0; i + 1 < run.length; i++) {
                     tokens.push(run.slice(i, i + 2));
