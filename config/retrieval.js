@@ -1,215 +1,106 @@
 // ============================================================================
 // chat-optimization-v2 in-browser RAG retriever.
-// Loads the bundled @huggingface/transformers (ESM, lib/transformers.min.js)
-// and the local bge-small-zh-v1.5 model (lib/models/...). Pure logic: no DOM.
-// Status flows through onStatus listeners; the UI subscribes to render it.
+// BM25 lexical retrieval: pure logic, no DOM, no model loading.
+// Chinese text is tokenized as character unigrams + bigrams (no dictionary),
+// so short queries and phrase fragments still overlap.
 // ============================================================================
 (function () {
     'use strict';
 
     const NS = window.ChatOptimizationV2 = window.ChatOptimizationV2 || {};
 
-    const MODEL_DIR_REL = 'lib/models/';
-    const MODEL_ID = 'bge-small-zh-v1.5';
-    const TRANSFORMERS_REL = 'lib/transformers.min.js';
-    const WASM_MJS_REL = 'lib/ort/ort-wasm-simd-threaded.jsep.mjs';
-    const WASM_WASM_REL = 'lib/ort/ort-wasm-simd-threaded.jsep.wasm';
-    // BGE 官方推荐的查询指令前缀（文档侧不加）
-    const QUERY_INSTRUCTION = '为这个句子生成表示以用于检索相关文章：';
-    const CACHE_MAX = 2048;
-    const BATCH_SIZE = 16;
-
-    let status = { state: 'idle', message: '' };
-    let pipeline = null;
-    let transformersModule = null;
-    let transformersPromise = null;
-    let initPromise = null;
-    const cache = new Map();
-    const statusListeners = new Set();
-
-    function setStatus(state, message) {
-        status = { state: state, message: message || '' };
-        const snapshot = getStatus();
-        for (const listener of statusListeners) {
-            try {
-                listener(snapshot);
-            } catch (e) {
-                console.error('[Chat History Optimization] retriever status listener error', e);
-            }
-        }
-    }
-
-    function getStatus() {
-        return { state: status.state, message: status.message };
-    }
-
-    function onStatus(listener) {
-        statusListeners.add(listener);
-        return () => statusListeners.delete(listener);
-    }
-
-    function isReady() {
-        return status.state === 'ready' && pipeline !== null;
-    }
-
-    function loadTransformers() {
-        if (!transformersPromise) {
-            transformersPromise = import(new URL(TRANSFORMERS_REL, NS.baseUrl).href)
-                .then(mod => {
-                    transformersModule = mod && mod.default && mod.default.pipeline ? mod.default : mod;
-                    return transformersModule;
-                });
-            transformersPromise.catch(() => {
-                transformersPromise = null;
-            });
-        }
-        return transformersPromise;
-    }
+    const BM25_K1 = 1.5;
+    const BM25_B = 0.75;
+    const DEFAULT_TOP_K = 6;
 
     /**
-     * 加载 transformers.js 与本地 bge-small-zh-v1.5（q8 外部数据格式）。
-     * 并发调用共享同一次初始化；失败后允许重试。
+     * 轻量分词（无需词典）：
+     * - 中文连续片段：单字 + 双字（bigram），单字符片段只出单字
+     * - 英文/数字：整词（小写，保留内部 . _ - 连接的形态，如 3.14）
+     * 其余字符（标点、空白）丢弃。
+     * @param {string} text
+     * @returns {string[]}
      */
-    async function init() {
-        if (isReady()) return;
-        if (initPromise) return initPromise;
-        initPromise = (async () => {
-            try {
-                setStatus('loading', '加载 transformers.js…');
-                const tjs = await loadTransformers();
-                const { env, pipeline: createPipeline } = tjs;
-                env.useBrowserCache = false;
-                env.allowLocalModels = false;
-                if (env.backends && env.backends.onnx && env.backends.onnx.wasm) {
-                    env.backends.onnx.wasm.wasmPaths = {
-                        mjs: new URL(WASM_MJS_REL, NS.baseUrl).href,
-                        wasm: new URL(WASM_WASM_REL, NS.baseUrl).href,
-                    };
-                    if (typeof navigator !== 'undefined' && navigator.hardwareConcurrency > 0) {
-                        env.backends.onnx.wasm.numThreads = navigator.hardwareConcurrency;
-                    }
+    function tokenize(text) {
+        const tokens = [];
+        const normalized = String(text || '').toLowerCase();
+        const re = /([\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]+)|([a-z0-9]+(?:[._-][a-z0-9]+)*)/g;
+        let m;
+        while ((m = re.exec(normalized)) !== null) {
+            if (m[1] !== undefined) {
+                const run = m[1];
+                for (let i = 0; i < run.length; i++) {
+                    tokens.push(run[i]);
                 }
-                setStatus('loading', '加载模型 bge-small-zh-v1.5…');
-                // v3 不支持把完整 URL 当 model_id：改用 repo 风格 ID，
-                // 把 remoteHost 指到本地 lib/models/ 目录，模板直接接 {model}/
-                env.remoteHost = new URL(MODEL_DIR_REL, NS.baseUrl).href;
-                env.remotePathTemplate = '{model}/';
-                pipeline = await createPipeline('feature-extraction', MODEL_ID, {
-                    dtype: 'q8',
-                });
-                setStatus('ready', '');
-            } catch (e) {
-                initPromise = null;
-                pipeline = null;
-                console.error('[Chat History Optimization] Retriever init failed', e);
-                setStatus('error', e && e.message ? e.message : String(e));
-            }
-        })();
-        return initPromise;
-    }
-
-    function cacheSet(key, vec) {
-        if (cache.has(key)) cache.delete(key);
-        cache.set(key, vec);
-        while (cache.size > CACHE_MAX) {
-            const oldest = cache.keys().next().value;
-            cache.delete(oldest);
-        }
-    }
-
-    function toVector(output) {
-        let data = output;
-        if (Array.isArray(data)) data = data[0];
-        if (data && data.data) data = data.data;
-        return Float32Array.from(data);
-    }
-
-    /**
-     * 批量编码文本为归一化向量（mean pooling + L2 normalize，BGE 用法）。
-     * 命中 LRU 缓存的文本不重复推理。返回与输入同序的向量数组。
-     */
-    async function encodeBatch(texts) {
-        if (!isReady()) throw new Error('Retriever not ready');
-        const results = new Array(texts.length);
-        const pending = [];
-        for (let i = 0; i < texts.length; i++) {
-            const text = texts[i];
-            if (cache.has(text)) {
-                const vec = cache.get(text);
-                cache.delete(text);
-                cache.set(text, vec);
-                results[i] = vec;
+                for (let i = 0; i + 1 < run.length; i++) {
+                    tokens.push(run.slice(i, i + 2));
+                }
             } else {
-                pending.push(i);
+                tokens.push(m[2]);
             }
         }
-        for (let i = 0; i < pending.length; i += BATCH_SIZE) {
-            const idxs = pending.slice(i, i + BATCH_SIZE);
-            const batch = idxs.map(k => texts[k]);
-            const outputs = await pipeline(batch.length === 1 ? batch[0] : batch, {
-                pooling: 'mean',
-                normalize: true,
-            });
-            idxs.forEach((k, j) => {
-                const vec = toVector(Array.isArray(outputs) ? outputs[j] : outputs);
-                cacheSet(texts[k], vec);
-                results[k] = vec;
-            });
-        }
-        return results;
-    }
-
-    async function encodeText(text) {
-        const [vec] = await encodeBatch([text]);
-        return vec;
-    }
-
-    function cosine(a, b) {
-        if (!a || !b || a.length === 0 || b.length === 0) return 0;
-        const len = Math.min(a.length, b.length);
-        let dot = 0, na = 0, nb = 0;
-        for (let i = 0; i < len; i++) {
-            dot += a[i] * b[i];
-            na += a[i] * a[i];
-            nb += b[i] * b[i];
-        }
-        if (na === 0 || nb === 0) return 0;
-        return dot / (Math.sqrt(na) * Math.sqrt(nb));
+        return tokens;
     }
 
     /**
-     * 对 docs 做余弦 topK 检索（BGE 查询指令只加在 query 上）。
-     * @param {string} query - 查询文本（通常为最新用户消息）
+     * 对 docs 做 BM25 topK 检索。
+     * 每次调用对传入 docs 现建倒排统计（远端条目集合每次生成都不同，不缓存）。
+     * @param {string} query - 查询文本（用户消息或历程条目文本）
      * @param {Array<string|{text: string}>} docs - 候选文档
      * @param {number} topK
-     * @param {number} minScore
+     * @param {number} minScore - BM25 得分阈值（无归一化，0 表示取所有有词项命中的文档）
      * @returns {Promise<Array<{index: number, text: string, score: number}>>}
      */
-    async function retrieve(query, docs, topK = 6, minScore = 0.3) {
-        if (!isReady() || !query || !Array.isArray(docs) || docs.length === 0) return [];
+    async function retrieve(query, docs, topK = DEFAULT_TOP_K, minScore = 0) {
+        if (!query || !Array.isArray(docs) || docs.length === 0) return [];
         const docTexts = docs.map(d => (typeof d === 'string' ? d : (d && d.text) || ''))
             .map(t => String(t).trim()).filter(t => t !== '');
         if (docTexts.length === 0) return [];
 
-        const [queryVec] = await encodeBatch([QUERY_INSTRUCTION + query]);
-        const docVecs = await encodeBatch(docTexts);
+        const queryTokens = tokenize(query);
+        if (queryTokens.length === 0) return [];
 
+        const queryTf = new Map();
+        for (const t of queryTokens) queryTf.set(t, (queryTf.get(t) || 0) + 1);
+
+        const docTokens = docTexts.map(tokenize);
+        const docLens = docTokens.map(t => t.length);
+        const avgdl = docLens.length > 0
+            ? docLens.reduce((a, b) => a + b, 0) / docLens.length
+            : 0;
+
+        const df = new Map();
+        for (const toks of docTokens) {
+            const seen = new Set(toks);
+            for (const t of seen) df.set(t, (df.get(t) || 0) + 1);
+        }
+
+        const N = docTokens.length;
         const results = [];
-        for (let i = 0; i < docTexts.length; i++) {
-            const score = cosine(queryVec, docVecs[i]);
-            if (score >= minScore) results.push({ index: i, text: docTexts[i], score });
+        for (let i = 0; i < N; i++) {
+            const tf = new Map();
+            for (const t of docTokens[i]) tf.set(t, (tf.get(t) || 0) + 1);
+
+            let score = 0;
+            for (const [term, qf] of queryTf) {
+                const f = tf.get(term);
+                if (!f) continue;
+                const d = df.get(term) || 0;
+                const idf = Math.log(1 + (N - d + 0.5) / (d + 0.5));
+                const denom = f + BM25_K1 * (1 - BM25_B + BM25_B * (avgdl > 0 ? docLens[i] / avgdl : 1));
+                score += idf * (qf * (BM25_K1 + 1)) / denom;
+            }
+            if (score > (minScore || 0)) {
+                results.push({ index: i, text: docTexts[i], score });
+            }
         }
         results.sort((a, b) => b.score - a.score);
         return results.slice(0, topK);
     }
 
     NS.Retriever = Object.freeze({
-        init,
-        isReady,
-        getStatus,
-        onStatus,
-        encodeText,
-        encodeBatch,
+        isReady: () => true,
         retrieve,
+        tokenize,
     });
 })();

@@ -170,22 +170,6 @@
         });
     }
 
-    function buildRetrieverStatusRow() {
-        const row = document.createElement('div');
-        row.className = 'coo-row coo-rag-status-row';
-        row.appendChild(createText('span', 'coo-row-label', 'RAG 嵌入模型'));
-        const right = document.createElement('div');
-        right.className = 'coo-rag-status-right';
-        const badge = createText('span', 'coo-badge coo-badge-muted', '未加载');
-        badge.dataset.cooField = 'ragModelStatus';
-        const loadBtn = createButton('加载', 'coo-button coo-button-sm', 'fa-solid fa-download');
-        loadBtn.dataset.cooAction = 'ragLoad';
-        loadBtn.title = '加载本地 bge-small-zh-v1.5 嵌入模型（首次约 24MB WASM + 24MB 权重）';
-        right.append(badge, loadBtn);
-        row.appendChild(right);
-        return row;
-    }
-
     function createStatRow(label, field) {
         const row = document.createElement('div');
         row.className = 'coo-row coo-stat-row';
@@ -363,16 +347,13 @@
         const section = createSection('fa-solid fa-sliders', '基础设置');
         section.appendChild(createSwitchRow('启用功能', 'extensionToggle'));
         section.appendChild(createSwitchRow('启用角色卡', 'roleCardToggle'));
-        section.appendChild(createSwitchRow('启用 RAG 远端记忆', 'ragToggle'));
         section.appendChild(createNumberRow('正文深度', '（保留的AI最后回复的完整消息数量）', 'keepCount', { min: 0, max: 100, step: 1 }));
         section.appendChild(createNumberRow('Token 限制', '（超限且RAG可用时启用分层注入）', 'tokenLimit', { min: 0, max: 2000000, step: 1024 }));
-        section.appendChild(createSliderRow('RAG 记忆预算', '（RAG 远端历程区段占 Token 限制的比例）', 'ragRatio', { min: 0.1, max: 0.9, step: 0.05 }));
-        section.appendChild(buildRetrieverStatusRow());
+        section.appendChild(createSliderRow('稀疏远期记忆预算', '（远期历程区段占 Token 限制的比例）', 'ragRatio', { min: 0.1, max: 0.9, step: 0.05 }));
 
         const settings = Settings.getSettings();
         section.querySelector('[data-coo-field="extensionToggle"]').checked = Boolean(settings.extensionToggle);
         section.querySelector('[data-coo-field="roleCardToggle"]').checked = Boolean(settings.roleCardToggle);
-        section.querySelector('[data-coo-field="ragToggle"]').checked = Boolean(settings.ragToggle);
         section.querySelector('[data-coo-field="keepCount"]').value = settings.keepCount;
         section.querySelector('[data-coo-field="tokenLimit"]').value = settings.tokenLimit;
         section.querySelector('[data-coo-field="ragRatio"]').value = settings.ragRatio;
@@ -547,7 +528,6 @@
         workspace.appendChild(panel);
 
         updateStatsValues(shell);
-        updateRetrieverStatus();
 
         shell.querySelectorAll('.coo-nav-item').forEach((item) => {
             item.classList.toggle('coo-nav-item-active', item.dataset.cooTab === activeTabId);
@@ -595,7 +575,7 @@
                 item.className = 'coo-rag-hit';
                 const head = document.createElement('div');
                 head.className = 'coo-rag-hit-head';
-                head.appendChild(createText('span', 'coo-rag-hit-score', `相似度 ${((hit.score || 0) * 100).toFixed(1)}%`));
+                head.appendChild(createText('span', 'coo-rag-hit-score', `BM25 ${Number(hit.score || 0).toFixed(2)}`));
                 item.appendChild(head);
                 item.appendChild(createText('div', 'coo-rag-hit-body', hit.text || ''));
                 ragList.appendChild(item);
@@ -745,14 +725,6 @@
                 case 'roleCardToggle':
                     Settings.set('roleCardToggle', Boolean(event.target.checked));
                     break;
-                case 'ragToggle': {
-                    const enabled = Boolean(event.target.checked);
-                    Settings.set('ragToggle', enabled);
-                    if (enabled && NS.Retriever) {
-                        NS.Retriever.init().catch(() => { });
-                    }
-                    break;
-                }
                 case 'keepCount': {
                     const value = parseInt(event.target.value);
                     Settings.set('keepCount', isNaN(value) ? 0 : value);
@@ -797,17 +769,7 @@
             const closest = target && target.closest ? target.closest.bind(target) : null;
             const actionButton = closest ? closest('[data-coo-action]') : null;
             if (actionButton) {
-                const action = actionButton.dataset.cooAction;
-                if (action === 'ragLoad') {
-                    if (NS.Retriever && !actionButton.disabled) {
-                        actionButton.disabled = true;
-                        NS.Retriever.init().finally(() => {
-                            actionButton.disabled = false;
-                        });
-                    }
-                    return;
-                }
-                handleStoryAction(workspace, action);
+                handleStoryAction(workspace, actionButton.dataset.cooAction);
                 return;
             }
             const resetButton = closest ? closest('[data-coo-reset]') : null;
@@ -834,42 +796,6 @@
         const shell = root ? root.querySelector('.coo-shell') : null;
         if (!shell || shell.hidden) return;
         refreshActiveTabData(shell);
-    }
-
-    function updateRetrieverStatus() {
-        if (!NS.Retriever) return;
-        const status = NS.Retriever.getStatus();
-        document.querySelectorAll(`#${ROOT_ID} [data-coo-field="ragModelStatus"]`).forEach((badge) => {
-            const loadBtn = badge.parentElement ? badge.parentElement.querySelector('[data-coo-action="ragLoad"]') : null;
-            if (status.state === 'ready') {
-                badge.textContent = '已就绪';
-                badge.className = 'coo-badge coo-badge-valid';
-                if (loadBtn) loadBtn.hidden = true;
-            } else if (status.state === 'loading') {
-                badge.textContent = status.message || '加载中…';
-                badge.className = 'coo-badge coo-badge-muted';
-                if (loadBtn) {
-                    loadBtn.hidden = false;
-                    loadBtn.disabled = true;
-                }
-            } else if (status.state === 'error') {
-                badge.textContent = '加载失败';
-                badge.title = status.message;
-                badge.className = 'coo-badge coo-badge-invalid';
-                if (loadBtn) {
-                    loadBtn.hidden = false;
-                    loadBtn.disabled = false;
-                }
-            } else {
-                badge.textContent = '未加载';
-                badge.title = '';
-                badge.className = 'coo-badge coo-badge-muted';
-                if (loadBtn) {
-                    loadBtn.hidden = false;
-                    loadBtn.disabled = false;
-                }
-            }
-        });
     }
 
     // ------------------------------------------------------------------
@@ -992,17 +918,6 @@
         activeTabId = TABS.some((tab) => tab.id === savedTab) ? savedTab : 'settings';
         bindShell(shell);
         Engine.onStats(onStatsChanged);
-        if (NS.Retriever) {
-            NS.Retriever.onStatus(() => {
-                updateRetrieverStatus();
-                onStatsChanged();
-            });
-            updateRetrieverStatus();
-            // ragToggle 是持久化的，页面刷新/ST 重启后模型需要重新加载
-            if (Settings.get('ragToggle') && !NS.Retriever.isReady()) {
-                NS.Retriever.init().catch(() => { });
-            }
-        }
         startExtensionEntryRetry();
     }
 

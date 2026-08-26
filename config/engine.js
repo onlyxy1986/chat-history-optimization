@@ -27,7 +27,8 @@
     };
 
     const RAG_TOP_K = 6;
-    const RAG_MIN_SCORE = 0.3;
+    // BM25 得分无归一化，0 表示取所有有词项命中的文档
+    const RAG_MIN_SCORE = 0;
 
     let lastStats = {
         tokenCount: 0,
@@ -413,8 +414,8 @@
     }
 
     /**
-     * 单条历程条目 → RAG 文档文本（用于嵌入与展示）。
-     */
+      * 单条历程条目 → RAG 检索文本（含天数/时间段/地点，用作 BM25 文档与查询）。
+      */
     function entryToDocText(entry) {
         const meta = [entry && entry.天数, entry && entry.时间段, entry && entry.地点]
             .map(s => (s == null ? '' : String(s).trim())).filter(Boolean).join(' ');
@@ -639,9 +640,9 @@ ${newCharacterCardTemplate}
      *   历程条目已被正文覆盖，从历程中排除，避免重复）。
      * - 中段：历程中未被正文覆盖的条目；RAG 触发时二分搜索最大后缀窗口，
      *   使 窗口+正文+角色卡 ≤ tokenLimit - ragBudget。
-     * - RAG：触发时（ragToggle 且模型就绪且 全量 > tokenLimit×(1-ragRatio)），
-     *   以 最新用户消息 + 窗口历程条目（最新→次新→…）为查询序列逐个检索，
-     *   窗口外的远端条目按余弦相似度 topK 贪心装入，直到预算装满，
+      * - RAG：触发时（全量 > tokenLimit×(1-ragRatio)），
+      *   以 最新用户消息 + 窗口历程条目（最新→次新→…，含天数/时间段/地点）为查询序列
+      *   逐个 BM25 检索，窗口外的远端条目按得分 topK 贪心装入，直到预算装满，
      *   按时间顺序渲染为历程 markdown 放在 <HISTORY> 头部（与中段格式一致），
      *   预算 ragBudget = tokenLimit × ragRatio。
      * - 未触发：全量注入，不裁剪。
@@ -702,9 +703,8 @@ ${newCharacterCardTemplate}
         const fullTokens = await getTokenCountAsync(joinNonEmpty([fullMidMarkdown, tailText]) + charJson);
 
         const ragReady = NS.Retriever ? NS.Retriever.isReady() : false;
-        const ragWillActivate = Boolean(Settings.get('ragToggle')) && ragReady
-            && fullTokens > tokenLimit * (1 - ragRatio);
-        console.log(`[Chat History Optimization] 全量 ${fullTokens} tokens，tokenLimit=${tokenLimit}，ragRatio=${ragRatio}，RAG ${ragWillActivate ? '将启用' : '不启用'}（toggle=${Settings.get('ragToggle')}, ready=${ragReady}）`);
+        const ragWillActivate = ragReady && fullTokens > tokenLimit * (1 - ragRatio);
+        console.log(`[Chat History Optimization] 全量 ${fullTokens} tokens，tokenLimit=${tokenLimit}，ragRatio=${ragRatio}，RAG ${ragWillActivate ? '将启用' : '不启用'}（ready=${ragReady}）`);
 
         let rag = {
             active: false,
@@ -740,7 +740,8 @@ ${newCharacterCardTemplate}
 
             const query = (chatCopy[chatCopy.length - 1] && chatCopy[chatCopy.length - 1].mes) || '';
             rag.query = query;
-            // 查询序列：最新用户消息在前，随后按 最新→次新→… 取窗口历程条目
+            // 查询序列：chat 最后一条消息在前，随后按 最近→次近→… 取窗口历程条目（含地点），
+            // 逐个查询直到远端预算装满
             const queries = [query, ...midEntries.slice(midEntries.length - bestK).reverse().map(entryToDocText)]
                 .filter((q) => q);
             if (farEntries.length > 0 && queries.length > 0 && NS.Retriever) {
@@ -879,7 +880,7 @@ ${newCharacterCardTemplate}
         console.log("[Chat History Optimization] token count:", result.tokenCount);
         printObj("[Chat History Optimization] Final Summary Info", { historyData, characterData, ragMarkdown: result.ragMarkdown });
         if (!result.rag.active && result.tokenCount > Settings.get('tokenLimit')) {
-            console.warn("[Chat History Optimization] 内容超出 token 限制且 RAG 未生效（未开启或模型未就绪），按全量注入。");
+            console.warn("[Chat History Optimization] 内容超出 token 限制且 RAG 未生效（未超预算阈值），按全量注入。");
         }
 
         const mergedChat = [];

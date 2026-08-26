@@ -698,30 +698,6 @@
     color: var(--coo-text);
 }
 
-/* ------------------------------ rag status ------------------------------ */
-
-#coo-root .coo-rag-status-row {
-    min-height: 34px;
-}
-
-#coo-root .coo-rag-status-right {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex: 0 0 auto;
-}
-
-#coo-root .coo-rag-status-right [hidden] {
-    display: none !important;
-}
-
-#coo-root .coo-rag-status-right .coo-button:disabled {
-    opacity: 0.55;
-    cursor: default;
-    transform: none;
-    box-shadow: none;
-}
-
 /* ------------------------------ rag hits -------------------------------- */
 
 #coo-root .coo-rag-info {
