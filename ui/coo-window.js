@@ -22,6 +22,7 @@
 
     const TABS = [
         { id: 'settings', label: '基础设置', icon: 'fa-solid fa-sliders' },
+        { id: 'subsummary', label: '二级摘要', icon: 'fa-solid fa-compress' },
         { id: 'templates', label: '模板', icon: 'fa-solid fa-file-code' },
         { id: 'roles', label: '角色查看', icon: 'fa-solid fa-id-card' },
         { id: 'story', label: '故事历程', icon: 'fa-solid fa-route' },
@@ -126,6 +127,26 @@
         if (options.min !== undefined) input.min = options.min;
         if (options.max !== undefined) input.max = options.max;
         if (options.step !== undefined) input.step = options.step;
+        row.appendChild(input);
+        return row;
+    }
+
+    function createTextRow(label, hint, field, options = {}) {
+        const row = document.createElement('div');
+        row.className = 'coo-row coo-input-row';
+
+        const labelBox = document.createElement('div');
+        labelBox.className = 'coo-label-box';
+        labelBox.appendChild(createText('span', 'coo-row-label', label));
+        if (hint) labelBox.appendChild(createText('small', 'coo-row-hint', hint));
+        row.appendChild(labelBox);
+
+        const input = document.createElement('input');
+        input.type = options.type || 'text';
+        input.className = 'coo-input';
+        input.dataset.cooField = field;
+        if (options.placeholder) input.placeholder = options.placeholder;
+        input.spellcheck = false;
         row.appendChild(input);
         return row;
     }
@@ -405,6 +426,46 @@
         return fieldBox;
     }
 
+    function buildStorySummary(entry) {
+        const box = document.createElement('div');
+        box.className = 'coo-story-summary';
+        const valid = NS.SubSummary ? NS.SubSummary.getValidSummary(entry.floor, entry.index) : null;
+        const head = document.createElement('div');
+        head.className = 'coo-story-summary-head';
+        head.appendChild(createText('span', 'coo-story-summary-label', '二级摘要'));
+
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.dataset.cooFloor = String(entry.floor);
+        button.dataset.cooIndex = String(entry.index);
+        if (valid) {
+            button.className = 'coo-button coo-button-ghost coo-button-sm';
+            button.dataset.cooAction = 'entryRegenerate';
+            button.appendChild(createIcon('fa-solid fa-rotate'));
+            button.appendChild(createText('span', 'coo-button-label', '重新生成'));
+            button.title = '重新生成该条目的二级摘要';
+            head.appendChild(button);
+        } else {
+            button.className = 'coo-button coo-button-ghost coo-button-sm';
+            button.dataset.cooAction = 'entryGenerate';
+            button.appendChild(createIcon('fa-solid fa-wand-magic-sparkles'));
+            button.appendChild(createText('span', 'coo-button-label', '生成摘要'));
+            button.title = '为该条目生成二级摘要';
+            head.appendChild(button);
+        }
+        box.appendChild(head);
+
+        if (valid) {
+            const time = new Date(valid.t).toLocaleString();
+            box.appendChild(createText('div', 'coo-story-summary-time', time));
+            const json = typeof valid.s === 'string' ? valid.s : JSON.stringify(valid.s);
+            box.appendChild(createText('div', 'coo-story-summary-body', json));
+        } else {
+            box.appendChild(createText('div', 'coo-role-empty coo-story-summary-empty', '尚未生成二级摘要'));
+        }
+        return box;
+    }
+
     function buildStoryEntry(entry) {
         const item = document.createElement('div');
         item.className = 'coo-story-item';
@@ -417,6 +478,7 @@
         if (entry.历程) {
             item.appendChild(createText('div', 'coo-story-item-body', entry.历程));
         }
+        item.appendChild(buildStorySummary(entry));
         return item;
     }
 
@@ -451,6 +513,36 @@
         }
     }
 
+    function handleSubGenerateAll(scope) {
+        if (!requireConfigured(scope)) return;
+        const startInput = scope.querySelector('[data-coo-field="storyStart"]');
+        const endInput = scope.querySelector('[data-coo-field="storyEnd"]');
+        const start = startInput ? startInput.value : '1';
+        const end = endInput ? endInput.value : '';
+        NS.SubSummary.generateForRange(start, end, { force: false });
+        updateSubSummaryStatus(scope);
+    }
+
+    function handleEntrySummaryAction(button, force) {
+        const scope = button.closest ? button.closest('.coo-workspace') : null;
+        if (scope && !requireConfigured(scope)) return;
+        const floor = parseInt(button.dataset.cooFloor, 10);
+        const index = parseInt(button.dataset.cooIndex, 10);
+        if (isNaN(floor) || isNaN(index)) return;
+        NS.SubSummary.generateForEntry(floor, index, { force });
+    }
+
+    function handleSubForceGenerateAll(scope) {
+        if (!requireConfigured(scope)) return;
+        NS.SubSummary.generateForRange(null, null, { force: true });
+        updateSubSummaryStatus(scope);
+    }
+
+    function handleSubEraseAll(scope) {
+        NS.SubSummary.eraseForRange(null, null);
+        updateSubSummaryStatus(scope);
+    }
+
     function renderStoryTab(panel) {
         const section = createSection('fa-solid fa-route', '故事历程');
 
@@ -464,8 +556,15 @@
         const allButton = createButton('全部楼层', 'coo-button coo-button-ghost coo-button-sm', 'fa-solid fa-arrows-up-down');
         allButton.dataset.cooAction = 'storyAll';
         allButton.title = '查看全部楼层的故事历程';
-        toolbar.append(queryButton, allButton);
+        const subAllButton = createButton('生成全部摘要', 'coo-button coo-button-ghost coo-button-sm', 'fa-solid fa-compress');
+        subAllButton.dataset.cooAction = 'subGenerateAll';
+        subAllButton.title = '为当前楼层范围内的条目生成二级摘要（跳过已有效条目）';
+        toolbar.append(queryButton, allButton, subAllButton);
         section.appendChild(toolbar);
+
+        const subStatus = createText('div', 'coo-subsummary-status', '空闲');
+        subStatus.dataset.cooField = 'subSummaryStatus';
+        section.appendChild(subStatus);
 
         const ragInfo = createText('div', 'coo-rag-info', '');
         ragInfo.dataset.cooField = 'ragInfo';
@@ -486,6 +585,87 @@
         startInput.value = '1';
         endInput.value = '';
         queryStoryRange(section, 1, '');
+    }
+
+    function updateSubSummaryBadge(scope) {
+        const field = 'subSummaryPrompt';
+        const badge = scope.querySelector(`[data-coo-validity="${field}"]`);
+        const textarea = scope.querySelector(`[data-coo-field="${field}"]`);
+        if (!badge || !textarea) return;
+        const valid = NS.SubSummary ? NS.SubSummary.validateTemplate(textarea.value) : false;
+        badge.textContent = valid ? '(有效)' : '(无效)';
+        badge.className = `coo-badge ${valid ? 'coo-badge-valid' : 'coo-badge-invalid'}`;
+    }
+
+    function updateSubSummaryStatus(scope) {
+        scope.querySelectorAll('[data-coo-field="subSummaryStatus"]').forEach((el) => {
+            const status = NS.SubSummary ? NS.SubSummary.getStatus() : { running: false, current: '', done: 0, failed: 0, error: null, message: null };
+            if (status.running) {
+                el.textContent = `生成中：${status.current}（成功 ${status.done} / 失败 ${status.failed}）`;
+                el.className = 'coo-subsummary-status coo-subsummary-status-running';
+            } else if (status.error) {
+                el.textContent = status.error;
+                el.className = 'coo-subsummary-status coo-subsummary-status-error';
+            } else if (status.done > 0 || status.failed > 0) {
+                el.textContent = `完成：成功 ${status.done}，失败 ${status.failed}`;
+                el.className = 'coo-subsummary-status';
+            } else if (status.message) {
+                el.textContent = status.message;
+                el.className = 'coo-subsummary-status';
+            } else {
+                el.textContent = '空闲';
+                el.className = 'coo-subsummary-status';
+            }
+        });
+    }
+
+    function requireConfigured(scope) {
+        if (NS.SubSummary && NS.SubSummary.isConfigured()) return true;
+        scope.querySelectorAll('[data-coo-field="subSummaryStatus"]').forEach((el) => {
+            el.textContent = '二级摘要未配置：请在"二级摘要"选项卡设置 baseUrl、apiKey 和模型';
+            el.className = 'coo-subsummary-status coo-subsummary-status-error';
+        });
+        return false;
+    }
+
+    function renderSubSummaryTab(panel) {
+        const section = createSection('fa-solid fa-compress', '二级摘要');
+        section.appendChild(createSwitchRow('启用二级摘要', 'subSummaryToggle'));
+        section.appendChild(createText('div', 'coo-preview-hint', 'AI 回复生成完成后自动为最新楼层缺失的条目生成二级摘要（"故事历程"选项卡中的手动生成不受此开关限制）'));
+        section.appendChild(createTextRow('API baseUrl', 'OpenAI 兼容接口，如 http://localhost:8080 或 http://localhost:8080/v1', 'subSummaryBaseUrl', { placeholder: 'http://localhost:8080' }));
+        section.appendChild(createTextRow('API Key', '', 'subSummaryApiKey', { type: 'password' }));
+        section.appendChild(createTextRow('模型名', '', 'subSummaryModel'));
+        section.appendChild(createNumberRow('temperature', '（采样温度）', 'subSummaryTemperature', { min: 0, max: 2, step: 0.1 }));
+        section.appendChild(createNumberRow('maxTokens', '（单次生成最大 token 数）', 'subSummaryMaxTokens', { min: 1, step: 1 }));
+        section.appendChild(createTemplateBlock('二级摘要模板（{{故事历程}} 为单条目完整 JSON 占位符）', 'subSummaryPrompt', 8, 10));
+
+        const status = createText('div', 'coo-subsummary-status', '空闲');
+        status.dataset.cooField = 'subSummaryStatus';
+        section.appendChild(status);
+
+        const actions = document.createElement('div');
+        actions.className = 'coo-subsummary-actions';
+        const forceGenButton = createButton('强制生成全部', 'coo-button coo-button-sm', 'fa-solid fa-bolt');
+        forceGenButton.dataset.cooAction = 'subForceGenerateAll';
+        forceGenButton.title = '无视已有摘要，为全部楼层的所有条目重新生成二级摘要';
+        const forceEraseButton = createButton('强制擦除全部', 'coo-button coo-button-ghost coo-button-sm', 'fa-solid fa-eraser');
+        forceEraseButton.dataset.cooAction = 'subEraseAll';
+        forceEraseButton.title = '擦除全部楼层的二级摘要数据（不影响故事历程原文）';
+        actions.append(forceGenButton, forceEraseButton);
+        section.appendChild(actions);
+
+        const settings = Settings.getSettings();
+        section.querySelector('[data-coo-field="subSummaryToggle"]').checked = Boolean(settings.subSummaryToggle);
+        section.querySelector('[data-coo-field="subSummaryBaseUrl"]').value = settings.subSummaryBaseUrl || '';
+        section.querySelector('[data-coo-field="subSummaryApiKey"]').value = settings.subSummaryApiKey || '';
+        section.querySelector('[data-coo-field="subSummaryModel"]').value = settings.subSummaryModel || '';
+        section.querySelector('[data-coo-field="subSummaryTemperature"]').value = settings.subSummaryTemperature;
+        section.querySelector('[data-coo-field="subSummaryMaxTokens"]').value = settings.subSummaryMaxTokens;
+        section.querySelector('[data-coo-field="subSummaryPrompt"]').value = settings.subSummaryPrompt;
+        updateSubSummaryBadge(section);
+        updateSubSummaryStatus(section);
+
+        panel.appendChild(section);
     }
 
     function renderPreviewText(scope) {
@@ -513,6 +693,7 @@
         templates: renderTemplatesTab,
         roles: renderRolesTab,
         story: renderStoryTab,
+        subsummary: renderSubSummaryTab,
         preview: renderPreviewTab,
     };
 
@@ -663,6 +844,7 @@
         const workspace = shell.querySelector('.coo-workspace');
         if (!workspace) return;
         updateStatsValues(shell);
+        updateSubSummaryStatus(shell);
         if (activeTabId === 'roles') {
             renderRoleSelect(workspace);
             renderRoleInfo(workspace);
@@ -748,6 +930,32 @@
                     Settings.set('characterPrompt', event.target.value);
                     updateValidityBadge(workspace, 'characterPrompt');
                     break;
+                case 'subSummaryToggle':
+                    Settings.set('subSummaryToggle', Boolean(event.target.checked));
+                    break;
+                case 'subSummaryBaseUrl':
+                    Settings.set('subSummaryBaseUrl', event.target.value);
+                    break;
+                case 'subSummaryApiKey':
+                    Settings.set('subSummaryApiKey', event.target.value);
+                    break;
+                case 'subSummaryModel':
+                    Settings.set('subSummaryModel', event.target.value);
+                    break;
+                case 'subSummaryTemperature': {
+                    const value = parseFloat(event.target.value);
+                    Settings.set('subSummaryTemperature', isNaN(value) ? Settings.defaultSettings.subSummaryTemperature : value);
+                    break;
+                }
+                case 'subSummaryMaxTokens': {
+                    const value = parseInt(event.target.value, 10);
+                    Settings.set('subSummaryMaxTokens', isNaN(value) || value <= 0 ? Settings.defaultSettings.subSummaryMaxTokens : value);
+                    break;
+                }
+                case 'subSummaryPrompt':
+                    Settings.set('subSummaryPrompt', event.target.value);
+                    updateSubSummaryBadge(workspace);
+                    break;
                 default:
                     break;
             }
@@ -769,7 +977,18 @@
             const closest = target && target.closest ? target.closest.bind(target) : null;
             const actionButton = closest ? closest('[data-coo-action]') : null;
             if (actionButton) {
-                handleStoryAction(workspace, actionButton.dataset.cooAction);
+                const action = actionButton.dataset.cooAction;
+                if (action === 'storyAll' || action === 'storyQuery') {
+                    handleStoryAction(workspace, action);
+                } else if (action === 'subGenerateAll') {
+                    handleSubGenerateAll(workspace);
+                } else if (action === 'subForceGenerateAll') {
+                    handleSubForceGenerateAll(workspace);
+                } else if (action === 'subEraseAll') {
+                    handleSubEraseAll(workspace);
+                } else if (action === 'entryGenerate' || action === 'entryRegenerate') {
+                    handleEntrySummaryAction(actionButton, action === 'entryRegenerate');
+                }
                 return;
             }
             const resetButton = closest ? closest('[data-coo-reset]') : null;
@@ -779,7 +998,11 @@
             if (!textarea) return;
             textarea.value = Settings.defaultSettings[field];
             Settings.set(field, textarea.value);
-            updateValidityBadge(workspace, field);
+            if (field === 'subSummaryPrompt') {
+                updateSubSummaryBadge(workspace);
+            } else {
+                updateValidityBadge(workspace, field);
+            }
         });
 
         document.addEventListener('keydown', (event) => {
@@ -796,6 +1019,16 @@
         const shell = root ? root.querySelector('.coo-shell') : null;
         if (!shell || shell.hidden) return;
         refreshActiveTabData(shell);
+    }
+
+    function onSubSummaryStatusChanged() {
+        const root = document.getElementById(ROOT_ID);
+        const shell = root ? root.querySelector('.coo-shell') : null;
+        if (!shell || shell.hidden) return;
+        updateSubSummaryStatus(shell);
+        if (activeTabId === 'story') {
+            refreshActiveTabData(shell);
+        }
     }
 
     // ------------------------------------------------------------------
@@ -918,6 +1151,7 @@
         activeTabId = TABS.some((tab) => tab.id === savedTab) ? savedTab : 'settings';
         bindShell(shell);
         Engine.onStats(onStatsChanged);
+        if (NS.SubSummary) NS.SubSummary.onStatus(onSubSummaryStatusChanged);
         startExtensionEntryRetry();
     }
 

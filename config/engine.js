@@ -458,11 +458,12 @@
     }
 
     /**
-     * 只读解析指定楼层范围 [startFloor, endFloor] 内新增的故事历程条目。
-     * 条目归属其首次出现的楼层；去重规则与 deepMerge 一致（JSON.stringify 全等）。
-     * 不修改 ST 的 chat 数组。
-     * @returns {{entries: Array<{floor: number, 天数: string, 时间段: string, 地点: string, 历程: string}>, startFloor: number, endFloor: number, totalFloors: number}}
-     */
+      * 只读解析指定楼层范围 [startFloor, endFloor] 内新增的故事历程条目。
+      * 条目归属其首次出现的楼层；去重规则与 deepMerge 一致（JSON.stringify 全等）。
+      * index 为条目在所属楼层 故事历程 数组中的原始下标。
+      * 不修改 ST 的 chat 数组。
+      * @returns {{entries: Array<{floor: number, index: number, 天数: string, 时间段: string, 地点: string, 历程: string}>, startFloor: number, endFloor: number, totalFloors: number}}
+      */
     function getStoryProgressRange(startFloor, endFloor) {
         const sourceChat = NS.bridge && NS.bridge.getCurrentChat ? NS.bridge.getCurrentChat() : null;
         const totalFloors = sourceChat && Array.isArray(sourceChat) ? sourceChat.length - 1 : 0;
@@ -495,7 +496,9 @@
                 if (!item || (!((("is_user" in item && !item.is_user) || (item.role && item.role == "assistant"))))) continue;
                 const historyObj = getFloorStoryBlock(item);
                 if (!historyObj || !Array.isArray(historyObj.故事历程)) continue;
-                for (const entry of historyObj.故事历程) {
+                const journey = historyObj.故事历程;
+                for (let i = 0; i < journey.length; i++) {
+                    const entry = journey[i];
                     if (!entry || typeof entry !== 'object') continue;
                     const key = JSON.stringify(entry);
                     if (seen.has(key)) continue;
@@ -503,6 +506,7 @@
                     if (floor < start) continue;
                     entries.push({
                         floor: floor,
+                        index: i,
                         天数: entry.天数 || '',
                         时间段: entry.时间段 || '',
                         地点: entry.地点 || '',
@@ -901,6 +905,7 @@ ${newCharacterCardTemplate}
         onStats,
         getStats,
         refreshStats,
+        getFloorStoryBlock,
         getStoryProgressRange,
     });
 })();

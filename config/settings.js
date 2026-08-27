@@ -55,6 +55,16 @@
         }
         // ... 其他角色
 }`,
+        subSummaryToggle: true, // 二级摘要总开关（只控制 AI 回复后的自动生成，手动生成不受限）
+        subSummaryBaseUrl: '', // OpenAI 兼容 API 的 baseUrl
+        subSummaryApiKey: '', // API Key
+        subSummaryModel: '', // 模型名
+        subSummaryTemperature: 0.3,
+        subSummaryMaxTokens: 512,
+        subSummaryPrompt: `你是故事摘要助手。请将以下"故事历程"条目压缩为二级摘要，只输出一个 JSON 对象，不要输出任何其他内容。
+格式：{"摘要": "一段简洁的二级摘要，保留关键情节、人物动作、状态变化", "关键": ["关键事件1", "关键事件2"]}
+条目：
+{{故事历程}}`,
     };
 
     function getSettings() {

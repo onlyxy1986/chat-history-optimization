@@ -4,19 +4,21 @@
 // Keep this file as the loader/bootstrap only; feature logic belongs in modules.
 // ============================================================================
 import { extension_settings } from '../../../extensions.js';
-import { chat, saveSettingsDebounced } from '../../../../script.js';
+import { chat, saveChat, saveChatDebounced, saveSettingsDebounced } from '../../../../script.js';
 import { getTokenCountAsync } from '../../../tokenizers.js';
+import { eventSource, event_types } from '../../../events.js';
 
 (function () {
     'use strict';
 
     const NAMESPACE = 'ChatOptimizationV2';
-    const VERSION = '2.3.1';
+    const VERSION = '2.4.0';
     const baseUrl = new URL('./', import.meta.url).href;
 
     const MODULES = [
         'config/settings.js',
         'config/engine.js',
+        'config/subsummary.js',
         'config/retrieval.js',
         'ui/coo-window.js',
     ];
@@ -35,6 +37,10 @@ import { getTokenCountAsync } from '../../../tokenizers.js';
             saveSettingsDebounced,
             getTokenCountAsync,
             getCurrentChat: () => chat,
+            saveChat,
+            saveChatDebounced,
+            eventSource,
+            eventTypes: event_types,
         }),
     });
 

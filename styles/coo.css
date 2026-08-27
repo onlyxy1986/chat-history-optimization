@@ -1029,6 +1029,75 @@
     word-break: break-word;
 }
 
+/* ------------------------------ sub summary ----------------------------- */
+
+#coo-root .coo-subsummary-status {
+    font-size: 12px;
+    color: var(--coo-muted);
+}
+
+#coo-root .coo-subsummary-status-running {
+    color: var(--coo-selected-color);
+}
+
+#coo-root .coo-subsummary-status-error {
+    color: var(--coo-invalid);
+}
+
+#coo-root .coo-story-summary {
+    margin-top: 8px;
+    padding: 8px 10px;
+    border-left: 3px solid var(--coo-selected-color);
+    border-radius: 0 8px 8px 0;
+    background: var(--coo-input-bg);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+#coo-root .coo-story-summary-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+#coo-root .coo-story-summary-head .coo-button {
+    margin-left: auto;
+}
+
+#coo-root .coo-story-summary-label {
+    font-size: 11px;
+    line-height: 1;
+    padding: 4px 8px;
+    border-radius: 999px;
+    color: var(--coo-selected-color);
+    background: var(--coo-hover);
+    border: 1px solid var(--coo-border);
+}
+
+#coo-root .coo-story-summary-time {
+    font-size: 10px;
+    color: var(--coo-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+#coo-root .coo-story-summary-body {
+    font-size: 12px;
+    line-height: 1.6;
+    white-space: nowrap;
+    overflow-x: auto;
+    font-family: Consolas, 'Cascadia Mono', 'Courier New', monospace;
+}
+
+#coo-root .coo-story-summary-empty {
+    font-size: 12px;
+}
+
+#coo-root .coo-subsummary-actions {
+    display: flex;
+    gap: 8px;
+}
+
 /* ------------------------------ send preview ---------------------------- */
 
 #coo-root .coo-preview-hint {
