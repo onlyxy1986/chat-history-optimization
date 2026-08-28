@@ -896,6 +896,89 @@
     font-size: 11px;
 }
 
+#coo-root .coo-button-danger {
+    background: var(--coo-invalid-soft);
+    border-color: var(--coo-invalid-border);
+    color: var(--coo-invalid);
+}
+
+#coo-root .coo-button-danger:hover,
+#coo-root .coo-button-danger:focus-visible {
+    border-color: var(--coo-invalid);
+    box-shadow: 0 10px 24px rgba(251, 113, 133, 0.25);
+}
+
+#coo-root .coo-button-danger:disabled,
+#coo-root .coo-button-danger:disabled:hover {
+    opacity: 0.45;
+    cursor: not-allowed;
+    transform: none;
+    box-shadow: none;
+    border-color: var(--coo-invalid-border);
+}
+
+/* --------------------------- erase-all confirm --------------------------- */
+
+#coo-root .coo-erase-confirm-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(2, 6, 23, 0.6);
+    backdrop-filter: blur(4px);
+    pointer-events: auto;
+}
+
+#coo-root .coo-erase-confirm-dialog {
+    width: min(380px, calc(100% - 48px));
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 18px;
+    background: var(--coo-bg);
+    border: 1px solid var(--coo-invalid-border);
+    border-radius: 12px;
+    box-shadow: var(--coo-shadow);
+    box-sizing: border-box;
+}
+
+#coo-root .coo-erase-confirm-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--coo-invalid);
+}
+
+#coo-root .coo-erase-confirm-warn {
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--coo-muted);
+}
+
+#coo-root .coo-erase-confirm-input {
+    width: 100%;
+    padding: 7px 10px;
+    background: var(--coo-input-bg);
+    border: 1px solid var(--coo-input-border);
+    border-radius: 9px;
+    color: var(--coo-text);
+    font-size: 12px;
+    font-family: inherit;
+    box-sizing: border-box;
+    outline: none;
+}
+
+#coo-root .coo-erase-confirm-input:focus {
+    border-color: var(--coo-selected-color);
+}
+
+#coo-root .coo-erase-confirm-buttons {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
 /* ------------------------------ role viewer ----------------------------- */
 
 #coo-root .coo-role-info {

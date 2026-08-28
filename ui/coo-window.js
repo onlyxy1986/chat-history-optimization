@@ -19,6 +19,8 @@
     const SIDEBAR_STORAGE_KEY = 'coo_sidebar_collapsed';
     const DISPLAY_NAME = '剧情角色档案';
     const BRAND_ICON = 'fa-solid fa-hourglass-half';
+    // 强制擦除全部的前置确认口令
+    const ERASE_ALL_CONFIRM_TEXT = '确认全部擦除';
 
     const TABS = [
         { id: 'settings', label: '基础设置', icon: 'fa-solid fa-sliders' },
@@ -551,15 +553,68 @@
         NS.SubSummary.generateForEntry(floor, index, { force });
     }
 
+    function handleSubGenerateMissing(scope) {
+        if (!requireConfigured(scope)) return;
+        NS.SubSummary.generateForRange(null, null, { force: false, onlyMissing: true });
+        updateSubSummaryStatus(scope);
+    }
+
     function handleSubForceGenerateAll(scope) {
         if (!requireConfigured(scope)) return;
         NS.SubSummary.generateForRange(null, null, { force: true });
         updateSubSummaryStatus(scope);
     }
 
+    // 擦除确认弹层：输入 ERASE_ALL_CONFIRM_TEXT 后才可执行，Esc/点遮罩/取消 关闭
+    function showEraseAllConfirm(onConfirm) {
+        const root = document.getElementById(ROOT_ID);
+        if (!root || root.querySelector('.coo-erase-confirm-overlay')) return;
+
+        const overlay = createText('div', 'coo-erase-confirm-overlay');
+        const dialog = createText('div', 'coo-erase-confirm-dialog');
+        dialog.appendChild(createText('div', 'coo-erase-confirm-title', '强制擦除全部二级摘要'));
+        dialog.appendChild(createText('div', 'coo-erase-confirm-warn', '将擦除全部楼层的二级摘要数据（不影响故事历程原文），此操作不可撤销。'));
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.className = 'coo-erase-confirm-input';
+        input.placeholder = `输入「${ERASE_ALL_CONFIRM_TEXT}」以确认`;
+        input.setAttribute('aria-label', '擦除确认口令');
+        dialog.appendChild(input);
+
+        const buttons = document.createElement('div');
+        buttons.className = 'coo-erase-confirm-buttons';
+        const cancelButton = createButton('取消', 'coo-button coo-button-ghost coo-button-sm');
+        const confirmButton = createButton('确认擦除', 'coo-button coo-button-danger coo-button-sm', 'fa-solid fa-eraser');
+        confirmButton.disabled = true;
+        buttons.append(cancelButton, confirmButton);
+        dialog.appendChild(buttons);
+        overlay.appendChild(dialog);
+
+        const onKey = (e) => { if (e.key === 'Escape') close(); };
+        function close() {
+            document.removeEventListener('keydown', onKey, true);
+            overlay.remove();
+        }
+        input.addEventListener('input', () => {
+            confirmButton.disabled = input.value.trim() !== ERASE_ALL_CONFIRM_TEXT;
+        });
+        cancelButton.addEventListener('click', close);
+        confirmButton.addEventListener('click', () => {
+            close();
+            onConfirm();
+        });
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+        document.addEventListener('keydown', onKey, true);
+
+        root.appendChild(overlay);
+        input.focus();
+    }
+
     function handleSubEraseAll(scope) {
-        NS.SubSummary.eraseForRange(null, null);
-        updateSubSummaryStatus(scope);
+        showEraseAllConfirm(() => {
+            NS.SubSummary.eraseForRange(null, null);
+            updateSubSummaryStatus(scope);
+        });
     }
 
     function renderStoryTab(panel) {
@@ -668,13 +723,16 @@
 
         const actions = document.createElement('div');
         actions.className = 'coo-subsummary-actions';
+        const genMissingButton = createButton('生成所有缺失', 'coo-button coo-button-sm', 'fa-solid fa-wand-magic-sparkles');
+        genMissingButton.dataset.cooAction = 'subGenerateMissing';
+        genMissingButton.title = '为全部楼层中缺少有效摘要的条目生成二级摘要（已有有效摘要的条目跳过）';
         const forceGenButton = createButton('强制生成全部', 'coo-button coo-button-sm', 'fa-solid fa-bolt');
         forceGenButton.dataset.cooAction = 'subForceGenerateAll';
         forceGenButton.title = '无视已有摘要，为全部楼层的所有条目重新生成二级摘要';
         const forceEraseButton = createButton('强制擦除全部', 'coo-button coo-button-ghost coo-button-sm', 'fa-solid fa-eraser');
         forceEraseButton.dataset.cooAction = 'subEraseAll';
         forceEraseButton.title = '擦除全部楼层的二级摘要数据（不影响故事历程原文）';
-        actions.append(forceGenButton, forceEraseButton);
+        actions.append(genMissingButton, forceGenButton, forceEraseButton);
         section.appendChild(actions);
 
         const settings = Settings.getSettings();
@@ -1032,6 +1090,8 @@
                     handleStoryAction(workspace, action);
                 } else if (action === 'subGenerateAll') {
                     handleSubGenerateAll(workspace);
+                } else if (action === 'subGenerateMissing') {
+                    handleSubGenerateMissing(workspace);
                 } else if (action === 'subForceGenerateAll') {
                     handleSubForceGenerateAll(workspace);
                 } else if (action === 'subEraseAll') {

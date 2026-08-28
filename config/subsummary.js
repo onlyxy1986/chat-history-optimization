@@ -14,6 +14,9 @@
 
     const EXTRA_KEY = 'chat-optimization-v2';
     const PLACEHOLDER = '{{故事历程}}';
+    // 生成失败重试：每次失败后等待 RETRY_DELAY_MS，最多重试 MAX_RETRIES 次
+    const RETRY_DELAY_MS = 1000;
+    const MAX_RETRIES = 3;
 
     let lastStatus = { running: false, current: '', done: 0, failed: 0, error: null, message: null };
     const statusListeners = new Set();
@@ -304,6 +307,23 @@
         return 'ok';
     }
 
+    // 带重试的 runOne：失败等待 RETRY_DELAY_MS 后重试，最多 MAX_RETRIES 次，全部失败则抛出最后错误
+    async function runOneWithRetry(floor, index, force) {
+        let lastErr = null;
+        for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+            try {
+                return await runOne(floor, index, force);
+            } catch (e) {
+                lastErr = e;
+                if (attempt < MAX_RETRIES) {
+                    console.warn(`[Chat History Optimization] 楼层 ${floor} 条目 ${index + 1} 二级摘要生成失败，${RETRY_DELAY_MS}ms 后重试（第 ${attempt + 1}/${MAX_RETRIES} 次）:`, e);
+                    await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+                }
+            }
+        }
+        throw lastErr;
+    }
+
     // 串行执行一批 {floor, index} 目标，统一维护状态总线
     async function executeBatch(targets, force) {
         const total = targets.length;
@@ -319,9 +339,9 @@
             for (let k = 0; k < total; k++) {
                 const floor = targets[k].floor;
                 const index = targets[k].index;
-                notifyStatus({ running: true, current: `楼层${floor} 条目${index + 1}/${total}`, done, failed, error: null });
+                notifyStatus({ running: true, current: `第${k + 1}/${total}条 · 楼层${floor} 条目${index + 1}`, done, failed, error: null });
                 try {
-                    const result = await runOne(floor, index, force);
+                    const result = await runOneWithRetry(floor, index, force);
                     if (result === 'ok') done++;
                 } catch (e) {
                     failed++;
@@ -357,7 +377,7 @@
         running = true;
         notifyStatus({ running: true, current: `楼层${floor} 条目${entryIndex + 1}`, done: 0, failed: 0, error: null, message: null });
         try {
-            const result = await runOne(floor, entryIndex, force);
+            const result = await runOneWithRetry(floor, entryIndex, force);
             if (result === 'ok') done = 1;
             else if (result === 'skip') message = '该条目已有有效摘要，无需生成';
         } catch (e) {
@@ -377,7 +397,8 @@
         return isNaN(n) ? null : n;
     }
 
-    function collectRangeTargets(startFloor, endFloor) {
+    // onlyMissing 为 true 时只收集缺少有效摘要的条目（进度总数即缺失数）
+    function collectRangeTargets(startFloor, endFloor, onlyMissing) {
         const chat = NS.bridge.getCurrentChat ? NS.bridge.getCurrentChat() : null;
         if (!chat || !Array.isArray(chat)) return null;
         const totalFloors = Math.max(0, chat.length - 1);
@@ -399,7 +420,12 @@
         for (let floor = start; floor <= end; floor++) {
             const floorData = getFloorJourney(floor);
             if (!floorData) continue;
+            const { valid, summaries } = onlyMissing ? getFloorSummaries(floor) : null;
             for (let i = 0; i < floorData.journey.length; i++) {
+                if (onlyMissing) {
+                    const existing = valid ? summaries[i] : null;
+                    if (existing && typeof existing === 'object' && existing.s !== undefined && existing.s !== null) continue;
+                }
                 targets.push({ floor, index: i });
             }
         }
@@ -412,10 +438,15 @@
             return false;
         }
         const force = Boolean(options && options.force);
-        const targets = collectRangeTargets(startFloor, endFloor);
+        const onlyMissing = Boolean(options && options.onlyMissing);
+        const targets = collectRangeTargets(startFloor, endFloor, onlyMissing);
         if (targets === null) {
             notifyStatus({ running: false, current: '', done: 0, failed: 0, error: '没有可用的楼层范围' });
             return false;
+        }
+        if (targets.length === 0 && onlyMissing) {
+            notifyStatus({ running: false, current: '', done: 0, failed: 0, error: null, message: '没有缺失的条目，无需生成' });
+            return true;
         }
         await executeBatch(targets, force);
         return true;
