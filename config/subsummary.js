@@ -72,6 +72,47 @@
         return typeof text === 'string' && text.trim() !== '' && text.indexOf(PLACEHOLDER) !== -1;
     }
 
+    // ------------------------------------------------------------------
+    // 召回特化摘要 schema：{actor:[], location:[], event:'', recall_when:[]}
+    // ------------------------------------------------------------------
+
+    function toStringArray(value) {
+        let arr = value;
+        if (typeof value === 'string') arr = [value];
+        if (!Array.isArray(arr)) return [];
+        const seen = new Set();
+        const out = [];
+        for (const v of arr) {
+            if (typeof v !== 'string') continue;
+            const t = v.trim();
+            if (t !== '' && !seen.has(t)) {
+                seen.add(t);
+                out.push(t);
+            }
+        }
+        return out;
+    }
+
+    // 将 LLM 返回对象规范化为召回特化结构；所有字段均为空时返回 null（视为生成失败）
+    function normalizeSummary(obj) {
+        if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
+        const event = typeof obj.event === 'string' ? obj.event.trim() : '';
+        const actor = toStringArray(obj.actor);
+        const location = toStringArray(obj.location);
+        const recall_when = toStringArray(obj.recall_when);
+        if (event === '' && actor.length === 0 && location.length === 0 && recall_when.length === 0) return null;
+        return { actor, location, event, recall_when };
+    }
+
+    // 已存摘要是否含可用召回字段（旧 schema 摘要返回 false，召回时回退 BM25）
+    function hasRecallFields(s) {
+        if (!s || typeof s !== 'object') return false;
+        return (typeof s.event === 'string' && s.event.trim() !== '')
+            || (Array.isArray(s.actor) && s.actor.length > 0)
+            || (Array.isArray(s.location) && s.location.length > 0)
+            || (Array.isArray(s.recall_when) && s.recall_when.length > 0);
+    }
+
     function normalizeBaseUrl(baseUrl) {
         let url = String(baseUrl || '').trim().replace(/\/+$/, '');
         if (!url) return null;
@@ -248,7 +289,11 @@
         // 占位符替换为条目完整 JSON（紧凑格式）；split/join 避免 JSON 中 $ 模式被 replace 解释
         const content = String(template).split(PLACEHOLDER).join(JSON.stringify(entry));
 
-        const s = await callLlm(content);
+        const s = normalizeSummary(await callLlm(content));
+        if (!s) {
+            console.error('[Chat History Optimization] 二级摘要返回内容全部字段为空，视为生成失败');
+            throw new Error('二级摘要返回内容全部字段为空');
+        }
 
         const summaries = (extra && Array.isArray(extra.summaries)) ? extra.summaries : new Array(journey.length).fill(null);
         while (summaries.length < journey.length) summaries.push(null);
@@ -470,6 +515,7 @@
         PLACEHOLDER,
         isConfigured,
         validateTemplate,
+        hasRecallFields,
         getFloorSummaries,
         getValidSummary,
         generateForEntry,

@@ -1093,6 +1093,25 @@
     font-size: 12px;
 }
 
+#coo-root .coo-story-summary-line {
+    display: flex;
+    gap: 6px;
+    font-size: 12px;
+    line-height: 1.6;
+}
+
+#coo-root .coo-story-summary-key {
+    flex: 0 0 auto;
+    font-size: 11px;
+    color: var(--coo-muted);
+}
+
+#coo-root .coo-story-summary-val {
+    flex: 1 1 auto;
+    min-width: 0;
+    word-break: break-all;
+}
+
 #coo-root .coo-subsummary-actions {
     display: flex;
     gap: 8px;

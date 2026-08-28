@@ -26,9 +26,18 @@
         "学术": ""
     };
 
-    const RAG_TOP_K = 6;
     // BM25 得分无归一化，0 表示取所有有词项命中的文档
     const RAG_MIN_SCORE = 0;
+    // 召回特化摘要四分量权重（各分量归一化到 [0,1]）
+    const SUMMARY_W_ACTOR = 0.30;
+    const SUMMARY_W_LOCATION = 0.15;
+    const SUMMARY_W_EVENT = 0.20;
+    const SUMMARY_W_RECALL = 0.35;
+    // BM25 回退分数饱和归一化常数：score/(score+K) ∈ [0,1)
+    const BM25_NORM_K = 4;
+    // actor 命中 IDF 饱和值：命中人物的 idf 之和达到该值即记满 S_actor=1，
+    // 只命中高频主角（idf 低）时只能拿到部分分数
+    const ACTOR_IDF_SATURATION = 1.0;
 
     let lastStats = {
         tokenCount: 0,
@@ -654,6 +663,166 @@ ${newCharacterCardTemplate}
      * @param {object[]} chatCopy - 聊天记录的深拷贝（mergeDataInfo 会写入 messageCount）
      * @param {{runRag?: boolean}} options - runRag=false 时只判断是否触发，不执行检索
      */
+    // ------------------------------------------------------------------
+    // 召回特化摘要混合打分
+    // ------------------------------------------------------------------
+
+    /**
+     * 收集各楼层 extra 中的有效召回特化摘要，
+     * 键为 JSON.stringify(故事历程条目)（与 deepMerge 去重键一致，
+     * 使合并后的 farEntries 可直接命中）。
+     */
+    function buildSummaryMap(chatCopy) {
+        const map = new Map();
+        const SubSummary = NS.SubSummary;
+        if (!SubSummary) return map;
+        for (let i = 0; i < chatCopy.length; i++) {
+            const item = chatCopy[i];
+            if (!item) continue;
+            if (!((("is_user" in item && !item.is_user) || (item.role && item.role === 'assistant')))) continue;
+            const historyObj = getFloorStoryBlock(item);
+            if (!historyObj || !Array.isArray(historyObj.故事历程)) continue;
+            const journey = historyObj.故事历程;
+            const { summaries } = SubSummary.getFloorSummaries(i);
+            for (let j = 0; j < journey.length; j++) {
+                const slot = summaries[j];
+                if (!slot || typeof slot !== 'object') continue;
+                if (slot.s === undefined || slot.s === null) continue;
+                if (!SubSummary.hasRecallFields(slot.s)) continue;
+                map.set(JSON.stringify(journey[j]), slot.s);
+            }
+        }
+        return map;
+    }
+
+    /**
+     * 远端条目混合打分（与 farEntries 同序返回）：
+     * - 有召回特化摘要且 Embedder 就绪：
+     *   score = W_ACTOR·(命中人物/总数) + W_LOCATION·(命中地点/总数)
+     *         + W_EVENT·cos(query,event) + W_RECALL·max(cos(query,recall_when))
+     * - 否则：BM25 回退，score = bm25/(bm25+BM25_NORM_K)
+     * Embedder 未就绪时全池走 BM25 归一化（等价于纯 BM25 排序）。
+     */
+    async function scoreFarEntries(queryText, farEntries, docs, summaryMap, knownNames) {
+        const embedderReady = !!(NS.Embedder && NS.Embedder.isReady());
+        const summaries = farEntries.map(entry => (embedderReady ? summaryMap.get(JSON.stringify(entry)) : null));
+
+        // BM25 回退池：无摘要条目（Embedder 未就绪时为全池）
+        const bm25Score = new Map(); // entryIdx -> 归一化分数
+        const poolIdx = [];
+        for (let i = 0; i < farEntries.length; i++) {
+            if (!summaries[i] && docs[i]) poolIdx.push(i);
+        }
+        if (poolIdx.length > 0 && NS.Retriever) {
+            const hits = await NS.Retriever.retrieve(queryText, poolIdx.map(i => docs[i]), poolIdx.length, RAG_MIN_SCORE);
+            for (const hit of hits) {
+                const idx = poolIdx[hit.index];
+                if (idx !== undefined && !bm25Score.has(idx)) {
+                    bm25Score.set(idx, hit.score / (hit.score + BM25_NORM_K));
+                }
+            }
+        }
+
+        // actor 消歧名单：全部摘要人物 ∪ 已知角色名
+        const allNames = new Set(knownNames || []);
+        for (const s of summaries) {
+            if (s && Array.isArray(s.actor)) for (const a of s.actor) allNames.add(a);
+        }
+        const nameList = [...allNames];
+
+        // actor IDF：高频人物（主角几乎每条都在场）命中权重降低，
+        // idf = log(1 + (N - d + 0.5) / (d + 0.5))，d 为该人物出现的摘要条目数；
+        // S_actor 取命中人物 idf 之和的绝对饱和（非条目内归一），
+        // 使"只命中主角"的条目无法拿满人物分
+        const summaryPoolSize = summaries.filter(Boolean).length;
+        const actorDf = new Map();
+        for (const s of summaries) {
+            if (!s || !Array.isArray(s.actor)) continue;
+            for (const a of new Set(s.actor)) actorDf.set(a, (actorDf.get(a) || 0) + 1);
+        }
+        const actorIdf = name => {
+            const d = actorDf.get(name) || 0;
+            return Math.log(1 + (summaryPoolSize - d + 0.5) / (d + 0.5));
+        };
+
+        // 批量编码 event / recall_when（文档侧不加查询指令）
+        const jobTexts = [];
+        const jobMap = new Map(); // entryIdx -> { eventPos, recallPos: [] }
+        for (let i = 0; i < farEntries.length; i++) {
+            const s = summaries[i];
+            if (!s) continue;
+            const job = { eventPos: -1, recallPos: [] };
+            if (typeof s.event === 'string' && s.event.trim() !== '') job.eventPos = jobTexts.push(s.event.trim()) - 1;
+            if (Array.isArray(s.recall_when)) {
+                for (const r of s.recall_when) {
+                    const t = String(r == null ? '' : r).trim();
+                    if (t !== '') job.recallPos.push(jobTexts.push(t) - 1);
+                }
+            }
+            jobMap.set(i, job);
+        }
+        const queryVec = embedderReady && queryText !== ''
+            ? (await NS.Embedder.encodeBatch([NS.Embedder.withQueryInstruction(queryText)]))[0]
+            : null;
+        const vecs = jobTexts.length > 0 ? await NS.Embedder.encodeBatch(jobTexts) : [];
+
+        const clamp01 = v => Math.min(1, Math.max(0, v));
+        const results = new Array(farEntries.length);
+        for (let i = 0; i < farEntries.length; i++) {
+            const s = summaries[i];
+            if (s) {
+                const actors = Array.isArray(s.actor) ? s.actor : [];
+                let actorHit = 0;
+                let actorIdfHit = 0;
+                for (const a of new Set(actors)) {
+                    if (nameMatches(a, queryText, nameList)) {
+                        actorHit++;
+                        actorIdfHit += actorIdf(a);
+                    }
+                }
+                const actorScore = Math.min(1, actorIdfHit / ACTOR_IDF_SATURATION);
+                const locations = Array.isArray(s.location) ? s.location : [];
+                let locHit = 0;
+                for (const loc of locations) {
+                    if (loc && queryText.includes(loc)) locHit++;
+                }
+                const locationScore = locations.length > 0 ? locHit / locations.length : 0;
+                const job = jobMap.get(i) || { eventPos: -1, recallPos: [] };
+                const sEvent = (job.eventPos >= 0 && queryVec && vecs[job.eventPos])
+                    ? clamp01(NS.Embedder.cosine(queryVec, vecs[job.eventPos])) : 0;
+                let sRecall = 0;
+                for (const p of job.recallPos) {
+                    if (queryVec && vecs[p]) sRecall = Math.max(sRecall, clamp01(NS.Embedder.cosine(queryVec, vecs[p])));
+                }
+                const score = SUMMARY_W_ACTOR * actorScore
+                    + SUMMARY_W_LOCATION * locationScore
+                    + SUMMARY_W_EVENT * sEvent
+                    + SUMMARY_W_RECALL * sRecall;
+                results[i] = {
+                    index: i,
+                    score,
+                    parts: {
+                        source: 'summary',
+                        actor: actorHit + '/' + actors.length,
+                        location: locHit + '/' + locations.length,
+                        actorScore: Number(actorScore.toFixed(2)),
+                        locationScore: Number(locationScore.toFixed(2)),
+                        event: Number(sEvent.toFixed(2)),
+                        recall: Number(sRecall.toFixed(2)),
+                    },
+                };
+            } else {
+                const b = bm25Score.has(i) ? bm25Score.get(i) : 0;
+                results[i] = {
+                    index: i,
+                    score: b,
+                    parts: { source: 'bm25', score: Number(b.toFixed(2)) },
+                };
+            }
+        }
+        return results;
+    }
+
     async function buildPromptData(chatCopy, options) {
         const runRag = Boolean(options && options.runRag);
         const historyTemplate = parseTemplate(Settings.get('historyPrompt'), true);
@@ -744,11 +913,9 @@ ${newCharacterCardTemplate}
 
             const query = (chatCopy[chatCopy.length - 1] && chatCopy[chatCopy.length - 1].mes) || '';
             rag.query = query;
-            // 查询序列：chat 最后一条消息在前，随后按 最近→次近→… 取窗口历程条目（含地点），
-            // 逐个查询直到远端预算装满
-            const queries = [query, ...midEntries.slice(midEntries.length - bestK).reverse().map(entryToDocText)]
-                .filter((q) => q);
-            if (farEntries.length > 0 && queries.length > 0 && NS.Retriever) {
+            // 组合查询文本：最新用户消息 + 窗口历程条目，供混合打分与 BM25 回退共用
+            const queryText = joinNonEmpty([query, ...midEntries.slice(midEntries.length - bestK).map(entryToDocText)]);
+            if (farEntries.length > 0 && queryText !== '' && NS.Retriever) {
                 try {
                     const docs = farEntries.map(entryToDocText);
                     // 记录每条远端条目在 farEntries 中的原始（时间）顺序，用于最终排序
@@ -757,32 +924,39 @@ ${newCharacterCardTemplate}
                         if (text && !docOrder.has(text)) docOrder.set(text, i);
                     });
                     const uniqueDocCount = docOrder.size;
+
+                    const summaryMap = buildSummaryMap(chatCopy);
+                    const allRoleNames = Object.keys(mergedDataInfo.characterData || {});
+                    const scored = await scoreFarEntries(queryText, farEntries, docs, summaryMap, allRoleNames);
+                    // 按最终分数降序贪心装入（按单条详细 markdown 成本计费，即单条最大成本）
+                    const ranked = scored
+                        .map((r, i) => (r && docs[i] ? r : null))
+                        .filter(Boolean)
+                        .sort((a, b) => b.score - a.score);
                     let used = 0;
                     let minDocTokens = Infinity;
                     const packed = [];
                     const packedSet = new Set();
-                    for (const q of queries) {
+                    for (const r of ranked) {
                         // 预算装满 / 远端条目已全部装入 / 剩余预算装不下已见最小条目 时停止
                         if (used >= ragBudget || packedSet.size >= uniqueDocCount
                             || (minDocTokens !== Infinity && used + minDocTokens > ragBudget)) break;
-                        const hits = await NS.Retriever.retrieve(q, docs, RAG_TOP_K, RAG_MIN_SCORE);
-                        // 按预算贪心装入该查询的命中条目（按单条详细 markdown 成本计费，即单条最大成本）
-                        for (const hit of hits) {
-                            if (packedSet.has(hit.text)) continue;
-                            const entry = farEntries[docOrder.get(hit.text) ?? 0];
-                            const t = await getTokenCountAsync(renderJourneyMarkdown([entry], 0));
-                            if (t < minDocTokens) minDocTokens = t;
-                            if (used + t > ragBudget) break;
-                            packedSet.add(hit.text);
-                            packed.push({ text: hit.text, score: hit.score, order: docOrder.get(hit.text) ?? Infinity, entry });
-                            used += t;
-                        }
+                        const text = docs[r.index];
+                        if (packedSet.has(text)) continue;
+                        const entry = farEntries[r.index];
+                        const t = await getTokenCountAsync(renderJourneyMarkdown([entry], 0));
+                        // 已见最小成本（无论是否装入）：装不下最小条目即可停止
+                        if (t < minDocTokens) minDocTokens = t;
+                        if (used + t > ragBudget) continue;
+                        packedSet.add(text);
+                        packed.push({ text, score: r.score, parts: r.parts, order: docOrder.get(text) ?? Infinity, entry });
+                        used += t;
                     }
                     // 按 farEntries 原始顺序（时间顺序）渲染为与中段一致的历程 markdown，放到 <HISTORY> 头部
                     if (packed.length > 0) {
                         packed.sort((a, b) => a.order - b.order);
                         ragMarkdown = renderJourneyMarkdown(packed.map((p) => p.entry), midMaxDay);
-                        rag.hits = packed.map((p) => ({ text: p.text, score: p.score }));
+                        rag.hits = packed.map((p) => ({ text: p.text, score: p.score, parts: p.parts }));
                         rag.active = true;
                     }
                 } catch (e) {
@@ -907,5 +1081,7 @@ ${newCharacterCardTemplate}
         refreshStats,
         getFloorStoryBlock,
         getStoryProgressRange,
+        getNameSearchTerms,
+        nameMatches,
     });
 })();

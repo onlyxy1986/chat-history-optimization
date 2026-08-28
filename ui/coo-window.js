@@ -458,12 +458,31 @@
         if (valid) {
             const time = new Date(valid.t).toLocaleString();
             box.appendChild(createText('div', 'coo-story-summary-time', time));
-            const json = typeof valid.s === 'string' ? valid.s : JSON.stringify(valid.s);
-            box.appendChild(createText('div', 'coo-story-summary-body', json));
+            appendSummaryContent(box, valid.s);
         } else {
             box.appendChild(createText('div', 'coo-role-empty coo-story-summary-empty', '尚未生成二级摘要'));
         }
         return box;
+    }
+
+    function appendSummaryContent(box, s) {
+        if (NS.SubSummary && NS.SubSummary.hasRecallFields(s)) {
+            const addLine = (label, value) => {
+                if (!value) return;
+                const line = document.createElement('div');
+                line.className = 'coo-story-summary-line';
+                line.appendChild(createText('span', 'coo-story-summary-key', label));
+                line.appendChild(createText('span', 'coo-story-summary-val', value));
+                box.appendChild(line);
+            };
+            addLine('人物', Array.isArray(s.actor) ? s.actor.join('、') : '');
+            addLine('地点', Array.isArray(s.location) ? s.location.join(' → ') : '');
+            addLine('事件', typeof s.event === 'string' ? s.event : '');
+            addLine('触发', Array.isArray(s.recall_when) ? s.recall_when.join('；') : '');
+            return;
+        }
+        const json = typeof s === 'string' ? s : JSON.stringify(s);
+        box.appendChild(createText('div', 'coo-story-summary-body', json));
     }
 
     function buildStoryEntry(entry) {
@@ -643,6 +662,10 @@
         status.dataset.cooField = 'subSummaryStatus';
         section.appendChild(status);
 
+        const embedderStatus = createText('div', 'coo-subsummary-status', '召回嵌入模型：未启动');
+        embedderStatus.dataset.cooField = 'embedderStatus';
+        section.appendChild(embedderStatus);
+
         const actions = document.createElement('div');
         actions.className = 'coo-subsummary-actions';
         const forceGenButton = createButton('强制生成全部', 'coo-button coo-button-sm', 'fa-solid fa-bolt');
@@ -664,8 +687,28 @@
         section.querySelector('[data-coo-field="subSummaryPrompt"]').value = settings.subSummaryPrompt;
         updateSubSummaryBadge(section);
         updateSubSummaryStatus(section);
+        updateEmbedderStatus(section);
 
         panel.appendChild(section);
+    }
+
+    function updateEmbedderStatus(scope) {
+        scope.querySelectorAll('[data-coo-field="embedderStatus"]').forEach((el) => {
+            const status = NS.Embedder ? NS.Embedder.getStatus() : { state: 'idle', message: '' };
+            if (status.state === 'ready') {
+                el.textContent = '召回嵌入模型：就绪（bge-small-zh 本地）';
+                el.className = 'coo-subsummary-status';
+            } else if (status.state === 'loading') {
+                el.textContent = `召回嵌入模型：${status.message || '加载中'}`;
+                el.className = 'coo-subsummary-status coo-subsummary-status-running';
+            } else if (status.state === 'error') {
+                el.textContent = `召回嵌入模型加载失败（召回降级为纯 BM25）：${status.message}`;
+                el.className = 'coo-subsummary-status coo-subsummary-status-error';
+            } else {
+                el.textContent = '召回嵌入模型：未启动';
+                el.className = 'coo-subsummary-status';
+            }
+        });
     }
 
     function renderPreviewText(scope) {
@@ -756,7 +799,14 @@
                 item.className = 'coo-rag-hit';
                 const head = document.createElement('div');
                 head.className = 'coo-rag-hit-head';
-                head.appendChild(createText('span', 'coo-rag-hit-score', `BM25 ${Number(hit.score || 0).toFixed(2)}`));
+                const parts = hit.parts || {};
+                let scoreLabel;
+                if (parts.source === 'summary') {
+                    scoreLabel = `摘要 人${parts.actor || '0/0'} 地${parts.location || '0/0'} 事${Number(parts.event || 0).toFixed(2)} 忆${Number(parts.recall || 0).toFixed(2)} → ${Number(hit.score || 0).toFixed(2)}`;
+                } else {
+                    scoreLabel = `BM25 归一 ${Number(hit.score || 0).toFixed(2)}`;
+                }
+                head.appendChild(createText('span', 'coo-rag-hit-score', scoreLabel));
                 item.appendChild(head);
                 item.appendChild(createText('div', 'coo-rag-hit-body', hit.text || ''));
                 ragList.appendChild(item);
@@ -1031,6 +1081,13 @@
         }
     }
 
+    function onEmbedderStatusChanged() {
+        const root = document.getElementById(ROOT_ID);
+        const shell = root ? root.querySelector('.coo-shell') : null;
+        if (!shell || shell.hidden) return;
+        updateEmbedderStatus(shell);
+    }
+
     // ------------------------------------------------------------------
     // Shell visibility
     // ------------------------------------------------------------------
@@ -1152,6 +1209,7 @@
         bindShell(shell);
         Engine.onStats(onStatsChanged);
         if (NS.SubSummary) NS.SubSummary.onStatus(onSubSummaryStatusChanged);
+        if (NS.Embedder) NS.Embedder.onStatus(onEmbedderStatusChanged);
         startExtensionEntryRetry();
     }
 

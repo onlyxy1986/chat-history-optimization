@@ -12,7 +12,7 @@ import { eventSource, event_types } from '../../../events.js';
     'use strict';
 
     const NAMESPACE = 'ChatOptimizationV2';
-    const VERSION = '2.4.0';
+    const VERSION = '2.5.0';
     const baseUrl = new URL('./', import.meta.url).href;
 
     const MODULES = [
@@ -20,6 +20,7 @@ import { eventSource, event_types } from '../../../events.js';
         'config/engine.js',
         'config/subsummary.js',
         'config/retrieval.js',
+        'config/embedding.js',
         'ui/coo-window.js',
     ];
 
