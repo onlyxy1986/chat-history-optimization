@@ -34,6 +34,9 @@
     let extensionRetryTimer = null;
     let activeTabId = 'settings';
     let selectedRoleName = '';
+    // 故事历程 tab 当前查询的楼层范围（供复选框/统计刷新时重绘）
+    let storyQuery = { start: '1', end: '' };
+    let storySelectedOnly = false;
 
     // ------------------------------------------------------------------
     // Storage helpers
@@ -487,14 +490,28 @@
         box.appendChild(createText('div', 'coo-story-summary-body', json));
     }
 
-    function buildStoryEntry(entry) {
+    function buildHitScoreLabel(hit) {
+        const parts = hit.parts || {};
+        let label;
+        if (parts.source === 'summary') {
+            label = `RAG命中 人${parts.actor || '0/0'} 地${parts.location || '0/0'} 事${Number(parts.event || 0).toFixed(2)} 忆${Number(parts.recall || 0).toFixed(2)} → ${Number(hit.score || 0).toFixed(2)}`;
+        } else {
+            label = `RAG命中 BM25 ${Number(hit.score || 0).toFixed(2)}`;
+        }
+        return createText('span', 'coo-rag-hit-score', label);
+    }
+
+    function buildStoryEntry(entry, hit) {
         const item = document.createElement('div');
-        item.className = 'coo-story-item';
+        item.className = hit ? 'coo-story-item coo-story-item-hit' : 'coo-story-item';
         const head = document.createElement('div');
         head.className = 'coo-story-item-head';
         head.appendChild(createText('span', 'coo-story-floor', `楼层 ${entry.floor}`));
         const meta = [entry.天数, entry.时间段, entry.地点].filter(Boolean).join(' · ');
         head.appendChild(createText('span', 'coo-story-item-meta', meta));
+        if (hit) {
+            head.appendChild(buildHitScoreLabel(hit));
+        }
         item.appendChild(head);
         if (entry.历程) {
             item.appendChild(createText('div', 'coo-story-item-body', entry.历程));
@@ -503,23 +520,40 @@
         return item;
     }
 
-    function renderStoryResult(scope, result) {
+    // 单列表渲染：RAG 命中条目直接在原条目上加标记与分数明细
+    function renderStoryList(scope) {
         const info = scope.querySelector('[data-coo-field="storyInfo"]');
         const list = scope.querySelector('[data-coo-field="storyList"]');
         if (!info || !list) return;
-        info.textContent = `楼层 ${result.startFloor} - ${result.endFloor}，共 ${result.entries.length} 条历程`;
-        list.textContent = '';
-        if (result.entries.length === 0) {
-            list.appendChild(createText('span', 'coo-role-empty', '该楼层范围内没有新的故事历程'));
-            return;
+        const onlyBox = scope.querySelector('[data-coo-field="storySelectedOnly"]');
+        const selectedOnly = Boolean(onlyBox && onlyBox.checked);
+        const result = Engine.getStoryProgressRange(storyQuery.start, storyQuery.end);
+        const rag = Engine.getStats().rag;
+        const hitMap = new Map();
+        if (rag && rag.active && Array.isArray(rag.hits)) {
+            for (const hit of rag.hits) {
+                if (hit && hit.text) hitMap.set(hit.text, hit);
+            }
         }
+        info.textContent = `楼层 ${result.startFloor} - ${result.endFloor}，共 ${result.entries.length} 条历程`
+            + (hitMap.size > 0 ? `，RAG 选中 ${hitMap.size} 条` : '');
+        list.textContent = '';
+        let shown = 0;
         for (const entry of result.entries) {
-            list.appendChild(buildStoryEntry(entry));
+            const hit = hitMap.get(Engine.entryToDocText(entry));
+            if (selectedOnly && !hit) continue;
+            list.appendChild(buildStoryEntry(entry, hit));
+            shown++;
+        }
+        if (shown === 0) {
+            list.appendChild(createText('span', 'coo-role-empty',
+                selectedOnly ? '当前没有 RAG 选中条目（RAG 未启用或无命中）' : '该楼层范围内没有新的故事历程'));
         }
     }
 
     function queryStoryRange(scope, start, end) {
-        renderStoryResult(scope, Engine.getStoryProgressRange(start, end));
+        storyQuery = { start, end };
+        renderStoryList(scope);
     }
 
     function handleStoryAction(scope, action) {
@@ -633,7 +667,20 @@
         const subAllButton = createButton('生成全部摘要', 'coo-button coo-button-ghost coo-button-sm', 'fa-solid fa-compress');
         subAllButton.dataset.cooAction = 'subGenerateAll';
         subAllButton.title = '为当前楼层范围内的条目生成二级摘要（跳过已有效条目）';
-        toolbar.append(queryButton, allButton, subAllButton);
+        const onlyLabel = document.createElement('label');
+        onlyLabel.className = 'coo-story-only-label';
+        const onlyBox = document.createElement('input');
+        onlyBox.type = 'checkbox';
+        onlyBox.dataset.cooField = 'storySelectedOnly';
+        onlyLabel.appendChild(onlyBox);
+        onlyLabel.appendChild(createText('span', 'coo-row-label', '仅显示选中楼层'));
+        onlyLabel.title = '仅显示被 RAG 选中的楼层条目';
+        onlyBox.checked = storySelectedOnly;
+        toolbar.append(queryButton, allButton, subAllButton, onlyLabel);
+        onlyBox.addEventListener('change', () => {
+            storySelectedOnly = onlyBox.checked;
+            renderStoryList(section);
+        });
         section.appendChild(toolbar);
 
         const subStatus = createText('div', 'coo-subsummary-status', '空闲');
@@ -642,16 +689,13 @@
 
         const ragInfo = createText('div', 'coo-rag-info', '');
         ragInfo.dataset.cooField = 'ragInfo';
-        const ragList = document.createElement('div');
-        ragList.className = 'coo-rag-hit-list';
-        ragList.dataset.cooField = 'ragHitList';
 
         const info = createText('div', 'coo-story-info', '—');
         info.dataset.cooField = 'storyInfo';
         const list = document.createElement('div');
         list.className = 'coo-story-list';
         list.dataset.cooField = 'storyList';
-        section.append(ragInfo, ragList, info, list);
+        section.append(ragInfo, info, list);
         panel.appendChild(section);
 
         const startInput = section.querySelector('[data-coo-field="storyStart"]');
@@ -843,37 +887,18 @@
 
     function updateRagDisplay(scope, rag) {
         const ragInfo = scope.querySelector('[data-coo-field="ragInfo"]');
-        const ragList = scope.querySelector('[data-coo-field="ragHitList"]');
-        if (!ragInfo || !ragList) return;
-        ragList.textContent = '';
+        if (!ragInfo) return;
         if (!rag) {
             ragInfo.textContent = 'RAG：暂无数据（打开窗口或生成一次后刷新）';
-            return;
-        }
-        if (rag.active && Array.isArray(rag.hits) && rag.hits.length > 0) {
+        } else if (rag.active && Array.isArray(rag.hits) && rag.hits.length > 0) {
             ragInfo.textContent = `RAG 已启用：中段窗口保留 ${rag.windowCount} 条，远端 ${rag.farCount} 条中命中 ${rag.hits.length} 条`;
-            for (const hit of rag.hits) {
-                const item = document.createElement('div');
-                item.className = 'coo-rag-hit';
-                const head = document.createElement('div');
-                head.className = 'coo-rag-hit-head';
-                const parts = hit.parts || {};
-                let scoreLabel;
-                if (parts.source === 'summary') {
-                    scoreLabel = `摘要 人${parts.actor || '0/0'} 地${parts.location || '0/0'} 事${Number(parts.event || 0).toFixed(2)} 忆${Number(parts.recall || 0).toFixed(2)} → ${Number(hit.score || 0).toFixed(2)}`;
-                } else {
-                    scoreLabel = `BM25 归一 ${Number(hit.score || 0).toFixed(2)}`;
-                }
-                head.appendChild(createText('span', 'coo-rag-hit-score', scoreLabel));
-                item.appendChild(head);
-                item.appendChild(createText('div', 'coo-rag-hit-body', hit.text || ''));
-                ragList.appendChild(item);
-            }
         } else if (rag.willActivate) {
             ragInfo.textContent = `RAG 将在下次生成时启用（当前 ${rag.windowCount} 条历程超出预算）`;
         } else {
             ragInfo.textContent = `RAG 未启用（当前 ${rag.windowCount} 条历程在预算内）`;
         }
+        // 命中标记画在故事列表原条目上，RAG 数据变化时重绘
+        renderStoryList(scope);
     }
 
     function buildRoleTree(container, roleObj) {

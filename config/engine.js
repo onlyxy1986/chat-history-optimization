@@ -1081,6 +1081,7 @@ ${newCharacterCardTemplate}
         refreshStats,
         getFloorStoryBlock,
         getStoryProgressRange,
+        entryToDocText,
         getNameSearchTerms,
         nameMatches,
     });
