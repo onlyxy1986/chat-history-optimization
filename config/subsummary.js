@@ -12,11 +12,9 @@
     const Settings = NS.Settings;
     const Engine = NS.Engine;
 
+    const Constants = NS.Constants;
     const EXTRA_KEY = 'chat-optimization-v2';
     const PLACEHOLDER = '{{故事历程}}';
-    // 生成失败重试：每次失败后等待 RETRY_DELAY_MS，最多重试 MAX_RETRIES 次
-    const RETRY_DELAY_MS = 1000;
-    const MAX_RETRIES = 3;
 
     let lastStatus = { running: false, current: '', done: 0, failed: 0, error: null, message: null };
     const statusListeners = new Set();
@@ -373,17 +371,18 @@
         return 'ok';
     }
 
-    // 带重试的 runOne：失败等待 RETRY_DELAY_MS 后重试，最多 MAX_RETRIES 次，全部失败则抛出最后错误
+    // 带重试的 runOne：失败等待 Constants.RETRY_DELAY_MS 后重试，
+    // 最多 Constants.MAX_RETRIES 次，全部失败则抛出最后错误
     async function runOneWithRetry(floor, index, force) {
         let lastErr = null;
-        for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+        for (let attempt = 0; attempt <= Constants.MAX_RETRIES; attempt++) {
             try {
                 return await runOne(floor, index, force);
             } catch (e) {
                 lastErr = e;
-                if (attempt < MAX_RETRIES) {
-                    console.warn(`[Chat History Optimization] 楼层 ${floor} 条目 ${index + 1} 二级摘要生成失败，${RETRY_DELAY_MS}ms 后重试（第 ${attempt + 1}/${MAX_RETRIES} 次）:`, e);
-                    await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+                if (attempt < Constants.MAX_RETRIES) {
+                    console.warn(`[Chat History Optimization] 楼层 ${floor} 条目 ${index + 1} 二级摘要生成失败，${Constants.RETRY_DELAY_MS}ms 后重试（第 ${attempt + 1}/${Constants.MAX_RETRIES} 次）:`, e);
+                    await new Promise(r => setTimeout(r, Constants.RETRY_DELAY_MS));
                 }
             }
         }

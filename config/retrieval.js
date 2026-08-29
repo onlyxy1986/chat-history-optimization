@@ -8,13 +8,9 @@
     'use strict';
 
     const NS = window.ChatOptimizationV2 = window.ChatOptimizationV2 || {};
+    const Constants = NS.Constants;
 
-    const BM25_K1 = 1.5;
-    const BM25_B = 0.75;
-    const DEFAULT_TOP_K = 6;
-    // 常见虚词单字：只过滤单字形态，包含它们的 bigram 照常产出（如"在校"保留）
-    // 不/没/有 等承载语义（否定、存在）的字不过滤
-    const STOP_UNI = new Set('的了着在和与及或是等都就还又很太更最被把让向对从到为之其此该这那它我你他她吗吧啊呀嘛呢么'.split(''));
+    const STOP_UNI = new Set(Constants.STOP_UNI);
 
     /**
      * 轻量分词（无需词典）：
@@ -55,7 +51,7 @@
      * @param {number} minScore - BM25 得分阈值（无归一化，0 表示取所有有词项命中的文档）
      * @returns {Promise<Array<{index: number, text: string, score: number}>>}
      */
-    async function retrieve(query, docs, topK = DEFAULT_TOP_K, minScore = 0) {
+    async function retrieve(query, docs, topK = Constants.DEFAULT_TOP_K, minScore = 0) {
         if (!query || !Array.isArray(docs) || docs.length === 0) return [];
         const docTexts = docs.map(d => (typeof d === 'string' ? d : (d && d.text) || ''))
             .map(t => String(t).trim()).filter(t => t !== '');
@@ -91,8 +87,8 @@
                 if (!f) continue;
                 const d = df.get(term) || 0;
                 const idf = Math.log(1 + (N - d + 0.5) / (d + 0.5));
-                const denom = f + BM25_K1 * (1 - BM25_B + BM25_B * (avgdl > 0 ? docLens[i] / avgdl : 1));
-                score += idf * (qf * (BM25_K1 + 1)) / denom;
+                const denom = f + Constants.BM25_K1 * (1 - Constants.BM25_B + Constants.BM25_B * (avgdl > 0 ? docLens[i] / avgdl : 1));
+                score += idf * (qf * (Constants.BM25_K1 + 1)) / denom;
             }
             if (score > (minScore || 0)) {
                 results.push({ index: i, text: docTexts[i], score });

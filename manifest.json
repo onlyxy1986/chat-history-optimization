@@ -7,6 +7,6 @@
     "js": "index.js",
     "css": "styles/coo.css",
     "author": "only",
-    "version": "2.9.3",
+    "version": "2.10.0",
     "homePage": "https://github.com/onlyxy1986/chat-history-optimization"
 }

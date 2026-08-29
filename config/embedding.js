@@ -9,6 +9,7 @@
     'use strict';
 
     const NS = window.ChatOptimizationV2 = window.ChatOptimizationV2 || {};
+    const Constants = NS.Constants;
 
     const MODEL_DIR_REL = 'lib/models/';
     const MODEL_ID = 'bge-small-zh-v1.5';
@@ -17,8 +18,6 @@
     const WASM_WASM_REL = 'lib/ort/ort-wasm-simd-threaded.jsep.wasm';
     // BGE 官方推荐的查询指令前缀（文档侧不加）
     const QUERY_INSTRUCTION = '为这个句子生成表示以用于检索相关文章：';
-    const CACHE_MAX = 2048;
-    const BATCH_SIZE = 16;
 
     let status = { state: 'idle', message: '' };
     let pipeline = null;
@@ -116,7 +115,7 @@
     function cacheSet(key, vec) {
         if (cache.has(key)) cache.delete(key);
         cache.set(key, vec);
-        while (cache.size > CACHE_MAX) {
+        while (cache.size > Constants.CACHE_MAX) {
             const oldest = cache.keys().next().value;
             cache.delete(oldest);
         }
@@ -148,8 +147,8 @@
                 pending.push(i);
             }
         }
-        for (let i = 0; i < pending.length; i += BATCH_SIZE) {
-            const idxs = pending.slice(i, i + BATCH_SIZE);
+        for (let i = 0; i < pending.length; i += Constants.BATCH_SIZE) {
+            const idxs = pending.slice(i, i + Constants.BATCH_SIZE);
             const batch = idxs.map(k => texts[k]);
             const outputs = await pipeline(batch.length === 1 ? batch[0] : batch, {
                 pooling: 'mean',

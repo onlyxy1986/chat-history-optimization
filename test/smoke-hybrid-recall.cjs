@@ -29,6 +29,7 @@ function load(rel) {
     // eslint-disable-next-line no-eval
     (0, eval)(code);
 }
+load('config/constant.js');
 load('config/settings.js');
 load('config/engine.js');
 load('config/subsummary.js');

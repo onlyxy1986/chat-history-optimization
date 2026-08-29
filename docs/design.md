@@ -1,6 +1,6 @@
 # Chat History Optimization (chat-optimization-v2) — 完整流程交接文档
 
-> 版本：v2.9.3（2026-08-29）
+> 版本：v2.10.0（2026-08-29）
 > 仓库：本目录是独立 git 仓库（嵌套在 SillyTavern 安装目录内），在此提交，不要提交到父仓库。
 > 无 package.json、无构建、无 lint。功能模块为浏览器端普通脚本。
 
@@ -12,7 +12,7 @@
 
 1. **结构化剧情协议**：要求 AI 每次回复末尾输出 `<NEW_STORY_DATA>` 块（含 `NEW_HISTORY` 故事历程 JSON、可选 `NEW_CHARACTER_CARD` 角色卡 JSON）。插件把全部楼层的这些块解析、合并、去重，形成全局「故事历程」数组和「角色卡」映射。
 2. **分层注入**：把最终 prompt 装配为三层——`RAG 远端召回段 + 中段历程窗口 + 正文 verbatim 尾部`，在 `tokenLimit` 预算内最大化保留上下文；超预算时用检索从远期条目中挑回相关条目。
-3. **角色卡管理**：固定 10 槽位淘汰 + 蒸馏（久未出场角色只保留核心设定）。
+3. **角色卡管理**：槽位上限淘汰 + 蒸馏（久未出场角色只保留核心设定），阈值见 `config/constant.js`。
 4. **二级摘要（recall-specialized sub-summary）**：对每条历程条目调用 LLM 生成 `{actor, location, event, recall_when}` 结构化摘要，持久化在楼层消息 `extra` 中，既供 UI 浏览，也作为混合召回的语义信号。
 5. **混合召回（v2.5.0+）**：BM25 词法检索 + 本地 ONNX embedding（bge-small-zh-v1.5, transformers.js）语义打分，向量持久化在 `chat_metadata`。
 6. **LRU 召回缓存 + Mode A 分段加权打分（v2.9.0）**：`recallcache.js` 对片段向量 / 远端条目向量 / 逐对分数做内容寻址 LRU 缓存，使「发送新用户信息只重算新相关远端条目」；`subSummaryToggle` 开启时走 Mode A（按最新用户消息 + 每个窗口条目的二级摘要切成多个片段，逐片段加权 max），缺失摘要发送前先补生成（带超时），绝不 BM25 回退。
@@ -25,6 +25,7 @@
 ├── manifest.json              # ST 扩展清单（js: index.js, css: styles/coo.css, generate_interceptor）
 ├── index.js                   # 唯一 ESM 入口：bootstrap + bridge + 模块注入
 ├── config/
+│   ├── constant.js            # 可调常数集中定义（NS.Constants，每项附调整指导；须最先加载）
 │   ├── settings.js            # 设置存取（extension_settings["chat-optimization-v2"]）
 │   ├── engine.js              # 核心引擎（纯逻辑无 DOM）：解析/合并/装配/召回打分/拦截器
 │   ├── subsummary.js          # 二级摘要生成器（纯逻辑）：LLM 调用、extra 持久化、自动触发、缺失收集/补生成
@@ -69,11 +70,11 @@
    - `eventSource`、`eventTypes`
    - `connectionManagerRequest`（ConnectionManagerRequestService）
 5. 按 `MODULES` 数组顺序**逐个 `await` 加载** `<script>`（`loadScript` 返回 Promise，`script.async = false`，URL 带 `?v=VERSION` 缓存击穿），全部就绪后才进入 DOM ready 挂窗口：
-   ```
-    config/settings.js → config/engine.js → config/subsummary.js
-    → config/retrieval.js → config/embedding.js → config/embedstore.js
-    → config/recallcache.js → ui/coo-window.js
-   ```
+    ```
+     config/constant.js → config/settings.js → config/engine.js
+     → config/subsummary.js → config/retrieval.js → config/embedding.js
+     → config/embedstore.js → config/recallcache.js → ui/coo-window.js
+    ```
    **新增模块文件必须加入此数组**，否则不加载。
 6. `DOMContentLoaded` 后调用 `NS.CooWindow.mount()`。
 
@@ -91,13 +92,14 @@
 ```
 
 - 模块间只通过 `NS.<Module>` 互相引用（如 `NS.Settings`、`NS.Engine`、`NS.SubSummary`），**禁止在功能模块里直接 import ST 文件**——一切 ST 访问走 `NS.bridge`。
-- 加载顺序即依赖顺序：settings 最先（人人依赖），engine 第二（subsummary 依赖 `NS.Engine`），embedding 在 retrieval 后（engine 的 `scoreFarEntries` 运行期读 `NS.Embedder`，加载期不强依赖，但 UI 与 embedstore 需要）。
+- 加载顺序即依赖顺序：constant 最先（人人经 `NS.Constants` 读可调常数），settings 次之（人人依赖），engine 第三（subsummary 依赖 `NS.Engine`），embedding 在 retrieval 后（engine 的 `scoreFarEntries` 运行期读 `NS.Embedder`，加载期不强依赖，但 UI 与 embedstore 需要）。
 - 各模块末尾 `Object.freeze` 导出 API，加载顺序变了若引用未初始化模块会直接抛错，可作断点。
 
 ### 3.4 启动时的自执行行为
 
 | 模块 | 模块加载即执行 |
 |---|---|
+| `constant.js` | 无（仅定义并冻结 `NS.Constants`） |
 | `subsummary.js` | `init()` 注册 `GENERATION_ENDED` 事件监听 |
 | `embedding.js` | `init()` 立即预热加载 transformers + ONNX 模型（异步，失败可重试） |
 | `embedstore.js` | `init()` 注册事件监听 + 延迟 1s 首次向量完整性同步 |
@@ -191,10 +193,10 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
    - 任何一层缺块/解析失败 → `failedFloors.push(j)`。
 3. **processCharacterData 角色卡淘汰与蒸馏**：
    - `MAX_SLOTS = 10`。
-   - 打分：最新用户消息（`chat[chat.length-1].mes`）中 `nameMatches` 命中 → `1,000,000`（必保）；否则取**最后一次出现**的消息下标作为分数；都没出现 → `-1`。
+   - 打分：最新用户消息（`chat[chat.length-1].mes`）中 `nameMatches` 命中 → `Constants.ROLE_CARD_MENTION_SCORE`（必保）；否则取**最后一次出现**的消息下标作为分数；都没出现 → `-1`。
        - `nameMatches`：角色名按 `()`/`（）`/`·`/`.` 拆出所有别名 term（`getNameSearchTerms`），任一 term 命中即可；**消歧义**：若 term 是另一个更长角色名的子串（「沈梦」⊂「沈梦瑶」），逐次出现检查是否被长名「吞掉」，至少一次独立出现才算命中。
    - 按分数降序取前 10，其余物理删除。
-   - **蒸馏**：分数 < 1,000,000 且距最后出现 > 30 条消息的角色，只保留 `{角色设定}`（丢弃穿戴/物品/技能等动态字段）。
+   - **蒸馏**：分数 < `ROLE_CARD_MENTION_SCORE` 且距最后出现 > `ROLE_CARD_STALE_DISTANCE`（30）条消息的角色，只保留 `{角色设定}`（丢弃穿戴/物品/技能等动态字段）。
 4. **正文尾部（verbatim）**：
    - `assistantIdxArr` = 所有非用户消息下标；取倒数第 `keepCount` 条 assistant 起，到末尾，过滤出非用户消息的 `mes` 拼接为 `tailText`。
    - `tailCovered` = 这些 assistant 消息 `messageCount` 之和（正文已原文覆盖的历程条数）。
@@ -259,10 +261,10 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
 
 - `NS.Retriever.isReady()` 恒为 true（纯 JS，无加载态）。
 - **分词（`tokenize`）无词典**：
-  - 中文连续段 → 单字（过滤 `STOP_UNI` 虚词：的了着在和与及或是等都就还又很太更最被把让向对从到为之其此该这那它我你他她吗吧啊呀嘛呢么）+ 全部 bigram（不过滤，保证短语片段可重叠）。
+  - 中文连续段 → 单字（过滤 `Constants.STOP_UNI` 虚词：的了着在和与及或是等都就还又很太更最被把让向对从到为之其此该这那它我你他她吗吧啊呀嘛呢么）+ 全部 bigram（不过滤，保证短语片段可重叠）。
   - 英文/数字 → 整词小写，保留内部 `._-` 连接（如 `3.14`）。
-- **BM25**：`k1=1.5, b=0.75`，`idf = log(1 + (N-d+0.5)/(d+0.5))`；每次调用对传入 docs 现建统计（远端条目集合每次生成都不同，**不缓存**）。
-- `minScore=0` 表示取所有有词项命中的文档（`RAG_MIN_SCORE`，engine.js 顶部常量）。
+- **BM25**：`k1=Constants.BM25_K1(1.5), b=Constants.BM25_B(0.75)`，`idf = log(1 + (N-d+0.5)/(d+0.5))`；每次调用对传入 docs 现建统计（远端条目集合每次生成都不同，**不缓存**）。
+- `minScore=0` 表示取所有有词项命中的文档（`Constants.RAG_MIN_SCORE`）。
 - 设计史：v2.2.0 用 bge embedding 余弦做 RAG → v2.3.0 发现 embedding 对中文短查询召回不稳，**整体换成 BM25** 并删除模型资产与 `ragToggle`（稀疏远期记忆默认开启，见 §16 版本表） → v2.5.0 混合召回把 embedding 以「摘要语义分量」的形式加回来（§7），v2.6.0 恢复模型资产。v2.9.0 引入 Mode A（§7.4）：`subSummaryToggle` 开启时**不再走 BM25 回退**——缺失摘要的条目直接排除，BM25 回退仅保留给 Mode B（二级摘要关闭）路径。
 
 ---
@@ -278,9 +280,9 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
 score = 0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall
 ```
 
-（权重常量为 engine.js 顶部常量）
+（权重常量为 `config/constant.js` 的 `Constants.SUMMARY_W_*`，各项附调整指导）
 
-- **S_actor**：摘要 `actor` 中 `nameMatches(a, queryText, nameList)` 命中的人物的 **IDF 之和**，除以 `ACTOR_IDF_SATURATION=1.0` 截断到 1。
+- **S_actor**：摘要 `actor` 中 `nameMatches(a, queryText, nameList)` 命中的人物的 **IDF 之和**，除以 `Constants.ACTOR_IDF_SATURATION(1.0)` 截断到 1。
   - `idf(a) = log(1 + (N - d + 0.5)/(d + 0.5))`，`d` = 该人物出现的摘要条目数。
   - **设计决策**：绝对饱和而非条目内归一 → 只命中高频主角（几乎每条都在场，idf 低）的条目拿不满人物分，稀有角色命中才能饱和。测试 `smoke-hybrid-recall.cjs` 场景 C 专门验证此点。
   - `nameList` 消歧名单 = 全部摘要人物 ∪ 已知角色名。
@@ -294,7 +296,7 @@ score = 0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall
 ### 7.2 BM25 回退通道（无摘要条目 / Embedder 未就绪时全池）
 
 - 无摘要条目池（Embedder 未就绪 = 全池）走 `Retriever.retrieve(queryText, docs, topK=池大小, minScore=0)`。
-- 归一化：`score = bm25 / (bm25 + BM25_NORM_K)`，`BM25_NORM_K=4`（engine.js 顶部常量），使两通道分数可比（都落在 [0,1)）。
+- 归一化：`score = bm25 / (bm25 + Constants.BM25_NORM_K)`，`BM25_NORM_K=4`，使两通道分数可比（都落在 [0,1)）。
 
 ### 7.3 buildSummaryMap
 
@@ -338,7 +340,7 @@ score = 0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall
 - **完整性同步 `sync()`**：
   - 期望集合 = 全部楼层有效摘要的 `event` + 各 `recall_when`（trim 非空）文本。
   - 缺失 → `encodeBatch` 补齐并持久化；store 中不在期望集合的哈希 → 删除（摘要被擦除/哈希失效的残留）。
-  - 触发时机：模块加载后 1s（`FIRST_SYNC_DELAY_MS`）、`MESSAGE_RECEIVED`（2s 防抖）、`CHAT_CHANGED`、SubSummary 生成批次结束（`done>0`）。`syncing` 互斥 + `syncQueued` 补跑一次。
+  - 触发时机：模块加载后 1s（`Constants.EMBED_SYNC_FIRST_DELAY_MS`）、`MESSAGE_RECEIVED`（`Constants.EMBED_SYNC_DEBOUNCE_MS` 防抖）、`CHAT_CHANGED`、SubSummary 生成批次结束（`done>0`）。`syncing` 互斥 + `syncQueued` 补跑一次。
   - 前提：`subSummaryToggle` 开。
 - **打分路径 `resolve(texts)`**：store 命中直接解码；缺失现场编码 + 回写；store 不可用降级为纯现场编码。
 
@@ -559,13 +561,14 @@ node test/smoke-hybrid-recall.cjs
 | 2.9.1 | **预算扣除模板/包装开销**（contentLimit = tokenLimit - overheadTokens），最终 tokenCount 不再系统性超出 tokenLimit；侧边栏 token 行显示 `当前 / 上限` 且超限标红 |
 | 2.9.2 | **tokenLimit 硬保证**：召回段精确计数剔除去掉 3+1 次上限（剔除至 ≤ ragBudget，修复候选装多）；正文超 midBudget 时从最旧整条 assistant 消息丢弃；RAG 失败回退保留有上限窗口中段 |
 | 2.9.3 | 侧边栏 token 行标签中文化：`Chat History Token Count` → `将发送词元数`（修复窄侧边栏截断） |
+| 2.10.0 | **可调常数集中到 `config/constant.js`**（`NS.Constants`，每项附调整指导）：召回打分权重/IDF 饱和/BM25 参数/停用词、角色卡槽位/蒸馏阈值、片段权重、装箱估算、重试、embedding 缓存/批大小、持久化与预热延迟、LRU 容量、菜单挂载时机；各模块改经 `NS.Constants` 读取；无行为变更，冒烟测试 7 场景全过 |
 
 ---
 
 ## 17. 接手者常见任务指引
 
 - **加一个新 tab / 设置项**：TABS 数组 + 对应 `renderXxxTab` + input 委托 case + settings 默认值 + CSS。
-- **改召回策略**：常量在 engine.js 顶部；打分在 `scoreFarEntries` / `scoreFarEntriesModeA`；装箱在 `buildPromptData` 的 RAG 路径；改完跑冒烟测试。
+- **改召回策略**：可调常数全部在 `config/constant.js`（`NS.Constants`，每项附调整指导）；打分在 `scoreFarEntries` / `scoreFarEntriesModeA`；装箱在 `buildPromptData` 的 RAG 路径；改完跑冒烟测试。
 - **改摘要 schema**：`subSummaryPrompt` 默认模板 + `normalizeSummary` + `hasRecallFields` + UI `appendSummaryContent` + 打分分量，四处联动；旧摘要经 `hasRecallFields` 自动回退 BM25，无需迁移。
 - **新增模块依赖 ST 内部**：index.js import → bridge 追加 → 模块内 `NS.bridge.xxx`。
 - **发布**：bump `index.js` VERSION 与 `manifest.json` version（同步）→ 提交（本仓库）→ 用户侧强刷（`?v=` 缓存击穿自动生效）。

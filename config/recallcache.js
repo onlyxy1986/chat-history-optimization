@@ -18,14 +18,7 @@
     const { eventSource, eventTypes } = NS.bridge;
     const Settings = NS.Settings;
 
-    const FIRST_WARMUP_DELAY_MS = 1000;
-    const MESSAGE_DEBOUNCE_MS = 2000;
-    // 预热时最多取最近若干楼层条目的 event 作为"窗口候选"预热其片段向量
-    const WARMUP_WINDOW_PREVIEW = 16;
-    // 各缓存容量
-    const FRAG_VEC_CAP = 4096;
-    const DOC_VEC_CAP = 4096;
-    const PAIR_SCORE_CAP = 262144;
+    const Constants = NS.Constants;
 
     // ------------------------------------------------------------------
     // 基础 LRU（Map 访问即刷新，超容量逐出最旧）
@@ -51,9 +44,9 @@
     };
     LRU.prototype.clear = function () { this.m.clear(); };
 
-    const fragVec = new LRU(FRAG_VEC_CAP);
-    const docVec = new LRU(DOC_VEC_CAP);
-    const pairScore = new LRU(PAIR_SCORE_CAP);
+    const fragVec = new LRU(Constants.FRAG_VEC_CAP);
+    const docVec = new LRU(Constants.DOC_VEC_CAP);
+    const pairScore = new LRU(Constants.PAIR_SCORE_CAP);
 
     let currentModel = '';
 
@@ -225,7 +218,7 @@
                 const last = chat[chat.length - 1];
                 if (last && last.mes) fragTexts.push(last.mes);
             }
-            for (const b of batches.slice(-WARMUP_WINDOW_PREVIEW)) {
+            for (const b of batches.slice(-Constants.WARMUP_WINDOW_PREVIEW)) {
                 if (b.summary.event && b.summary.event.trim()) fragTexts.push(b.summary.event.trim());
             }
             const uniq = [...new Set(fragTexts)];
@@ -260,14 +253,14 @@
 
     function init() {
         if (eventSource && eventTypes) {
-            if (eventTypes.MESSAGE_RECEIVED) eventSource.on(eventTypes.MESSAGE_RECEIVED, debounce(safeWarmup, MESSAGE_DEBOUNCE_MS));
+            if (eventTypes.MESSAGE_RECEIVED) eventSource.on(eventTypes.MESSAGE_RECEIVED, debounce(safeWarmup, Constants.WARMUP_DEBOUNCE_MS));
             if (eventTypes.GENERATION_ENDED) eventSource.on(eventTypes.GENERATION_ENDED, safeWarmup);
             if (eventTypes.CHAT_CHANGED) eventSource.on(eventTypes.CHAT_CHANGED, () => { clear(); safeWarmup(); });
         }
         if (NS.Embedder && typeof NS.Embedder.onStatus === 'function') {
             NS.Embedder.onStatus((s) => { if (s && s.state === 'ready') safeWarmup(); });
         }
-        setTimeout(safeWarmup, FIRST_WARMUP_DELAY_MS);
+        setTimeout(safeWarmup, Constants.WARMUP_FIRST_DELAY_MS);
     }
 
     NS.RecallCache = Object.freeze({

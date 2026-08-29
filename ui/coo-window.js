@@ -10,6 +10,7 @@
     const NS = window.ChatOptimizationV2 = window.ChatOptimizationV2 || {};
     const Settings = NS.Settings;
     const Engine = NS.Engine;
+    const Constants = NS.Constants;
 
     const ROOT_ID = 'coo-root';
     const EXTENSION_ENTRY_ID = 'coo-extension-entry';
@@ -1407,7 +1408,7 @@
         button.dataset.cooBound = 'true';
         button.addEventListener('click', () => {
             window.setTimeout(mountExtensionMenuEntry, 0);
-            window.setTimeout(mountExtensionMenuEntry, 100);
+            window.setTimeout(mountExtensionMenuEntry, Constants.MENU_REMOUNT_DELAY_MS);
         });
     }
 
@@ -1418,11 +1419,11 @@
         extensionRetryTimer = window.setInterval(() => {
             extensionAttempts += 1;
             watchExtensionMenuButton();
-            if (mountExtensionMenuEntry() || extensionAttempts >= 30) {
+            if (mountExtensionMenuEntry() || extensionAttempts >= Constants.MENU_RETRY_MAX_ATTEMPTS) {
                 window.clearInterval(extensionRetryTimer);
                 extensionRetryTimer = null;
             }
-        }, 500);
+        }, Constants.MENU_RETRY_INTERVAL_MS);
     }
 
     // ------------------------------------------------------------------

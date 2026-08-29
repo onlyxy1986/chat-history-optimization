@@ -8,6 +8,7 @@
     const NS = window.ChatOptimizationV2 = window.ChatOptimizationV2 || {};
     const { getTokenCountAsync } = NS.bridge;
     const Settings = NS.Settings;
+    const Constants = NS.Constants;
 
     const wordMapping = {
         "崩溃": "失控",
@@ -25,28 +26,6 @@
         "彻底": "",
         "学术": ""
     };
-
-    // BM25 得分无归一化，0 表示取所有有词项命中的文档
-    const RAG_MIN_SCORE = 0;
-    // 召回特化摘要四分量权重（各分量归一化到 [0,1]）
-    const SUMMARY_W_ACTOR = 0.30;
-    const SUMMARY_W_LOCATION = 0.15;
-    const SUMMARY_W_EVENT = 0.20;
-    const SUMMARY_W_RECALL = 0.35;
-    // BM25 回退分数饱和归一化常数：score/(score+K) ∈ [0,1)
-    const BM25_NORM_K = 4;
-    // actor 命中 IDF 饱和值：命中人物的 idf 之和达到该值即记满 S_actor=1，
-    // 只命中高频主角（idf 低）时只能拿到部分分数
-    const ACTOR_IDF_SATURATION = 1.0;
-    // 发送前补生成缺失二级摘要的最长等待（毫秒），超时后不取消后台批次，本次用已有摘要继续
-    const SUBSUMMARY_WAIT_TIMEOUT_MS = 30000;
-    // 装箱用 token 估算常数（1 token ≈ 1.5 个汉字）；装箱后做精确计数，超预算时从最低分逐条剔除直至 ≤ ragBudget（无次数上限）
-    const EST_CHARS_PER_TOKEN = 1.5;
-    // Mode A 片段权重：最新用户消息 1.0，最新窗口条目 0.95，次新 0.9，其余窗口 0.8
-    const FRAG_WEIGHT_USER = 1.0;
-    const FRAG_WEIGHT_WIN_NEW = 0.95;
-    const FRAG_WEIGHT_WIN_NEXT = 0.90;
-    const FRAG_WEIGHT_WIN_OTHER = 0.80;
 
     let lastStats = {
         tokenCount: 0,
@@ -591,15 +570,14 @@ ${newCharacterCardTemplate}
     }
 
     /**
-     * 角色卡淘汰与蒸馏：固定 10 槽位上限
-     * 当前 prompt 提到的角色得分 1,000,000（保证保留）；其余按最后出现索引计分
-     * 超过 30 条消息未活跃（且非当前提问提及）的角色只保留核心设定
+     * 角色卡淘汰与蒸馏：槽位上限 Constants.ROLE_CARD_MAX_SLOTS
+     * 当前 prompt 提到的角色得分 Constants.ROLE_CARD_MENTION_SCORE（保证保留）；其余按最后出现索引计分
+     * 超过 Constants.ROLE_CARD_STALE_DISTANCE 条消息未活跃（且非当前提问提及）的角色只保留核心设定
      * @param {object} characterData - 角色卡映射 { 角色名: {...} }
      * @param {object[]} chat - 原始聊天记录
      * @returns {object} 精简后的角色卡映射
      */
     function processCharacterData(characterData, chat) {
-        const MAX_SLOTS = 10;
         if (!characterData || typeof characterData !== 'object') return characterData;
 
         const roleScores = [];
@@ -615,7 +593,7 @@ ${newCharacterCardTemplate}
 
             // 1. 意图驱动：如果最新 Prompt 提到了，给予极高优先级（确保唤醒）
             if (nameMatches(roleName, userPrompt, allKnownNames)) {
-                score = 1000000;
+                score = Constants.ROLE_CARD_MENTION_SCORE;
             } else {
                 // 2. 活跃度：寻找最后一次出现的索引作为基础分
                 for (let i = chat.length - 1; i >= 0; i--) {
@@ -629,20 +607,21 @@ ${newCharacterCardTemplate}
             roleScores.push({ name: roleName, score });
         }
 
-        // 3. 排序并只保留前 10 个角色
+        // 3. 排序并只保留前 ROLE_CARD_MAX_SLOTS 个角色
         const sortedRoles = roleScores
             .sort((a, b) => b.score - a.score)
-            .slice(0, MAX_SLOTS);
+            .slice(0, Constants.ROLE_CARD_MAX_SLOTS);
 
         const newRoleCards = {};
         for (const item of sortedRoles) {
             const roleName = item.name;
             const originalData = characterData[roleName];
 
-            // 4. 特征蒸馏：如果角色虽然在前 10，但距离上次活跃已超过 30 条消息（且非当前提问提及）
+            // 4. 特征蒸馏：如果角色虽然保留在槽位内，但距离上次活跃已超过
+            // ROLE_CARD_STALE_DISTANCE 条消息（且非当前提问提及）
             // 则只保留核心设定，剔除角色状态（穿戴、物品、技能等动态高消耗字段）
             const distance = chat.length - 1 - item.score;
-            if (item.score < 1000000 && distance > 30) {
+            if (item.score < Constants.ROLE_CARD_MENTION_SCORE && distance > Constants.ROLE_CARD_STALE_DISTANCE) {
                 newRoleCards[roleName] = {
                     "角色设定": originalData.角色设定 || {}
                 };
@@ -711,7 +690,7 @@ ${newCharacterCardTemplate}
      * - 有召回特化摘要且 Embedder 就绪：
      *   score = W_ACTOR·(命中人物/总数) + W_LOCATION·(命中地点/总数)
      *         + W_EVENT·cos(query,event) + W_RECALL·max(cos(query,recall_when))
-     * - 否则：BM25 回退，score = bm25/(bm25+BM25_NORM_K)
+     * - 否则：BM25 回退，score = bm25/(bm25+Constants.BM25_NORM_K)
      * Embedder 未就绪时全池走 BM25 归一化（等价于纯 BM25 排序）。
      */
     async function scoreFarEntries(queryText, farEntries, docs, summaryMap, knownNames) {
@@ -725,11 +704,11 @@ ${newCharacterCardTemplate}
             if (!summaries[i] && docs[i]) poolIdx.push(i);
         }
         if (poolIdx.length > 0 && NS.Retriever) {
-            const hits = await NS.Retriever.retrieve(queryText, poolIdx.map(i => docs[i]), poolIdx.length, RAG_MIN_SCORE);
+            const hits = await NS.Retriever.retrieve(queryText, poolIdx.map(i => docs[i]), poolIdx.length, Constants.RAG_MIN_SCORE);
             for (const hit of hits) {
                 const idx = poolIdx[hit.index];
                 if (idx !== undefined && !bm25Score.has(idx)) {
-                    bm25Score.set(idx, hit.score / (hit.score + BM25_NORM_K));
+                    bm25Score.set(idx, hit.score / (hit.score + Constants.BM25_NORM_K));
                 }
             }
         }
@@ -800,7 +779,7 @@ ${newCharacterCardTemplate}
                         actorIdfHit += actorIdf(a);
                     }
                 }
-                const actorScore = Math.min(1, actorIdfHit / ACTOR_IDF_SATURATION);
+                const actorScore = Math.min(1, actorIdfHit / Constants.ACTOR_IDF_SATURATION);
                 const locations = Array.isArray(s.location) ? s.location : [];
                 let locHit = 0;
                 for (const loc of locations) {
@@ -814,10 +793,10 @@ ${newCharacterCardTemplate}
                 for (const p of job.recallPos) {
                     if (queryVec && vecs[p]) sRecall = Math.max(sRecall, clamp01(NS.Embedder.cosine(queryVec, vecs[p])));
                 }
-                const score = SUMMARY_W_ACTOR * actorScore
-                    + SUMMARY_W_LOCATION * locationScore
-                    + SUMMARY_W_EVENT * sEvent
-                    + SUMMARY_W_RECALL * sRecall;
+                const score = Constants.SUMMARY_W_ACTOR * actorScore
+                    + Constants.SUMMARY_W_LOCATION * locationScore
+                    + Constants.SUMMARY_W_EVENT * sEvent
+                    + Constants.SUMMARY_W_RECALL * sRecall;
                 results[i] = {
                     index: i,
                     score,
@@ -881,8 +860,8 @@ ${newCharacterCardTemplate}
             const entry = windowEntries[k];
             const s = entry ? summaryMap.get(JSON.stringify(entry)) : null;
             if (!s) continue; // 无摘要窗口条目：跳过该片段
-            const weight = k === windowEntries.length - 1 ? FRAG_WEIGHT_WIN_NEW
-                : (k === windowEntries.length - 2 ? FRAG_WEIGHT_WIN_NEXT : FRAG_WEIGHT_WIN_OTHER);
+            const weight = k === windowEntries.length - 1 ? Constants.FRAG_WEIGHT_WIN_NEW
+                : (k === windowEntries.length - 2 ? Constants.FRAG_WEIGHT_WIN_NEXT : Constants.FRAG_WEIGHT_WIN_OTHER);
             windowFrags.push({
                 kind: 'window',
                 weight,
@@ -894,7 +873,7 @@ ${newCharacterCardTemplate}
         }
         const frags = [{
             kind: 'user',
-            weight: FRAG_WEIGHT_USER,
+            weight: Constants.FRAG_WEIGHT_USER,
             text: queryUserText || '',
             actor: [],
             location: [],
@@ -1033,7 +1012,7 @@ ${newCharacterCardTemplate}
                             if (nameMatches(aFar, f.text, nameList)) { actorIdfHit += actorIdf(aFar); actorHit++; }
                         }
                     }
-                    const actorScore = Math.min(1, actorIdfHit / ACTOR_IDF_SATURATION);
+                    const actorScore = Math.min(1, actorIdfHit / Constants.ACTOR_IDF_SATURATION);
                     // S_location
                     let locHit = 0;
                     if (f.kind === 'window') {
@@ -1048,10 +1027,10 @@ ${newCharacterCardTemplate}
                     const sEvent = (doc.eventVec && qv) ? clamp01(NS.Embedder.cosine(qv, doc.eventVec)) : 0;
                     let sRecall = 0;
                     if (qv) for (const rv of doc.recallVecs) sRecall = Math.max(sRecall, clamp01(NS.Embedder.cosine(qv, rv)));
-                    fragScore = SUMMARY_W_ACTOR * actorScore
-                        + SUMMARY_W_LOCATION * locationScore
-                        + SUMMARY_W_EVENT * sEvent
-                        + SUMMARY_W_RECALL * sRecall;
+                    fragScore = Constants.SUMMARY_W_ACTOR * actorScore
+                        + Constants.SUMMARY_W_LOCATION * locationScore
+                        + Constants.SUMMARY_W_EVENT * sEvent
+                        + Constants.SUMMARY_W_RECALL * sRecall;
                     parts = {
                         source: 'summary',
                         actor: actorHit + '/' + actors.length,
@@ -1225,7 +1204,7 @@ ${newCharacterCardTemplate}
                         if (missing > 0 && NS.SubSummary.isConfigured && NS.SubSummary.isConfigured()) {
                             if (NS.RecallCache && NS.RecallCache.setFilling) NS.RecallCache.setFilling(missing);
                             try {
-                                await withTimeout(NS.SubSummary.ensureRecallSummaries(1, lastFloor), SUBSUMMARY_WAIT_TIMEOUT_MS);
+                                await withTimeout(NS.SubSummary.ensureRecallSummaries(1, lastFloor), Constants.SUBSUMMARY_WAIT_TIMEOUT_MS);
                             } catch (e) {
                                 console.error('[Chat History Optimization] 二级摘要补生成失败:', e);
                             }
@@ -1255,7 +1234,7 @@ ${newCharacterCardTemplate}
                         const text = docs[r.index];
                         if (packedSet.has(text)) continue;
                         const entry = farEntries[r.index];
-                        const est = Math.ceil(renderJourneyMarkdown([entry], 0).length / EST_CHARS_PER_TOKEN);
+                        const est = Math.ceil(renderJourneyMarkdown([entry], 0).length / Constants.EST_CHARS_PER_TOKEN);
                         if (est < minEst) minEst = est;
                         if (used + est > ragBudget) continue;
                         packedSet.add(text);

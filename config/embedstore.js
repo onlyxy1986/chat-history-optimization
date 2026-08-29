@@ -14,11 +14,8 @@
     const { eventSource, eventTypes } = NS.bridge;
     const Settings = NS.Settings;
 
+    const Constants = NS.Constants;
     const METADATA_KEY = 'chat-optimization-v2-embed';
-    // 进页面后延迟首次同步（等 Embedder 预热与聊天数据就绪）
-    const FIRST_SYNC_DELAY_MS = 1000;
-    // 收到消息后的防抖窗口（批量消息只触发一次同步）
-    const MESSAGE_DEBOUNCE_MS = 2000;
 
     let lastStatus = { running: false, persisted: 0, added: 0, removed: 0, error: null, message: null };
     const statusListeners = new Set();
@@ -313,7 +310,7 @@
         };
     }
 
-    const onMessageReceived = debounce(safeSync, MESSAGE_DEBOUNCE_MS);
+    const onMessageReceived = debounce(safeSync, Constants.EMBED_SYNC_DEBOUNCE_MS);
 
     const onSubSummaryStatus = (s) => {
         if (s && s.running === false && s.done > 0) safeSync();
@@ -329,7 +326,7 @@
         if (NS.SubSummary && typeof NS.SubSummary.onStatus === 'function') {
             NS.SubSummary.onStatus(onSubSummaryStatus);
         }
-        setTimeout(safeSync, FIRST_SYNC_DELAY_MS);
+        setTimeout(safeSync, Constants.EMBED_SYNC_FIRST_DELAY_MS);
     }
 
     NS.EmbedStore = Object.freeze({
