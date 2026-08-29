@@ -23,3 +23,5 @@ SillyTavern third-party extension (browser-side only). No package.json, no build
 - `engine.js` is pure logic, no DOM. UI updates flow through the `Engine.onStats` listener bus; `ui/coo-window.js` subscribes.
 - UI DOM is built entirely with `createElement` — no HTML strings, no jQuery.
 - Default templates in `settings.js` and UI labels are Chinese and part of the product data — preserve them, don't translate or "clean up". Template strings are parsed by `parseTemplate`, which strips `//` to end-of-line then `JSON.parse`s; keep default templates valid under that rule.
+
+## Remember to update all documents when modification is made.
