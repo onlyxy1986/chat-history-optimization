@@ -17,7 +17,6 @@ window.ChatOptimizationV2 = {
         saveSettingsDebounced: () => { },
         getTokenCountAsync: async (text) => Math.ceil(String(text || '').length / 3),
         getCurrentChat: () => chat,
-        saveChat: () => { },
         saveChatDebounced: () => { },
         eventSource: { on() { }, off() { } },
         eventTypes: { GENERATION_ENDED: 'GENERATION_ENDED' },

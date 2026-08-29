@@ -56,9 +56,11 @@
         // ... 其他角色
 }`,
         subSummaryToggle: true, // 二级摘要总开关（只控制 AI 回复后的自动生成，手动生成不受限）
+        subSummarySource: 'fetch', // 'fetch' = 直连 OpenAI 兼容接口；'profile' = 使用 SillyTavern connection profile（仅 CC 类型）
         subSummaryBaseUrl: '', // OpenAI 兼容 API 的 baseUrl
         subSummaryApiKey: '', // API Key
         subSummaryModel: '', // 模型名
+        subSummaryProfileId: '', // 选中的 SillyTavern connection profile id（source 为 profile 时生效）
         subSummaryTemperature: 0.3,
         subSummaryMaxTokens: 512,
         subSummaryPrompt: `你是故事摘要助手。请将以下"故事历程"条目压缩为一条召回特化摘要，只输出一个 JSON 对象，不要输出任何其他内容。

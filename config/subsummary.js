@@ -8,7 +8,7 @@
     'use strict';
 
     const NS = window.ChatOptimizationV2 = window.ChatOptimizationV2 || {};
-    const { saveChat, saveChatDebounced, eventSource, eventTypes } = NS.bridge;
+    const { saveChatDebounced, eventSource, eventTypes } = NS.bridge;
     const Settings = NS.Settings;
     const Engine = NS.Engine;
 
@@ -65,7 +65,33 @@
     // 设置访问（非法值回退默认）
     // ------------------------------------------------------------------
 
+    function getConnectionManagerProfiles() {
+        const extensionSettings = NS.bridge.extensionSettings;
+        if (!extensionSettings) return [];
+        if (Array.isArray(extensionSettings.disabledExtensions) && extensionSettings.disabledExtensions.includes('connection-manager')) return [];
+        const manager = extensionSettings.connectionManager;
+        if (!manager || !Array.isArray(manager.profiles)) return [];
+        return manager.profiles;
+    }
+
+    // 可用于二级摘要的 connection profile（仅 CC 类型且 url/model 齐全；
+    // secret-id 可缺省，缺省时服务端回退到该 API 类型的主 API Key）
+    function getProfileOptions() {
+        return getConnectionManagerProfiles()
+            .filter((p) => p && p.mode === 'cc'
+                && typeof p.id === 'string' && p.id !== ''
+                && String(p['api-url'] || '').trim() !== ''
+                && String(p.model || '').trim() !== '')
+            .map((p) => ({ id: p.id, name: p.name || p.id, model: String(p.model).trim(), url: String(p['api-url']).trim() }));
+    }
+
     function isConfigured() {
+        const source = String(Settings.get('subSummarySource') || 'fetch');
+        if (source === 'profile') {
+            const profileId = String(Settings.get('subSummaryProfileId') || '');
+            if (!profileId) return false;
+            return getProfileOptions().some((p) => p.id === profileId);
+        }
         return Boolean(String(Settings.get('subSummaryBaseUrl') || '').trim())
             && Boolean(String(Settings.get('subSummaryApiKey') || '').trim())
             && Boolean(String(Settings.get('subSummaryModel') || '').trim());
@@ -191,7 +217,66 @@
     // LLM 调用
     // ------------------------------------------------------------------
 
+    // 从 LLM 原始返回文本中提取第一个 {...} JSON 对象（兼容 markdown code fence 包裹）
+    function extractJson(raw) {
+        if (typeof raw !== 'string' || raw.trim() === '') {
+            console.error('[Chat History Optimization] 二级摘要 API 响应结构异常:', raw);
+            throw new Error('API 响应结构异常');
+        }
+        const match = raw.match(/\{[\s\S]*\}/);
+        if (!match) {
+            console.error('[Chat History Optimization] 二级摘要 API 响应中未找到 JSON 对象:', raw);
+            throw new Error('API 响应中未找到 JSON 对象');
+        }
+        let obj;
+        try {
+            obj = JSON.parse(match[0]);
+        } catch (e) {
+            console.error('[Chat History Optimization] 二级摘要 API 响应 JSON 解析失败:', match[0], e);
+            throw new Error('API 响应 JSON 解析失败');
+        }
+        if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+            console.error('[Chat History Optimization] 二级摘要 API 响应 JSON 不是对象:', raw);
+            throw new Error('API 响应 JSON 不是对象');
+        }
+        return obj;
+    }
+
+    // 通过 SillyTavern connection profile 调用（API Key 由服务端按 secret_id 解密，不经过浏览器）
+    async function callLlmViaProfile(content, profileId) {
+        const service = NS.bridge.connectionManagerRequest;
+        if (!service || typeof service.sendRequest !== 'function') throw new Error('Connection Manager 服务不可用');
+        let result;
+        try {
+            result = await service.sendRequest(
+                profileId,
+                [{ role: 'user', content }],
+                getMaxTokens(),
+                { stream: false, signal: null, extractData: true, includePreset: false, includeInstruct: false, instructSettings: {} },
+                { temperature: getTemperature() },
+            );
+        } catch (e) {
+            console.error('[Chat History Optimization] 二级摘要 connection profile 请求失败:', e);
+            const cause = e && e.cause ? e.cause : null;
+            throw new Error(`Connection profile 请求失败${cause && cause.message ? `：${cause.message}` : ''}`);
+        }
+        // extractData=true 时 sendRequest 返回 ExtractedData { content, reasoning }
+        const raw = result && typeof result === 'object'
+            ? (typeof result.content === 'string' ? result.content : null)
+            : (typeof result === 'string' ? result : null);
+        if (raw === null) {
+            console.error('[Chat History Optimization] 二级摘要 profile 响应中未提取到 content，当前 LLM 完整回复:', result);
+        }
+        return extractJson(raw);
+    }
+
     async function callLlm(content) {
+        const source = String(Settings.get('subSummarySource') || 'fetch');
+        if (source === 'profile') {
+            const profileId = String(Settings.get('subSummaryProfileId') || '');
+            if (!profileId) throw new Error('未选择 connection profile');
+            return callLlmViaProfile(content, profileId);
+        }
         const url = normalizeBaseUrl(Settings.get('subSummaryBaseUrl'));
         if (!url) throw new Error('API baseUrl 未配置');
         const apiKey = String(Settings.get('subSummaryApiKey') || '').trim();
@@ -234,31 +319,10 @@
         const raw = data && data.choices && data.choices[0] && data.choices[0].message
             ? data.choices[0].message.content
             : null;
-        if (typeof raw !== 'string') {
-            console.error('[Chat History Optimization] 二级摘要 API 响应结构异常:', data);
-            throw new Error('API 响应结构异常');
+        if (raw === null) {
+            console.error('[Chat History Optimization] 二级摘要 API 响应中未提取到 message.content，当前 LLM 完整回复:', data);
         }
-
-        // 兼容 markdown code fence 包裹：取第一个 {...} 块
-        const match = raw.match(/\{[\s\S]*\}/);
-        if (!match) {
-            console.error('[Chat History Optimization] 二级摘要 API 响应中未找到 JSON 对象:', raw);
-            throw new Error('API 响应中未找到 JSON 对象');
-        }
-
-        let obj;
-        try {
-            obj = JSON.parse(match[0]);
-        } catch (e) {
-            console.error('[Chat History Optimization] 二级摘要 API 响应 JSON 解析失败:', match[0], e);
-            throw new Error('API 响应 JSON 解析失败');
-        }
-
-        if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
-            console.error('[Chat History Optimization] 二级摘要 API 响应 JSON 不是对象:', raw);
-            throw new Error('API 响应 JSON 不是对象');
-        }
-        return obj;
+        return extractJson(raw);
     }
 
     // ------------------------------------------------------------------
@@ -268,7 +332,7 @@
     // 单条目生成。返回 'ok'（已生成）或 'skip'（已有效且非 force）。失败时抛错。
     async function runOne(floor, entryIndex, force) {
         if (!isConfigured()) {
-            throw new Error('请先在"二级摘要"选项卡配置 baseUrl、apiKey 和模型');
+            throw new Error('请先在"二级摘要"选项卡选择 connection profile 或配置直连的 baseUrl、apiKey 和模型');
         }
         const floorData = getFloorJourney(floor);
         if (!floorData) throw new Error(`楼层 ${floor} 无有效故事历程`);
@@ -349,7 +413,7 @@
                     console.error(`[Chat History Optimization] 楼层 ${floor} 条目 ${index + 1} 二级摘要生成失败:`, e);
                 }
             }
-            if (done > 0) saveChat();
+            if (done > 0) saveChatDebounced();
         } finally {
             running = false;
             notifyStatus({
@@ -483,7 +547,7 @@
                 erased++;
             }
         }
-        if (erased > 0) saveChat();
+        if (erased > 0) saveChatDebounced();
         notifyStatus({
             running: false,
             current: '',
@@ -545,6 +609,7 @@
         EXTRA_KEY,
         PLACEHOLDER,
         isConfigured,
+        getProfileOptions,
         validateTemplate,
         hasRecallFields,
         getFloorSummaries,

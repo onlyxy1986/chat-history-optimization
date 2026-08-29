@@ -156,6 +156,30 @@
         return row;
     }
 
+    function createSelectRow(label, hint, field, options = []) {
+        const row = document.createElement('div');
+        row.className = 'coo-row coo-input-row';
+
+        const labelBox = document.createElement('div');
+        labelBox.className = 'coo-label-box';
+        labelBox.appendChild(createText('span', 'coo-row-label', label));
+        if (hint) labelBox.appendChild(createText('small', 'coo-row-hint', hint));
+        row.appendChild(labelBox);
+
+        const select = document.createElement('select');
+        select.className = 'coo-select';
+        select.dataset.cooField = field;
+        for (const option of options) {
+            const opt = document.createElement('option');
+            opt.value = option.value;
+            opt.textContent = option.label;
+            if (option.disabled) opt.disabled = true;
+            select.appendChild(opt);
+        }
+        row.appendChild(select);
+        return row;
+    }
+
     function createSliderRow(label, hint, field, options = {}) {
         const row = document.createElement('div');
         row.className = 'coo-row coo-slider-row';
@@ -740,16 +764,58 @@
     function requireConfigured(scope) {
         if (NS.SubSummary && NS.SubSummary.isConfigured()) return true;
         scope.querySelectorAll('[data-coo-field="subSummaryStatus"]').forEach((el) => {
-            el.textContent = '二级摘要未配置：请在"二级摘要"选项卡设置 baseUrl、apiKey 和模型';
+            el.textContent = '二级摘要未配置：请在"二级摘要"选项卡选择 connection profile，或配置直连的 baseUrl、apiKey 和模型';
             el.className = 'coo-subsummary-status coo-subsummary-status-error';
         });
         return false;
+    }
+
+    function fillProfileSelect(select) {
+        if (!select) return;
+        const previous = select.value;
+        const options = NS.SubSummary ? NS.SubSummary.getProfileOptions() : [];
+        select.textContent = '';
+        const placeholder = document.createElement('option');
+        placeholder.value = '';
+        placeholder.textContent = options.length ? '(请选择)' : '（无可用 CC profile，Connection Manager 可能未启用）';
+        select.appendChild(placeholder);
+        for (const profile of options) {
+            const opt = document.createElement('option');
+            opt.value = profile.id;
+            opt.textContent = `${profile.name}（${profile.model}）`;
+            select.appendChild(opt);
+        }
+        const stillExists = previous && options.some((p) => p.id === previous);
+        select.value = stillExists ? previous : '';
+    }
+
+    function applySubSummarySourceState(scope) {
+        const sourceSelect = scope.querySelector('[data-coo-field="subSummarySource"]');
+        const isProfile = Boolean(sourceSelect && sourceSelect.value === 'profile');
+        for (const field of ['subSummaryBaseUrl', 'subSummaryApiKey', 'subSummaryModel']) {
+            const input = scope.querySelector(`[data-coo-field="${field}"]`);
+            if (!input) continue;
+            input.disabled = isProfile;
+            const row = input.closest ? input.closest('.coo-row') : null;
+            if (row) row.classList.toggle('coo-row-disabled', isProfile);
+        }
+        const profileSelect = scope.querySelector('[data-coo-field="subSummaryProfileId"]');
+        if (profileSelect) {
+            profileSelect.disabled = !isProfile;
+            const row = profileSelect.closest ? profileSelect.closest('.coo-row') : null;
+            if (row) row.classList.toggle('coo-row-disabled', !isProfile);
+        }
     }
 
     function renderSubSummaryTab(panel) {
         const section = createSection('fa-solid fa-compress', '二级摘要');
         section.appendChild(createSwitchRow('启用二级摘要', 'subSummaryToggle'));
         section.appendChild(createText('div', 'coo-preview-hint', 'AI 回复生成完成后自动为最新楼层缺失的条目生成二级摘要（"故事历程"选项卡中的手动生成不受此开关限制）'));
+        section.appendChild(createSelectRow('连接方式', '直连走浏览器 fetch；profile 走 SillyTavern Connection Manager（API Key 由服务端解密，不经过浏览器）', 'subSummarySource', [
+            { value: 'fetch', label: '直连（fetch）' },
+            { value: 'profile', label: 'SillyTavern connection profile' },
+        ]));
+        section.appendChild(createSelectRow('连接 profile', '仅支持 Chat Completion 类型的 profile', 'subSummaryProfileId'));
         section.appendChild(createTextRow('API baseUrl', 'OpenAI 兼容接口，如 http://localhost:8080 或 http://localhost:8080/v1', 'subSummaryBaseUrl', { placeholder: 'http://localhost:8080' }));
         section.appendChild(createTextRow('API Key', '', 'subSummaryApiKey', { type: 'password' }));
         section.appendChild(createTextRow('模型名', '', 'subSummaryModel'));
@@ -781,12 +847,18 @@
 
         const settings = Settings.getSettings();
         section.querySelector('[data-coo-field="subSummaryToggle"]').checked = Boolean(settings.subSummaryToggle);
+        const sourceSelect = section.querySelector('[data-coo-field="subSummarySource"]');
+        sourceSelect.value = settings.subSummarySource === 'profile' ? 'profile' : 'fetch';
+        const profileSelect = section.querySelector('[data-coo-field="subSummaryProfileId"]');
+        fillProfileSelect(profileSelect);
+        profileSelect.value = String(settings.subSummaryProfileId || '');
         section.querySelector('[data-coo-field="subSummaryBaseUrl"]').value = settings.subSummaryBaseUrl || '';
         section.querySelector('[data-coo-field="subSummaryApiKey"]').value = settings.subSummaryApiKey || '';
         section.querySelector('[data-coo-field="subSummaryModel"]').value = settings.subSummaryModel || '';
         section.querySelector('[data-coo-field="subSummaryTemperature"]').value = settings.subSummaryTemperature;
         section.querySelector('[data-coo-field="subSummaryMaxTokens"]').value = settings.subSummaryMaxTokens;
         section.querySelector('[data-coo-field="subSummaryPrompt"]').value = settings.subSummaryPrompt;
+        applySubSummarySourceState(section);
         updateSubSummaryBadge(section);
         updateSubSummaryStatus(section);
         updateEmbedderStatus(section);
@@ -1066,6 +1138,13 @@
                 case 'subSummaryToggle':
                     Settings.set('subSummaryToggle', Boolean(event.target.checked));
                     break;
+                case 'subSummarySource':
+                    Settings.set('subSummarySource', event.target.value === 'profile' ? 'profile' : 'fetch');
+                    applySubSummarySourceState(workspace);
+                    break;
+                case 'subSummaryProfileId':
+                    Settings.set('subSummaryProfileId', event.target.value);
+                    break;
                 case 'subSummaryBaseUrl':
                     Settings.set('subSummaryBaseUrl', event.target.value);
                     break;
@@ -1295,7 +1374,29 @@
         Engine.onStats(onStatsChanged);
         if (NS.SubSummary) NS.SubSummary.onStatus(onSubSummaryStatusChanged);
         if (NS.Embedder) NS.Embedder.onStatus(onEmbedderStatusChanged);
+        watchConnectionProfiles(root);
         startExtensionEntryRetry();
+    }
+
+    function watchConnectionProfiles(root) {
+        const eventSource = NS.bridge && NS.bridge.eventSource;
+        const eventTypes = NS.bridge && NS.bridge.eventTypes;
+        if (!eventSource || !eventTypes) return;
+        const types = [eventTypes.CONNECTION_PROFILE_LOADED, eventTypes.CONNECTION_PROFILE_CREATED, eventTypes.CONNECTION_PROFILE_UPDATED, eventTypes.CONNECTION_PROFILE_DELETED];
+        const refresh = () => {
+            const shell = root.querySelector('.coo-shell');
+            const select = shell && shell.querySelector ? shell.querySelector('[data-coo-field="subSummaryProfileId"]') : null;
+            if (!select) return;
+            const savedId = String(Settings.get('subSummaryProfileId') || '');
+            fillProfileSelect(select);
+            if (savedId && select.value !== savedId) {
+                Settings.set('subSummaryProfileId', '');
+            }
+            applySubSummarySourceState(shell);
+        };
+        for (const type of types) {
+            if (typeof type === 'string') eventSource.on(type, refresh);
+        }
     }
 
     NS.CooWindow = Object.assign(NS.CooWindow || {}, {
