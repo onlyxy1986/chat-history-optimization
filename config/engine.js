@@ -38,6 +38,15 @@
     // actor 命中 IDF 饱和值：命中人物的 idf 之和达到该值即记满 S_actor=1，
     // 只命中高频主角（idf 低）时只能拿到部分分数
     const ACTOR_IDF_SATURATION = 1.0;
+    // 发送前补生成缺失二级摘要的最长等待（毫秒），超时后不取消后台批次，本次用已有摘要继续
+    const SUBSUMMARY_WAIT_TIMEOUT_MS = 30000;
+    // 装箱用 token 估算常数（1 token ≈ 1.5 个汉字）；最终仅做 1~3 次精确计数 + 剪枝
+    const EST_CHARS_PER_TOKEN = 1.5;
+    // Mode A 片段权重：最新用户消息 1.0，最新窗口条目 0.95，次新 0.9，其余窗口 0.8
+    const FRAG_WEIGHT_USER = 1.0;
+    const FRAG_WEIGHT_WIN_NEW = 0.95;
+    const FRAG_WEIGHT_WIN_NEXT = 0.90;
+    const FRAG_WEIGHT_WIN_OTHER = 0.80;
 
     let lastStats = {
         tokenCount: 0,
@@ -651,14 +660,16 @@ ${newCharacterCardTemplate}
      *
      * - 正文：倒数第 keepCount 条 assistant 回复起的原文（其 messageCount 对应的
      *   历程条目已被正文覆盖，从历程中排除，避免重复）。
-     * - 中段：历程中未被正文覆盖的条目；RAG 触发时二分搜索最大后缀窗口，
-     *   使 窗口+正文+角色卡 ≤ tokenLimit - ragBudget。
-      * - RAG：触发时（全量 > tokenLimit×(1-ragRatio)），
-      *   以 最新用户消息 + 窗口历程条目（最新→次新→…，含天数/时间段/地点）为查询序列
-      *   逐个 BM25 检索，窗口外的远端条目按得分 topK 贪心装入，直到预算装满，
-     *   按时间顺序渲染为历程 markdown 放在 <HISTORY> 头部（与中段格式一致），
-     *   预算 ragBudget = tokenLimit × ragRatio。
-     * - 未触发：全量注入，不裁剪。
+      * - 中段：历程中未被正文覆盖的条目；RAG 触发时二分搜索最大后缀窗口，
+      *   使 窗口+正文+角色卡 ≤ contentLimit - ragBudget。
+       * - RAG：触发时（全量 > contentLimit×(1-ragRatio)），
+       *   以 最新用户消息 + 窗口历程条目（最新→次新→…，含天数/时间段/地点）为查询序列
+       *   逐个 BM25 检索，窗口外的远端条目按得分 topK 贪心装入，直到预算装满，
+      *   按时间顺序渲染为历程 markdown 放在 <HISTORY> 头部（与中段格式一致），
+      *   预算 ragBudget = contentLimit × ragRatio。
+      * - 预算基于 contentLimit = max(1, tokenLimit - 模板/包装开销)，
+      *   使最终 lastMessage（含 STORY_DATA 骨架与 NEW_STORY_DATA 模板）≤ tokenLimit。
+      * - 未触发：全量注入，不裁剪。
      *
      * @param {object[]} chatCopy - 聊天记录的深拷贝（mergeDataInfo 会写入 messageCount）
      * @param {{runRag?: boolean}} options - runRag=false 时只判断是否触发，不执行检索
@@ -832,6 +843,244 @@ ${newCharacterCardTemplate}
         return results;
     }
 
+    // 地点层级匹配：分段（"大地点.小地点"）后短者段序列是长者前缀，或全等，视为命中
+    function isHierMatch(locA, locB) {
+        if (!locA || !locB) return false;
+        if (locA === locB) return true;
+        const sa = locA.split('.');
+        const sb = locB.split('.');
+        const short = sa.length <= sb.length ? sa : sb;
+        const long = sa.length <= sb.length ? sb : sa;
+        for (let i = 0; i < short.length; i++) if (short[i] !== long[i]) return false;
+        return true;
+    }
+
+    function withTimeout(promise, ms) {
+        return new Promise((resolve, reject) => {
+            const t = setTimeout(() => resolve(null), ms);
+            Promise.resolve(promise).then(
+                (v) => { clearTimeout(t); resolve(v); },
+                (e) => { clearTimeout(t); reject(e); }
+            );
+        });
+    }
+
+    // ------------------------------------------------------------------
+    // Mode A 召回打分（subSummaryToggle 开启）：逐片段 fragScore → 加权 max
+    // 片段 = 最新用户消息（f0）+ 窗口各条目二级摘要（最新→次新→其余）。
+    // 每个片段对 farEntry 的打分为纯内容函数，缓存于 RecallCache（跨发送精确复用）。
+    // 无摘要 farEntry 直接排除（不占预算，绝不 BM25 回退）。
+    // ------------------------------------------------------------------
+    async function scoreFarEntriesModeA(queryUserText, farEntries, summaryMap, allRoleNames, windowEntries) {
+        const embedderReady = !!(NS.Embedder && NS.Embedder.isReady());
+        const RecallCache = NS.RecallCache;
+
+        // 窗口片段（最新→最旧）
+        const windowFrags = [];
+        for (let k = windowEntries.length - 1; k >= 0; k--) {
+            const entry = windowEntries[k];
+            const s = entry ? summaryMap.get(JSON.stringify(entry)) : null;
+            if (!s) continue; // 无摘要窗口条目：跳过该片段
+            const weight = k === windowEntries.length - 1 ? FRAG_WEIGHT_WIN_NEW
+                : (k === windowEntries.length - 2 ? FRAG_WEIGHT_WIN_NEXT : FRAG_WEIGHT_WIN_OTHER);
+            windowFrags.push({
+                kind: 'window',
+                weight,
+                text: (s.event && String(s.event).trim()) || '',
+                actor: Array.isArray(s.actor) ? s.actor : [],
+                location: Array.isArray(s.location) ? s.location : [],
+                summary: s,
+            });
+        }
+        const frags = [{
+            kind: 'user',
+            weight: FRAG_WEIGHT_USER,
+            text: queryUserText || '',
+            actor: [],
+            location: [],
+            summary: null,
+        }].concat(windowFrags);
+
+        // far 池摘要集合：IDF 统计 + 消歧名单
+        const farSummaries = farEntries
+            .map((e) => summaryMap.get(JSON.stringify(e)) || null)
+            .filter(Boolean);
+        const summaryPoolSize = farSummaries.length;
+        const actorDf = new Map();
+        for (const s of farSummaries) {
+            if (!Array.isArray(s.actor)) continue;
+            for (const a of new Set(s.actor)) actorDf.set(a, (actorDf.get(a) || 0) + 1);
+        }
+        const actorIdf = (name) => {
+            const d = actorDf.get(name) || 0;
+            return Math.log(1 + (summaryPoolSize - d + 0.5) / (d + 0.5));
+        };
+        const allNames = new Set(allRoleNames || []);
+        for (const s of farSummaries) if (Array.isArray(s.actor)) for (const a of s.actor) allNames.add(a);
+        const nameList = [...allNames];
+
+        // 文档侧向量：优先命中 RecallCache.docVec，缺失经 EmbedStore 解析并回写
+        const entryDocs = new Array(farEntries.length);
+        const needTexts = [];
+        for (let i = 0; i < farEntries.length; i++) {
+            const s = summaryMap.get(JSON.stringify(farEntries[i])) || null;
+            if (!s) { entryDocs[i] = null; continue; }
+            const entryKey = JSON.stringify(farEntries[i]);
+            if (embedderReady && RecallCache && RecallCache.getDocVecs) {
+                const c = RecallCache.getDocVecs(entryKey, s);
+                if (c) { entryDocs[i] = c; continue; }
+            }
+            const texts = [];
+            if (s.event && String(s.event).trim()) texts.push(String(s.event).trim());
+            if (Array.isArray(s.recall_when)) {
+                for (const r of s.recall_when) {
+                    const t = String(r == null ? '' : r).trim();
+                    if (t) texts.push(t);
+                }
+            }
+            entryDocs[i] = { _texts: texts };
+            texts.forEach((t) => { if (!needTexts.includes(t)) needTexts.push(t); });
+        }
+        if (needTexts.length > 0 && embedderReady) {
+            let vecMap = new Map();
+            if (NS.EmbedStore && typeof NS.EmbedStore.resolve === 'function') {
+                vecMap = await NS.EmbedStore.resolve(needTexts);
+            } else if (NS.Embedder) {
+                const vs = await NS.Embedder.encodeBatch(needTexts);
+                needTexts.forEach((t, idx) => vecMap.set(t, vs[idx]));
+            }
+            if (RecallCache && RecallCache.setDocVecs) {
+                for (let i = 0; i < farEntries.length; i++) {
+                    if (!entryDocs[i] || !entryDocs[i]._texts) continue;
+                    const s = summaryMap.get(JSON.stringify(farEntries[i]));
+                    const entryKey = JSON.stringify(farEntries[i]);
+                    const eventVec = (s.event && String(s.event).trim())
+                        ? vecMap.get(String(s.event).trim()) || null : null;
+                    const recallVecs = entryDocs[i]._texts.map((t) => vecMap.get(t) || null).filter(Boolean);
+                    const c = RecallCache.getDocVecs(entryKey, s);
+                    if (!c || c.eventVec !== eventVec) RecallCache.setDocVecs(entryKey, s, eventVec, recallVecs);
+                    entryDocs[i] = { eventVec, recallVecs };
+                }
+            } else {
+                for (let i = 0; i < farEntries.length; i++) {
+                    if (!entryDocs[i] || !entryDocs[i]._texts) continue;
+                    const s = summaryMap.get(JSON.stringify(farEntries[i]));
+                    const eventVec = (s.event && String(s.event).trim())
+                        ? vecMap.get(String(s.event).trim()) || null : null;
+                    const recallVecs = entryDocs[i]._texts.map((t) => vecMap.get(t) || null).filter(Boolean);
+                    entryDocs[i] = { eventVec, recallVecs };
+                }
+            }
+        } else {
+            for (let i = 0; i < farEntries.length; i++) {
+                if (entryDocs[i] && entryDocs[i]._texts) entryDocs[i] = { eventVec: null, recallVecs: [] };
+            }
+        }
+
+        // 片段 query 向量：优先命中 RecallCache.fragVec，缺失批量编码并回写
+        const toEncodeText = [];
+        const toEncode = [];
+        for (const f of frags) {
+            if (!f.text || !embedderReady) continue;
+            if (RecallCache && RecallCache.getFragVec && RecallCache.getFragVec(f.text)) continue;
+            if (toEncodeText.includes(f.text)) continue;
+            toEncodeText.push(f.text);
+            toEncode.push(NS.Embedder.withQueryInstruction(f.text));
+        }
+        if (toEncode.length > 0) {
+            const vecs = await NS.Embedder.encodeBatch(toEncode);
+            toEncodeText.forEach((t, i) => { if (RecallCache && RecallCache.setFragVec) RecallCache.setFragVec(t, vecs[i]); });
+        }
+        const finalFragVecs = frags.map((f) => {
+            if (!f.text || !embedderReady) return null;
+            return (RecallCache && RecallCache.getFragVec) ? RecallCache.getFragVec(f.text) : null;
+        });
+
+        const clamp01 = (v) => Math.min(1, Math.max(0, v));
+        const results = new Array(farEntries.length);
+        for (let i = 0; i < farEntries.length; i++) {
+            const entry = farEntries[i];
+            const s = summaryMap.get(JSON.stringify(entry)) || null;
+            if (!s) { results[i] = null; continue; } // 无摘要：排除
+            const entryKey = JSON.stringify(entry);
+            const doc = entryDocs[i] || { eventVec: null, recallVecs: [] };
+            const actors = Array.isArray(s.actor) ? s.actor : [];
+            const locations = Array.isArray(s.location) ? s.location : [];
+            let bestScore = 0;
+            let bestLabel = 'user';
+            let bestParts = null;
+            for (let fi = 0; fi < frags.length; fi++) {
+                const f = frags[fi];
+                const qv = finalFragVecs[fi];
+                const cached = (RecallCache && RecallCache.getPair)
+                    ? RecallCache.getPair(f.text, f.summary, entryKey, s) : null;
+                let fragScore, parts;
+                if (cached) {
+                    fragScore = cached.fragScore;
+                    parts = cached.parts;
+                } else {
+                    // S_actor
+                    let actorIdfHit = 0, actorHit = 0;
+                    const farActorSet = new Set(actors);
+                    if (f.kind === 'window') {
+                        for (const aFar of farActorSet) {
+                            for (const aWin of f.actor) {
+                                if (nameMatches(aWin, aFar, nameList)) { actorIdfHit += actorIdf(aFar); actorHit++; break; }
+                            }
+                        }
+                    } else {
+                        for (const aFar of farActorSet) {
+                            if (nameMatches(aFar, f.text, nameList)) { actorIdfHit += actorIdf(aFar); actorHit++; }
+                        }
+                    }
+                    const actorScore = Math.min(1, actorIdfHit / ACTOR_IDF_SATURATION);
+                    // S_location
+                    let locHit = 0;
+                    if (f.kind === 'window') {
+                        for (const lFar of locations) {
+                            for (const lWin of f.location) { if (isHierMatch(lWin, lFar)) { locHit++; break; } }
+                        }
+                    } else {
+                        for (const loc of locations) { if (loc && f.text.includes(loc)) locHit++; }
+                    }
+                    const locationScore = locations.length > 0 ? locHit / locations.length : 0;
+                    // S_event / S_recall
+                    const sEvent = (doc.eventVec && qv) ? clamp01(NS.Embedder.cosine(qv, doc.eventVec)) : 0;
+                    let sRecall = 0;
+                    if (qv) for (const rv of doc.recallVecs) sRecall = Math.max(sRecall, clamp01(NS.Embedder.cosine(qv, rv)));
+                    fragScore = SUMMARY_W_ACTOR * actorScore
+                        + SUMMARY_W_LOCATION * locationScore
+                        + SUMMARY_W_EVENT * sEvent
+                        + SUMMARY_W_RECALL * sRecall;
+                    parts = {
+                        source: 'summary',
+                        actor: actorHit + '/' + actors.length,
+                        location: locHit + '/' + locations.length,
+                        actorScore: Number(actorScore.toFixed(2)),
+                        locationScore: Number(locationScore.toFixed(2)),
+                        event: Number(sEvent.toFixed(2)),
+                        recall: Number(sRecall.toFixed(2)),
+                    };
+                    if (RecallCache && RecallCache.setPair) {
+                        RecallCache.setPair(f.text, f.summary, entryKey, s, fragScore, parts);
+                    }
+                }
+                const weighted = f.weight * fragScore;
+                if (weighted > bestScore) {
+                    bestScore = weighted;
+                    bestLabel = (fi === 0) ? 'user' : ('w' + fi);
+                    bestParts = parts;
+                }
+            }
+            results[i] = {
+                index: i,
+                score: bestScore,
+                parts: bestParts ? Object.assign({ bestFrag: bestLabel }, bestParts) : { bestFrag: bestLabel },
+            };
+        }
+        return results;
+    }
+
     async function buildPromptData(chatCopy, options) {
         const runRag = Boolean(options && options.runRag);
         const historyTemplate = parseTemplate(Settings.get('historyPrompt'), true);
@@ -853,24 +1102,29 @@ ${newCharacterCardTemplate}
         if (typeof keepCount !== 'number' || isNaN(keepCount)) keepCount = Settings.defaultSettings.keepCount;
         if (keepCount == 0 && assistantIdxArr.length == 1) keepCount = 1;
         if (keepCount > assistantIdxArr.length) keepCount = assistantIdxArr.length;
-        let tailText = '';
-        let tailCovered = 0;
-        if (keepCount > 0) {
-            const startIdx = assistantIdxArr[assistantIdxArr.length - keepCount];
-            tailText = chatCopy
+        // tailPos：assistantIdxArr 中正文起点下标；正文超预算时右移以丢弃最旧消息
+        let tailPos = assistantIdxArr.length - keepCount;
+        const buildTail = (pos) => {
+            const startIdx = assistantIdxArr[pos];
+            let covered = 0;
+            const text = chatCopy
                 .slice(startIdx)
                 .filter(item => item && item.is_user === false)
                 .map(item => {
                     if (!item || !item.mes) return '';
-                    tailCovered += item.messageCount || 0;
+                    covered += item.messageCount || 0;
                     return item.mes;
                 })
                 .join('\n');
-        }
+            return { text, covered };
+        };
+        const initialTail = keepCount > 0 ? buildTail(tailPos) : { text: '', covered: 0 };
+        let tailText = initialTail.text;
+        let tailCovered = initialTail.covered;
 
         // --- 历程拆分：maxDay 从完整历程计算；正文覆盖的尾部条目从中段排除 ---
         const fullJourney = Array.isArray(historyData.故事历程) ? historyData.故事历程 : [];
-        const midEntries = tailCovered > 0
+        let midEntries = tailCovered > 0
             ? fullJourney.slice(0, Math.max(0, fullJourney.length - tailCovered))
             : [...fullJourney];
         const midMaxDay = computeMaxDay(fullJourney);
@@ -881,12 +1135,20 @@ ${newCharacterCardTemplate}
         let ragRatio = Settings.get('ragRatio');
         if (typeof ragRatio !== 'number' || isNaN(ragRatio) || ragRatio <= 0) ragRatio = Settings.defaultSettings.ragRatio;
 
-        const fullMidMarkdown = renderJourneyMarkdown(midEntries, midMaxDay);
+        // 模板/包装开销：STORY_DATA 骨架 + NEW_STORY_DATA 模板恒附在最终消息上，
+        // 从内容预算中扣除，保证最终 tokenCount ≤ tokenLimit
+        const overheadTokens = await getTokenCountAsync(getCharPrompt({ 前文: '' }, {}));
+        const contentLimit = Math.max(1, tokenLimit - overheadTokens);
+
+        // Mode A（二级摘要开启）召回不依赖 BM25 检索器，故激活门对两者都开放
+        const useModeA = !!(NS.SubSummary && Settings.get('subSummaryToggle'));
+
+        let fullMidMarkdown = renderJourneyMarkdown(midEntries, midMaxDay);
         const fullTokens = await getTokenCountAsync(joinNonEmpty([fullMidMarkdown, tailText]) + charJson);
 
-        const ragReady = NS.Retriever ? NS.Retriever.isReady() : false;
-        const ragWillActivate = ragReady && fullTokens > tokenLimit * (1 - ragRatio);
-        console.log(`[Chat History Optimization] 全量 ${fullTokens} tokens，tokenLimit=${tokenLimit}，ragRatio=${ragRatio}，RAG ${ragWillActivate ? '将启用' : '不启用'}（ready=${ragReady}）`);
+        const ragReady = (NS.Retriever ? NS.Retriever.isReady() : false) || useModeA;
+        const ragWillActivate = ragReady && fullTokens > contentLimit * (1 - ragRatio);
+        console.log(`[Chat History Optimization] 全量 ${fullTokens} tokens，tokenLimit=${tokenLimit}（模板开销 ${overheadTokens}，内容预算 ${contentLimit}），ragRatio=${ragRatio}，RAG ${ragWillActivate ? '将启用' : '不启用'}（ready=${ragReady}）`);
 
         let rag = {
             active: false,
@@ -900,8 +1162,25 @@ ${newCharacterCardTemplate}
         let ragMarkdown = '';
 
         if (ragWillActivate && runRag && midEntries.length > 0) {
-            const ragBudget = Math.max(1, Math.round(tokenLimit * ragRatio));
-            const midBudget = tokenLimit - ragBudget;
+            const ragBudget = Math.max(1, Math.round(contentLimit * ragRatio));
+            const midBudget = contentLimit - ragBudget;
+            // 正文硬上限：正文+角色卡 超 midBudget 时从最旧整条 assistant 消息丢弃，
+            // 其历程条目回归中段（可被窗口/召回重新拾取）
+            let tailTok = await getTokenCountAsync(tailText + charJson);
+            while (tailTok > midBudget && tailPos < assistantIdxArr.length - 1) {
+                tailPos++;
+                const t = buildTail(tailPos);
+                tailText = t.text;
+                tailCovered = t.covered;
+                midEntries = tailCovered > 0
+                    ? fullJourney.slice(0, Math.max(0, fullJourney.length - tailCovered))
+                    : [...fullJourney];
+                fullMidMarkdown = renderJourneyMarkdown(midEntries, midMaxDay);
+                tailTok = await getTokenCountAsync(tailText + charJson);
+            }
+            if (tailTok > midBudget) {
+                console.warn(`[Chat History Optimization] 正文+角色卡（${tailTok}）超出中段预算（${midBudget}）且无可丢弃消息，最终将超 tokenLimit，请调大 tokenLimit 或调小 keepCount`);
+            }
             // 二分搜索最大后缀窗口 k：tokens(窗口markdown + 正文 + 角色卡) ≤ midBudget
             let lo = 0, hi = midEntries.length, bestK = 0;
             while (lo <= hi) {
@@ -924,7 +1203,7 @@ ${newCharacterCardTemplate}
             rag.query = query;
             // 组合查询文本：最新用户消息 + 窗口历程条目，供混合打分与 BM25 回退共用
             const queryText = joinNonEmpty([query, ...midEntries.slice(midEntries.length - bestK).map(entryToDocText)]);
-            if (farEntries.length > 0 && queryText !== '' && NS.Retriever) {
+            if (farEntries.length > 0 && queryText !== '') {
                 try {
                     const docs = farEntries.map(entryToDocText);
                     // 记录每条远端条目在 farEntries 中的原始（时间）顺序，用于最终排序
@@ -936,43 +1215,82 @@ ${newCharacterCardTemplate}
 
                     const summaryMap = buildSummaryMap(chatCopy);
                     const allRoleNames = Object.keys(mergedDataInfo.characterData || {});
-                    const scored = await scoreFarEntries(queryText, farEntries, docs, summaryMap, allRoleNames);
-                    // 按最终分数降序贪心装入（按单条详细 markdown 成本计费，即单条最大成本）
+
+                    let scored;
+                    if (useModeA) {
+                        // Mode A：发送前补齐缺失二级摘要（带超时），绝不 BM25 回退
+                        const lastFloor = chatCopy.length - 1;
+                        const missing = NS.SubSummary.getRecallMissingCount
+                            ? NS.SubSummary.getRecallMissingCount(1, lastFloor) : 0;
+                        if (missing > 0 && NS.SubSummary.isConfigured && NS.SubSummary.isConfigured()) {
+                            if (NS.RecallCache && NS.RecallCache.setFilling) NS.RecallCache.setFilling(missing);
+                            try {
+                                await withTimeout(NS.SubSummary.ensureRecallSummaries(1, lastFloor), SUBSUMMARY_WAIT_TIMEOUT_MS);
+                            } catch (e) {
+                                console.error('[Chat History Optimization] 二级摘要补生成失败:', e);
+                            }
+                            if (NS.RecallCache && NS.RecallCache.setFilled) NS.RecallCache.setFilled();
+                        } else if (missing > 0) {
+                            console.warn(`[Chat History Optimization] 二级摘要功能已开启但未配置连接，缺失 ${missing} 条摘要未生成，相关条目本次不参与召回`);
+                        }
+                        const windowEntries = bestK === 0 ? [] : midEntries.slice(midEntries.length - bestK);
+                        scored = await scoreFarEntriesModeA(query, farEntries, summaryMap, allRoleNames, windowEntries);
+                    } else {
+                        scored = await scoreFarEntries(queryText, farEntries, docs, summaryMap, allRoleNames);
+                    }
+
+                    // 按最终分数降序贪心装入（单条详细 markdown 估算成本，1 token ≈ 1.5 汉字）
                     const ranked = scored
                         .map((r, i) => (r && docs[i] ? r : null))
                         .filter(Boolean)
                         .sort((a, b) => b.score - a.score);
                     let used = 0;
-                    let minDocTokens = Infinity;
+                    let minEst = Infinity;
                     const packed = [];
                     const packedSet = new Set();
                     for (const r of ranked) {
                         // 预算装满 / 远端条目已全部装入 / 剩余预算装不下已见最小条目 时停止
                         if (used >= ragBudget || packedSet.size >= uniqueDocCount
-                            || (minDocTokens !== Infinity && used + minDocTokens > ragBudget)) break;
+                            || (minEst !== Infinity && used + minEst > ragBudget)) break;
                         const text = docs[r.index];
                         if (packedSet.has(text)) continue;
                         const entry = farEntries[r.index];
-                        const t = await getTokenCountAsync(renderJourneyMarkdown([entry], 0));
-                        // 已见最小成本（无论是否装入）：装不下最小条目即可停止
-                        if (t < minDocTokens) minDocTokens = t;
-                        if (used + t > ragBudget) continue;
+                        const est = Math.ceil(renderJourneyMarkdown([entry], 0).length / EST_CHARS_PER_TOKEN);
+                        if (est < minEst) minEst = est;
+                        if (used + est > ragBudget) continue;
                         packedSet.add(text);
                         packed.push({ text, score: r.score, parts: r.parts, order: docOrder.get(text) ?? Infinity, entry });
-                        used += t;
+                        used += est;
                     }
-                    // 按 farEntries 原始顺序（时间顺序）渲染为与中段一致的历程 markdown，放到 <HISTORY> 头部
+                    // 按时间序渲染后精确计数：装箱估算(1.5 字符/token)对中文偏乐观，
+                    // 超预算则从最低分逐条剔除，直到 ≤ ragBudget（无次数上限，保证硬上限）
                     if (packed.length > 0) {
-                        packed.sort((a, b) => a.order - b.order);
-                        ragMarkdown = renderJourneyMarkdown(packed.map((p) => p.entry), midMaxDay);
-                        rag.hits = packed.map((p) => ({ text: p.text, score: p.score, parts: p.parts }));
-                        rag.active = true;
+                        const finalize = () => {
+                            if (packed.length === 0) {
+                                ragMarkdown = '';
+                                rag.hits = [];
+                                rag.active = false;
+                                return;
+                            }
+                            packed.sort((a, b) => a.order - b.order);
+                            ragMarkdown = renderJourneyMarkdown(packed.map((p) => p.entry), midMaxDay);
+                            rag.hits = packed.map((p) => ({ text: p.text, score: p.score, parts: p.parts }));
+                            rag.active = true;
+                        };
+                        finalize();
+                        let tok = await getTokenCountAsync(ragMarkdown);
+                        while (tok > ragBudget && packed.length > 0) {
+                            packed.sort((a, b) => a.score - b.score);
+                            packed.shift();
+                            finalize();
+                            tok = await getTokenCountAsync(ragMarkdown);
+                        }
                     }
                 } catch (e) {
-                    console.error('[Chat History Optimization] RAG retrieval failed, fallback to no-RAG', e);
-                    rag = { active: false, willActivate: false, hits: [], windowCount: midEntries.length, farCount: 0, query: '' };
-                    midMarkdown = fullMidMarkdown;
+                    console.error('[Chat History Optimization] RAG retrieval failed, keeping capped window mid', e);
+                    rag = { active: false, willActivate: true, hits: [], windowCount: bestK, farCount: farEntries.length, query: rag.query };
                     ragMarkdown = '';
+                    // midMarkdown 保持二分窗口结果（≤ midBudget），不退回无上限全量
                 }
             }
         }
@@ -1066,8 +1384,8 @@ ${newCharacterCardTemplate}
 
         console.log("[Chat History Optimization] token count:", result.tokenCount);
         printObj("[Chat History Optimization] Final Summary Info", { historyData, characterData, ragMarkdown: result.ragMarkdown });
-        if (!result.rag.active && result.tokenCount > Settings.get('tokenLimit')) {
-            console.warn("[Chat History Optimization] 内容超出 token 限制且 RAG 未生效（未超预算阈值），按全量注入。");
+        if (result.tokenCount > Settings.get('tokenLimit')) {
+            console.warn(`[Chat History Optimization] 最终 ${result.tokenCount} tokens 仍超 tokenLimit=${Settings.get('tokenLimit')}（正文/角色卡本身超预算且无可丢弃消息），请调大 tokenLimit 或调小 keepCount`);
         }
 
         const mergedChat = [];

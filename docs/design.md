@@ -1,6 +1,6 @@
 # Chat History Optimization (chat-optimization-v2) — 完整流程交接文档
 
-> 版本：v2.8.0（2026-08-29）
+> 版本：v2.9.3（2026-08-29）
 > 仓库：本目录是独立 git 仓库（嵌套在 SillyTavern 安装目录内），在此提交，不要提交到父仓库。
 > 无 package.json、无构建、无 lint。功能模块为浏览器端普通脚本。
 
@@ -15,6 +15,7 @@
 3. **角色卡管理**：固定 10 槽位淘汰 + 蒸馏（久未出场角色只保留核心设定）。
 4. **二级摘要（recall-specialized sub-summary）**：对每条历程条目调用 LLM 生成 `{actor, location, event, recall_when}` 结构化摘要，持久化在楼层消息 `extra` 中，既供 UI 浏览，也作为混合召回的语义信号。
 5. **混合召回（v2.5.0+）**：BM25 词法检索 + 本地 ONNX embedding（bge-small-zh-v1.5, transformers.js）语义打分，向量持久化在 `chat_metadata`。
+6. **LRU 召回缓存 + Mode A 分段加权打分（v2.9.0）**：`recallcache.js` 对片段向量 / 远端条目向量 / 逐对分数做内容寻址 LRU 缓存，使「发送新用户信息只重算新相关远端条目」；`subSummaryToggle` 开启时走 Mode A（按最新用户消息 + 每个窗口条目的二级摘要切成多个片段，逐片段加权 max），缺失摘要发送前先补生成（带超时），绝不 BM25 回退。
 
 ---
 
@@ -26,7 +27,8 @@
 ├── config/
 │   ├── settings.js            # 设置存取（extension_settings["chat-optimization-v2"]）
 │   ├── engine.js              # 核心引擎（纯逻辑无 DOM）：解析/合并/装配/召回打分/拦截器
-│   ├── subsummary.js          # 二级摘要生成器（纯逻辑）：LLM 调用、extra 持久化、自动触发
+│   ├── subsummary.js          # 二级摘要生成器（纯逻辑）：LLM 调用、extra 持久化、自动触发、缺失收集/补生成
+│   ├── recallcache.js         # 召回 LRU 缓存（fragVec/docVec/pairScore 内容寻址）+ 补全气泡总线 + 后台预热
 │   ├── retrieval.js           # BM25 检索器（纯逻辑，中文 unigram+bigram 分词）
 │   ├── embedding.js           # 本地 embedding（transformers.js + 本地 ONNX 模型）
 │   └── embedstore.js          # 摘要向量持久化（chat_metadata）+ 后台完整性同步
@@ -42,7 +44,7 @@
 │   └── smoke-hybrid-recall.cjs  # Node 冒烟测试（mock 浏览器环境，node 直接跑）
 └── docs/
     ├── sub-summary-handoff.md # 二级摘要功能的历史交接文档（v2.4.0 时点）
-    └── handoff.md             # 本文档
+    └── design.md              # 本文档
 ```
 
 ---
@@ -69,9 +71,9 @@
    - `connectionManagerRequest`（ConnectionManagerRequestService）
 5. 按 `MODULES` 数组顺序**同步**注入 `<script>`（`async = false`，URL 带 `?v=VERSION` 缓存击穿）：
    ```
-   config/settings.js → config/engine.js → config/subsummary.js
-   → config/retrieval.js → config/embedding.js → config/embedstore.js
-   → ui/coo-window.js
+    config/settings.js → config/engine.js → config/subsummary.js
+    → config/retrieval.js → config/embedding.js → config/embedstore.js
+    → config/recallcache.js → ui/coo-window.js
    ```
    **新增模块文件必须加入此数组**，否则不加载。
 6. `DOMContentLoaded` 后调用 `NS.CooWindow.mount()`。
@@ -100,6 +102,7 @@
 | `subsummary.js:626` | `init()` 注册 `GENERATION_ENDED` 事件监听 |
 | `embedding.js:198` | `init()` 立即预热加载 transformers + ONNX 模型（异步，失败可重试） |
 | `embedstore.js:344` | `init()` 注册事件监听 + 延迟 1s 首次向量完整性同步 |
+| `recallcache.js` | `init()` 订阅 `MESSAGE_RECEIVED`(2s 防抖)/`GENERATION_ENDED`/`CHAT_CHANGED`/`Embedder.onStatus` 做后台预热；`onFill` 气泡总线 |
 | `coo-window.js` | 由 index.js 在 DOM ready 后调 `mount()` |
 
 ---
@@ -199,17 +202,22 @@ UI 的「发送预览」与窗口打开时的 `refreshStats()`（engine.js:1023�
    - 边界：`keepCount=0 且只有 1 条 assistant` 时强制保留 1 条；`keepCount > assistant 数` 时钳到 assistant 数。
 5. **历程拆分**：`fullJourney = historyData.故事历程`；`midEntries = fullJourney.slice(0, length - tailCovered)`（正文覆盖的尾部条目从历程剔除，避免重复）；`midMaxDay` 从**完整历程**计算（识别「当前天」必须含被排除部分）。
 6. **Token 预算判定**：
-   - `fullTokens = tokens(fullMidMarkdown + tailText + characterDataJson)`（`getTokenCountAsync`）。
-   - `ragWillActivate = Retriever.isReady() && fullTokens > tokenLimit × (1 - ragRatio)`。
-   - 未触发 → 全量注入（`midMarkdown = fullMidMarkdown`），不裁剪。
+    - `fullTokens = tokens(fullMidMarkdown + tailText + characterDataJson)`（`getTokenCountAsync`）。
+    - **模板/包装开销（v2.9.1）**：`overheadTokens = tokens(getCharPrompt({前文:''}, {}))`——STORY_DATA 骨架 + NEW_STORY_DATA 模板恒附在最终消息上（默认模板约 2k tokens），若不扣除，最终显示的 tokenCount 永远超出 tokenLimit 一个开销量。`contentLimit = max(1, tokenLimit - overheadTokens)`，后续所有预算判定用 `contentLimit`。
+    - `useModeA = !!(NS.SubSummary && Settings.get('subSummaryToggle'))`。
+    - `ragWillActivate = (Retriever ? Retriever.isReady() : false) || useModeA`，且 `fullTokens > contentLimit × (1 - ragRatio)`。
+    - 未触发 → 全量注入（`midMarkdown = fullMidMarkdown`），不裁剪。
 7. **RAG 路径**（触发且 `runRag` 时，engine.js:902-977）：
-   - `ragBudget = round(tokenLimit × ragRatio)`；`midBudget = tokenLimit - ragBudget`。
-   - **二分搜索**最大后缀窗口 `bestK`：`tokens(窗口markdown + tailText + charJson) ≤ midBudget`。窗口 = `midEntries` 尾部 `bestK` 条（时间最近的）。
-   - `farEntries = midEntries` 前段（窗口外）；`query = 最后一条消息（用户消息）mes`；`queryText = query + 窗口各条目 docText`（`entryToDocText`：天数+时间段+地点+历程）。
-   - 打分：`scoreFarEntries`（见 §7），返回与 `farEntries` 同序的 `{index, score, parts}`。
-   - **贪心装箱**：按分数降序遍历，单条成本 = 该条目**详细格式** markdown 的 token 数（`renderJourneyMarkdown([entry], 0)`，即最大成本估计）；重复文本去重（`packedSet`）；停止条件：预算满 / 全部唯一条目装完 / 已见最小条目也装不下。装入的按**原始时间顺序**重排。
-   - `ragMarkdown = renderJourneyMarkdown(装入条目, midMaxDay)`；`rag.hits` 记录每条命中的 text/score/parts（UI 用 `entryToDocText` 反查标记）。
-   - 检索抛错 → 回退无 RAG（全量中段），`rag.active = false`。
+     - `ragBudget = round(contentLimit × ragRatio)`；`midBudget = contentLimit - ragBudget`。
+     - **正文硬上限（v2.9.2）**：`tokens(tailText + charJson) > midBudget` 时从最旧整条 assistant 消息丢弃（`tailPos` 右移，其历程条目回归中段，可被窗口/召回重新拾取），直到装下或只剩 1 条；仍超则 console.warn（此时最终必然超限）。
+     - **二分搜索**最大后缀窗口 `bestK`：`tokens(窗口markdown + tailText + charJson) ≤ midBudget`。窗口 = `midEntries` 尾部 `bestK` 条（时间最近的）。
+    - `farEntries = midEntries` 前段（窗口外）；`query = 最后一条消息（用户消息）mes`。
+    - **Mode A（`useModeA`）**：发送前先补齐缺失二级摘要——`SubSummary.getRecallMissingCount(1, lastFloor) > 0` 且 `isConfigured()` 则 `await withTimeout(SubSummary.ensureRecallSummaries(1, lastFloor), SUBSUMMARY_WAIT_TIMEOUT_MS)`（超时 30s，见 §10.6）；未配置连接则 warning 并跳过缺失条目（**绝不 BM25 回退**）。打分走 `scoreFarEntriesModeA`（见 §7.4）。
+    - **Mode B（`!useModeA`）**：`queryText = query + 窗口各条目 docText`（`entryToDocText`），打分走 `scoreFarEntries`（见 §7.1-7.3）。
+    - **贪心装箱**：按分数降序遍历，单条**估算**成本 = 该条目**详细格式** markdown 长度 / `EST_CHARS_PER_TOKEN`(1.5)（即最大成本估计）；重复文本去重（`packedSet`）；停止条件：预算满 / 全部唯一条目装完 / 已见最小条目也装不下。装入的按**原始时间顺序**重排。
+    - **精确计数剪枝**：`ragMarkdown` 渲染后做 `getTokenCountAsync` 精确计数；若精确 token 超预算，从**最低分**逐条剔除后再渲染，**直至 ≤ ragBudget（v2.9.2 起无次数上限**——估算 1 token≈1.5 汉字对中文偏乐观，旧版 3+1 次上限会漏剔，召回段可超预算数千 token）。
+    - `ragMarkdown = renderJourneyMarkdown(装入条目, midMaxDay)`；`rag.hits` 记录每条命中的 text/score/parts（UI 用 `entryToDocText` 反查标记）。
+    - 检索抛错 → 保留二分窗口中段（有上限），仅放弃召回，`rag.active = false`（v2.9.2 起不再回退无上限全量）。
 8. **装配前文**：`historyData.前文 = joinNonEmpty([ragMarkdown, midMarkdown, tailText])`。
 9. **getCharPrompt（engine.js:544）**生成最终 `lastMessage`：
 
@@ -256,15 +264,16 @@ UI 的「发送预览」与窗口打开时的 `refreshStats()`（engine.js:1023�
   - 英文/数字 → 整词小写，保留内部 `._-` 连接（如 `3.14`）。
 - **BM25**：`k1=1.5, b=0.75`，`idf = log(1 + (N-d+0.5)/(d+0.5))`；每次调用对传入 docs 现建统计（远端条目集合每次生成都不同，**不缓存**）。
 - `minScore=0` 表示取所有有词项命中的文档（`RAG_MIN_SCORE`，engine.js:30）。
-- 设计史：v2.2.0 用 bge embedding 余弦做 RAG → v2.3.0 发现 embedding 对中文短查询召回不稳，**整体换成 BM25** 并删除模型资产、`ragToggle` 改默认开启 → v2.5.0 混合召回把 embedding 以「摘要语义分量」的形式加回来（§7），v2.6.0 恢复模型资产。
+- 设计史：v2.2.0 用 bge embedding 余弦做 RAG → v2.3.0 发现 embedding 对中文短查询召回不稳，**整体换成 BM25** 并删除模型资产、`ragToggle` 改默认开启 → v2.5.0 混合召回把 embedding 以「摘要语义分量」的形式加回来（§7），v2.6.0 恢复模型资产。v2.9.0 引入 Mode A（§7.4）：`subSummaryToggle` 开启时**不再走 BM25 回退**——缺失摘要的条目直接排除，BM25 回退仅保留给 Mode B（二级摘要关闭）路径。
 
 ---
 
-## 7. 混合召回打分（engine.js:706 `scoreFarEntries`）
+## 7. 混合召回打分（`scoreFarEntries` / `scoreFarEntriesModeA`）
 
-对每个远端条目二选一打分：
+- **Mode B**（`subSummaryToggle` 关）：走 §7.1-7.3 的 BM25 或 摘要单查询通道（与历史行为一致）。
+- **Mode A**（`subSummaryToggle` 开）：走 §7.4 的分段加权 max，且不依赖 BM25。
 
-### 7.1 摘要通道（条目有召回特化摘要 且 `NS.Embedder.isReady()`）
+### 7.1 摘要通道（条目有召回特化摘要 且 `NS.Embedder.isReady()`；Mode B 路径之一）
 
 ```
 score = 0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall
@@ -290,7 +299,24 @@ score = 0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall
 
 ### 7.3 buildSummaryMap（engine.js:675）
 
-收集全部楼层 `extra` 中有效摘要，键 = `JSON.stringify(故事历程条目)`（与 deepMerge 去重键一致，合并后的 `farEntries` 可直接命中）。条目级 `hasRecallFields` 校验（subsummary.js:137）：旧 schema（`{摘要, 关键}`）摘要返回 false → 回退 BM25 通道。
+收集全部楼层 `extra` 中有效摘要，键 = `JSON.stringify(故事历程条目)`（与 deepMerge 去重键一致，合并后的 `farEntries` 可直接命中）。条目级 `hasRecallFields` 校验（subsummary.js:137）：旧 schema（`{摘要, 关键}`）摘要返回 false → 回退 BM25 通道（仅 Mode B 路径）。
+
+### 7.4 Mode A 分段加权打分（`scoreFarEntriesModeA`, engine.js:867）
+
+`subSummaryToggle` 开启时启用；把查询切成多个**片段**，逐条远端条目取「各片段加权分」的最大值（max-pooling），使「用户提到某角色」与「窗口条目提到同一角色」两个信号都能独立触发召回。
+
+- **片段（fragments）**：
+  - `user` 片段：最新用户消息 `query`（权重 `FRAG_WEIGHT_USER=1.0`）。
+  - `winNew` 片段：窗口中最新的 1 条（权重 `FRAG_WEIGHT_WIN_NEW=0.95`）。
+  - `winNext` 片段：窗口倒数第 2 条（权重 `FRAG_WEIGHT_WIN_NEXT=0.90`）。
+  - `winOther` 片段：窗口其余条目（权重 `FRAG_WEIGHT_WIN_OTHER=0.80`）。
+  - 窗口为空时只保留 `user` 片段。
+- **每片段对远端条目 computes 一个 fragScore**（与 §7.1 同公式）：`0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall`。其中：
+  - `S_actor`：`user` 片段用 `nameMatches(a, query, nameList)`（IDF 之和，饱和 1）；`window` 片段用窗口条目 actor 与远端 actor 的**成对方差逐对匹配**（任一两集合人名 term 命中即得分，IDF 之和饱和 1）。
+  - `S_location`：`user` 片段 `query.includes(loc)`；`window` 片段 **层级匹配** `isHierMatch`（如 `酒馆.二楼` ⊂ `酒馆.二楼.卡座`，按 `.` 分段前缀匹配）。
+  - `S_event` / `S_recall` = `clamp01(cosine(fragVec, docVec))`，`fragVec` 由 `Embedder.encodeText(withQueryInstruction(片段文本))` 得到。
+- **最终分数**：`score = max_f(w_f · fragScore_f)`，并标注命中贡献最大的 `bestFrag`（UI 展示）。
+- **绝不 BM25**：Mode A 下缺失摘要的条目直接排除，不回退词法检索（设计决策：二级摘要开启即信任语义通道）。
 
 ---
 
@@ -316,6 +342,19 @@ score = 0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall
   - 触发时机：模块加载后 1s（`FIRST_SYNC_DELAY_MS`）、`MESSAGE_RECEIVED`（2s 防抖）、`CHAT_CHANGED`、SubSummary 生成批次结束（`done>0`）。`syncing` 互斥 + `syncQueued` 补跑一次。
   - 前提：`subSummaryToggle` 开。
 - **打分路径 `resolve(texts)`**：store 命中直接解码；缺失现场编码 + 回写；store 不可用降级为纯现场编码。
+
+---
+
+## 9.5 召回 LRU 缓存模块（recallcache.js，v2.9.0）
+
+- **目的**：让「发送新用户信息」只重算与新片段相关的远端条目，而非每次全量重算——缓存按**内容哈希**寻址，过期条目自然失效，避免脏缓存。
+- 三张 LRU（容量 `FRAG_VEC_CAP=4096` / `DOC_VEC_CAP=4096` / `PAIR_SCORE_CAP=262144`）：
+  - `fragVec`：片段文本 → 向量（受 `Embedder.model` 校验，模型变了全清）。
+  - `docVec`：键 = `楼层:条目下标` + **摘要哈希**（`SubSummary.textHash(JSON.stringify([actor,location,event,recall_when]))`）；摘要一变即 miss 重算。
+  - `pairScore`：键 = `片段文本 + ' ' + 条目键 + 双方摘要哈希` → `{fragScore, parts}`；跨发送复用逐对分数。
+- 接口：`getFragVec/setFragVec`、`getDocVecs/setDocVecs`、`getPair/setPair`、`summaryHash`、`clear`、`setModel`（模型变化清全部）、`onFill/setFilling/setFilled`（补全气泡总线）、`warmup`、`init`。
+- **后台预热 `warmup`**：解码所有楼层摘要向量（`EmbedStore.resolve`） + 编码最新用户消息片段 + 最近 `WARMUP_WINDOW_PREVIEW=16` 条事件片段；订阅 `MESSAGE_RECEIVED`(2s 防抖)/`GENERATION_ENDED`/`CHAT_CHANGED`/`Embedder.onStatus` 在空闲时预热。
+- 调用方：`scoreFarEntriesModeA` 全程经缓存读写（命中则跳过 `Embedder.encodeText` 与余弦计算），UI 不参与。
 
 ---
 
@@ -352,6 +391,12 @@ score = 0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall
   - `generateForRange(start, end, {force, onlyMissing})` — 范围生成（null 边界 = 全部楼层）
   - `eraseForRange(start, end)` — 强制擦除 extra（UI 要求输入口令「确认全部擦除」）
 
+### 10.6 发送前补生成 API（v2.9.0，供 Mode A 调用）
+
+- `getRecallMissingCount(startFloor, endFloor)`：遍历楼层区间内每条历程，返回「无摘要 / 旧 schema / 摘要未含 `recall_when`」的条目数（依赖 `hasRecallFields`）。
+- `ensureRecallSummaries(startFloor, endFloor)`：收集缺失目标（`collectRecallMissingTargets`）→ 经 `batchChain` 串行 `executeBatch` 补齐，返回 `{done, failed}`。应由 `buildPromptData` 在 Mode A 打分前 `await withTimeout(..., SUBSUMMARY_WAIT_TIMEOUT_MS)` 调用。
+- `onGenerationEnded` 自动补生成已重构为复用 `ensureRecallSummaries(lastFloor, lastFloor)`，与手动/自动路径统一。
+
 ### 10.5 默认摘要模板（settings.js:66-74）
 
 要求 LLM 输出召回特化 JSON：`actor`（角色名非代词）、`location`（层级从大到小）、`event`（谁在哪做了什么结果如何）、`recall_when`（2~4 条未来触发条件，不复述 event）。该 schema 是混合召回的数据来源——**模板改动会直接影响召回质量**，属产品数据。
@@ -378,11 +423,15 @@ score = 0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall
 - **故事历程**：楼层范围查询（起始/结束，空=全部）；单列表渲染每条历程：楼层号 + 天数|时间段|地点 + 历程正文 + 二级摘要块（有效→结构化展示 人物/地点/事件/触发 +「重新生成」；无效→「生成摘要」按钮）；**RAG 命中标记内联**在对应条目上（`hitMap` 以 `Engine.entryToDocText(entry)` 为键反查 `stats.rag.hits`）+ 分数明细徽章（`人x/y 地x/y 事0.xx 忆0.xx → 总分` 或 `BM25 0.xx`）；「仅显示选中楼层」复选框过滤到命中条目；「生成全部摘要」按钮（当前范围）。
 - **发送预览**：`Engine.getStats().lastMessage` 原文 `<pre>` 展示。
 
+### 11.2.1 补全气泡（v2.9.0）
+
+- Mode A 发送前若需补生成缺失摘要，`recallcache.js` 经 `onFill(status)` 总线广播 `{filling, count}` / `{filled}`；`coo-window.js` 订阅后在右下角浮动 `#coo-fill-bubble`（`.coo-fill-bubble`，`coo.css` 新增样式）显示「正在补全 N 条二级摘要…」，完成后淡出。仅 `subSummaryToggle` 开且确有缺失时弹出。
+
 ### 11.3 刷新链路
 
 - 打开/切换窗口 → `Engine.refreshStats()`（只读深拷贝 + 完整装配，**不改 ST chat**）→ `notifyStats` → `onStatsChanged` → `refreshActiveTabData`（stats 值、RAG 信息行、预览文本、当前 tab 数据重绘）。
 - `SubSummary.onStatus` → 状态行 + story tab 重绘；`Embedder.onStatus` / `EmbedStore.onStatus` → 对应状态行。
-- 侧边栏状态（失败楼层/tokenCount）随 `updateStatsValues` 更新。
+- 侧边栏状态（失败楼层/tokenCount）随 `updateStatsValues` 更新；「将发送词元数」行显示为 `当前 / tokenLimit`，超限时标红（`coo-stat-bad`）。
 
 ---
 
@@ -395,7 +444,7 @@ score = 0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall
 | `extensionToggle` | false | 总开关（关 → 拦截器直接 return，ST 用原始 chat） |
 | `roleCardToggle` | true | 角色卡功能（关 → 不注入 CHARACTER_CARD 与 NEW_CHARACTER_CARD 模板、不解析卡片段） |
 | `keepCount` | 3 | 正文 verbatim 保留的 assistant 回复条数 |
-| `tokenLimit` | 51200 | prompt token 上限 |
+| `tokenLimit` | 51200 | prompt token 上限（v2.9.1 起先扣除模板/包装开销再分配内容预算，保证最终 tokenCount ≤ 该值） |
 | `ragRatio` | 0.3 | 稀疏远期记忆预算 = tokenLimit × ragRatio |
 | `historyPrompt` | （中文 JSON 模板） | NEW_HISTORY 模板，产品数据 |
 | `characterPrompt` | （中文 JSON 模板） | NEW_CHARACTER_CARD 模板，产品数据 |
@@ -419,17 +468,24 @@ score = 0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall
 | 深拷贝 chat 再处理 | `mergeDataInfo` 写 `messageCount`，不能污染 ST 数据 |
 | 预览/刷新与生成走同一 `assembleFinalPrompt` | 保证「发送预览」与实际发送逐字一致（含 RAG 检索与首条后缀） |
 | token 计数基于最终 lastMessage（含模板包装） | 与实际发送内容一致，预算判定不漂移 |
+| 预算先扣除模板/包装开销（v2.9.1，contentLimit） | 最终消息恒含 STORY_DATA 骨架 + NEW_STORY_DATA 模板（默认模板 ~2k tokens）；不扣除时显示的 tokenCount 系统性超出 tokenLimit，限制越小超出比例越大 |
 | 正文 verbatim + 历程分层 | 近期对话必须原文（语气/细节），远期用结构化历程压缩；RAG 再捞回相关远期条目 |
 | 二分搜索窗口而非线性裁剪 | markdown 聚合渲染使成本非线性，二分保证找到预算内最大窗口 |
 | 单条装箱按「详细格式」计费 | 最坏成本估计，避免混入聚合天分组后超预算 |
 | BM25 中文 unigram+bigram 无词典分词 | 无词典依赖；bigram 保短语重叠；停用词只滤单字保 bigram |
-| 召回分数双通道归一到 [0,1) | 摘要语义分与 BM25 回退分可比，可混排 |
+| 召回分数双通道归一到 [0,1)（Mode B） | 摘要语义分与 BM25 回退分可比，可混排；Mode A 仅语义通道，无 BM25 |
 | actor 分用 IDF 绝对饱和 | 抑制高频主角的无区分度命中，稀有角色/具体人物才拿满分 |
 | 楼层级 FNV 哈希失效（非逐条） | 楼层 story block 是整体重写的（重新生成/编辑/swipe），逐条哈希无意义；整层清空最简单正确 |
 | 摘要存 `extra`、向量存 `chat_metadata` | extra per-消息随 chat 走；metadata per-chat 存跨消息的派生物（向量按文本哈希跨楼层去重） |
 | 摘要生成串行 + 模块级 running 互斥 | LLM 限流友好；自动/手动互斥避免 extra 写竞争 |
 | 二级摘要手动生成不受总开关限制 | 开关只表达「自动行为」意愿（用户确认的决策，见 docs/sub-summary-handoff.md §9） |
 | 摘要 schema 含 `recall_when` | 面向召回而非阅读：「未来何时想起」比事件复述更有检索区分度 |
+| Mode A 分段加权 max（v2.9.0） | 用户片段 + 各窗口条目片段独立计分后取 max → 任一信号（用户提角色 / 上下文提角色）都可触发召回，且天然按重要性加权（最新窗口 0.95 > 次新 0.90 > 其他 0.80 > 用户 1.0） |
+| Mode A 绝不 BM25 回退 | 二级摘要开启即信任结构化语义通道；未配置连接的缺失条目直接排除，不让词法检索污染语义排序 |
+| 发送前补生成（`ensureRecallSummaries` + 30s 超时） | 二级摘要开启时，缺失摘要先补齐再打分；超时降级为「缺哪些排除哪些」并 warn，不让一次补全阻塞整次生成 |
+| 召回 LRU 内容寻址缓存（v2.9.0） | fragVec/docVec/pairScore 按内容哈希寻址，新发送只重算新相关远端条目；摘要一变即 miss，无脏缓存；模型切换全清 |
+| 装箱按估算 1.5 字符/token + 精确计数剪枝 | 估算优先保速度（`getTokenCountAsync` 调用重，尽量少调）；精确计数**无次数上限**地从最低分剔除至 ≤ ragBudget（v2.9.2：估算对中文偏乐观，旧版 3+1 次上限导致召回段超预算、最终 tokenCount 超限） |
+| 正文超 midBudget 时从最旧整条 assistant 消息丢弃（v2.9.2） | 单条超长回复会让 正文+角色卡 超 midBudget，旧版无上限直接溢出 tokenLimit；丢整条而非截断文本，且其历程条目回归中段不丢失 |
 | fetch 与 profile 双连接方式 | fetch 简单但 Key 过浏览器+CORS 风险；profile 走 ST 服务端解密更安全（UI 文案已注明） |
 | Embedder 失败全链降级 | embedding 是增强项，BM25 兜底保证核心功能不中断 |
 | UI 全 createElement + 事件委托 | AGENTS.md 硬约束；委托使 tab 每次重建 DOM 无需重绑 |
@@ -463,13 +519,17 @@ score = 0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall
 node test/smoke-hybrid-recall.cjs
 ```
 
-- mock `window/document/navigator` + `NS.bridge`（假 `getTokenCountAsync` = 长度/3，假 `eventSource`），用 `(0,eval)` 按加载序注入 `settings/engine/subsummary/retrieval` 四个模块（**不加载 embedding/embedstore**——Node 无模型；`scoreFarEntries` 对缺失 `NS.EmbedStore` 有回退路径）。
-- 假 Embedder：确定性字符散布向量 + 真实余弦，保证断言稳定。
-- 构造 4 楼层 × 2 条目假聊天（含 6 条新 schema 摘要、1 条旧 schema、1 条无摘要），跑 3 个场景：
-  - **A**（Embedder 就绪，稀有角色查询）：chat 压成 1 条、RAG 激活、最优命中是目标条目、走 summary 通道、actor 饱和=1、地点 2/2、分数 ∈ [0,1]。
-  - **C**（IDF 抑制）：只提高频主角时纯主角条目 actorScore ≈ 0.24 < 0.3，远低于稀有角色饱和分。
-  - **B**（Embedder 未就绪）：全池走 bm25 通道、分数 ∈ [0,1)。
-- 改召回打分/装配逻辑后**必须跑此测试**；新增场景往 `runCase` + `check` 里加。
+- mock `window/document/navigator` + `NS.bridge`（假 `getTokenCountAsync` = 长度/1 且计数 `tokenCallCount`，假 `eventSource`），用 `(0,eval)` 按加载序注入 `settings/engine/subsummary/retrieval` 四个模块（**不加载 embedding/embedstore**——Node 无模型；`scoreFarEntries` 对缺失 `NS.EmbedStore` 有回退路径）。
+- 额外 mock：`NS.RecallCache`（内存、内容寻址忠实实现，验证 LRU 跨发送复用）、`Retriever.retrieve` 间谍（验证 Mode A 不调用 BM25）、`encodeBatch` 计数（验证缓存命中后不再编码）。
+- 构造 4 楼层 × 2 条目假聊天（含 6 条新 schema 摘要、1 条旧 schema、1 条无摘要），跑 8 个场景：
+  - **A**（Mode B，Embedder 就绪，稀有角色查询）：chat 压成 1 条、RAG 激活、最优命中是目标条目、走 summary 通道、actor 饱和=1、地点 2/2、分数 ∈ [0,1]。
+  - **C**（Mode B，IDF 抑制）：只提高频主角时纯主角条目 actorScore ≈ 0.24 < 0.3，远低于稀有角色饱和分。
+  - **B**（Mode B，Embedder 未就绪）：全池走 bm25 通道、分数 ∈ [0,1)。
+  - **A'**（Mode A，全部有摘要）：RAG 激活、全部 summary 通道、**绝不调用 `Retriever.retrieve`**、有 `bestFrag` 标记、最优命中是陈九仓库条目。
+  - **D**（Mode A + LRU）：同内容连续两次装配，第二次 `encodeBatch` 计数 = 0（缓存命中）。
+  - **E**（Mode A + 装箱剪枝）：精确计数（假 1 字符/token，比估算乐观）触发 `getTokenCountAsync` 多次且命中数 < 远端条目数。
+  - **F**（Mode A + 发送前补生成）：e7 旧 schema + e8 无摘要 → 缺失 >0；`ensureRecallSummaries` 被调用 1 次且补后缺失归 0；全部走 summary 通道。
+- 改召回打分/装配/缓存逻辑后**必须跑此测试**；新增场景往 `runCase` + `check` 里加。
 
 ### 15.2 浏览器手工验证清单
 
@@ -496,6 +556,10 @@ node test/smoke-hybrid-recall.cjs
 | 2.6.0 | 故事 tab RAG 命中标记内联到条目；仅显示选中楼层 |
 | (2.6.x) | 批量状态全局进度；失败重试 3×1s；生成所有缺失；擦除口令确认 |
 | 2.8.0 | **向量持久化**（chat_metadata base64 + 文本哈希键 + 后台完整性同步 + 打分路径 store 优先） |
+| 2.9.0 | **Mode A 分段加权召回**（用户+窗口片段 max-pooling，权重 1.0/0.95/0.90/0.80）+ **召回 LRU 内容寻址缓存**（fragVec/docVec/pairScore）+ **发送前补生成二级摘要**（30s 超时，无 BM25 回退）+ **装箱估算(1.5字符/token)+精确计数剪枝** + **补全气泡 UI** |
+| 2.9.1 | **预算扣除模板/包装开销**（contentLimit = tokenLimit - overheadTokens），最终 tokenCount 不再系统性超出 tokenLimit；侧边栏 token 行显示 `当前 / 上限` 且超限标红 |
+| 2.9.2 | **tokenLimit 硬保证**：召回段精确计数剔除去掉 3+1 次上限（剔除至 ≤ ragBudget，修复候选装多）；正文超 midBudget 时从最旧整条 assistant 消息丢弃；RAG 失败回退保留有上限窗口中段 |
+| 2.9.3 | 侧边栏 token 行标签中文化：`Chat History Token Count` → `将发送词元数`（修复窄侧边栏截断） |
 
 ---
 

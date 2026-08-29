@@ -284,8 +284,8 @@
 
         const failedRow = createStatRow('失败的楼层', 'failedFloors');
         failedRow.title = '失败的楼层';
-        const tokenRow = createStatRow('Chat History Token Count', 'tokenCount');
-        tokenRow.title = 'Chat History Token Count';
+        const tokenRow = createStatRow('将发送词元数', 'tokenCount');
+        tokenRow.title = '将发送词元数（当前 / Token 限制）';
         footer.append(failedRow, tokenRow);
         return footer;
     }
@@ -976,8 +976,11 @@
             failed.textContent = stats.failedFloors.length > 0 ? stats.failedFloors.join(', ') : '无';
             failed.classList.toggle('coo-stat-bad', stats.failedFloors.length > 0);
         });
+        const tokenLimit = Settings.get('tokenLimit');
         scope.querySelectorAll('[data-coo-field="tokenCount"]').forEach((token) => {
-            token.textContent = String(stats.tokenCount);
+            const count = stats.tokenCount;
+            token.textContent = `${count} / ${tokenLimit}`;
+            token.classList.toggle('coo-stat-bad', count > tokenLimit);
         });
         updateRagDisplay(scope, stats.rag);
         renderPreviewText(scope);
@@ -1286,6 +1289,34 @@
     }
 
     // ------------------------------------------------------------------
+    // 发送前"补漏"二级摘要气泡（NS.RecallCache.onFill 驱动）
+    // ------------------------------------------------------------------
+    const FILL_BUBBLE_ID = 'coo-fill-bubble';
+
+    function showFillBubble(count) {
+        const root = document.getElementById(ROOT_ID) || ensureRoot();
+        let bubble = document.getElementById(FILL_BUBBLE_ID);
+        if (!bubble) {
+            bubble = document.createElement('div');
+            bubble.id = FILL_BUBBLE_ID;
+            bubble.className = 'coo-fill-bubble';
+            root.appendChild(bubble);
+        }
+        bubble.textContent = `正在补漏 ${count} 个二级摘要…`;
+        bubble.hidden = false;
+    }
+
+    function hideFillBubble() {
+        const bubble = document.getElementById(FILL_BUBBLE_ID);
+        if (bubble) bubble.hidden = true;
+    }
+
+    function onFillStatusChanged(state) {
+        if (state && state.filling) showFillBubble(state.count);
+        else hideFillBubble();
+    }
+
+    // ------------------------------------------------------------------
     // Shell visibility
     // ------------------------------------------------------------------
 
@@ -1408,6 +1439,7 @@
         if (NS.SubSummary) NS.SubSummary.onStatus(onSubSummaryStatusChanged);
         if (NS.Embedder) NS.Embedder.onStatus(onEmbedderStatusChanged);
         if (NS.EmbedStore) NS.EmbedStore.onStatus(onEmbedStoreStatusChanged);
+        if (NS.RecallCache) NS.RecallCache.onFill(onFillStatusChanged);
         watchConnectionProfiles(root);
         startExtensionEntryRetry();
     }

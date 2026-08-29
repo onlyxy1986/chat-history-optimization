@@ -22,6 +22,8 @@
     const statusListeners = new Set();
     let running = false;
     let initialized = false;
+    // 所有批次（自动触发 / 发送前补生成）经此链串行，保证不并发生成
+    let batchChain = Promise.resolve();
 
     // ------------------------------------------------------------------
     // 哈希
@@ -496,6 +498,61 @@
         return targets;
     }
 
+    // 收集楼层范围内「无 s 或 s 不含可用召回字段（旧 schema 摘要）」的条目，
+    // 这些条目在 Mode A（二级摘要功能开启）召回前必须先补齐生成。
+    function collectRecallMissingTargets(startFloor, endFloor) {
+        const chat = NS.bridge.getCurrentChat ? NS.bridge.getCurrentChat() : null;
+        if (!chat || !Array.isArray(chat)) return null;
+        const totalFloors = Math.max(0, chat.length - 1);
+        if (totalFloors < 1) return null;
+
+        let start = toFloor(startFloor);
+        let end = toFloor(endFloor);
+        if (start === null) start = 1;
+        if (end === null) end = totalFloors;
+        start = Math.max(1, start);
+        end = Math.min(totalFloors, end);
+        if (start > end) {
+            const tmp = start;
+            start = end;
+            end = tmp;
+        }
+
+        const targets = [];
+        for (let floor = start; floor <= end; floor++) {
+            const floorData = getFloorJourney(floor);
+            if (!floorData) continue;
+            const { valid, summaries } = getFloorSummaries(floor);
+            for (let i = 0; i < floorData.journey.length; i++) {
+                const existing = valid ? summaries[i] : null;
+                const s = (existing && typeof existing === 'object') ? existing.s : undefined;
+                if (!s || !hasRecallFields(s)) targets.push({ floor, index: i });
+            }
+        }
+        return targets;
+    }
+
+    function getRecallMissingCount(startFloor, endFloor) {
+        const targets = collectRecallMissingTargets(startFloor, endFloor);
+        return targets ? targets.length : 0;
+    }
+
+    // 召回补生成入口（Mode A 发送前调用）：经 promise 链串行，
+    // 若已有批次进行中则挂在其后，结束后重收集仍未补齐的条目再跑，
+    // 消除 onGenerationEnded 原实现在 running 时直接忽略导致的竞态。
+    function ensureRecallSummaries(startFloor, endFloor) {
+        const run = async () => {
+            const targets = collectRecallMissingTargets(startFloor, endFloor);
+            if (!targets || targets.length === 0) {
+                return { done: 0, failed: 0, total: 0 };
+            }
+            return executeBatch(targets, false);
+        };
+        const p = batchChain.then(run, run);
+        batchChain = p.catch(() => {});
+        return p;
+    }
+
     async function generateForRange(startFloor, endFloor, options = {}) {
         if (running) {
             console.warn('[Chat History Optimization] 二级摘要生成进行中，忽略本次请求');
@@ -594,7 +651,7 @@
         if (targets.length === 0) return;
 
         console.log(`[Chat History Optimization] 自动生成二级摘要：楼层 ${lastFloor} 缺失 ${targets.length} 条`);
-        executeBatch(targets, false).catch((e) => {
+        ensureRecallSummaries(lastFloor, lastFloor).catch((e) => {
             console.error('[Chat History Optimization] 自动生成二级摘要失败:', e);
         });
     }
@@ -618,6 +675,8 @@
         generateForEntry,
         generateForRange,
         eraseForRange,
+        getRecallMissingCount,
+        ensureRecallSummaries,
         onStatus,
         getStatus,
         init,
