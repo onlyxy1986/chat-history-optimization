@@ -136,6 +136,7 @@ AI 回复末尾（由 `getCharPrompt` 注入的模板要求）输出：
 - 取第一个 `{...}` 后 `JSON.parse`。
 - `NEW_HISTORY` **必选**：缺失/解析失败 → 该楼层进 `failedFloors`（UI 红色显示）。
 - `NEW_CHARACTER_CARD` **可选**：无新角色或角色卡功能关闭（`roleCardToggle`）时合法缺失。
+- **失败原因明细（v2.10.2）**：`mergeDataInfo` 同时收集 `failedDetails = [{index, reasons:[...]}]`（每层去重原因，如「缺少 NEW_STORY_DATA 块 / 缺少 NEW_HISTORY 区段 / NEW_HISTORY 解析错误 / NEW_CHARACTER_CARD 解析错误」）。生成拦截器对**新出现**的失败楼层（相对上次 stats）经 `Engine.onParseFail` 总线广播，UI 弹出解析失败气泡（见 §11.2.2）；历史失败不重复提示。
 
 ### 4.3 模板解析（`Engine.parseTemplate`）
 
@@ -178,8 +179,9 @@ replaceChatHistoryWithDetailsV2
  ├─ result = await assembleFinalPrompt(chatCopy, {runRag: true})
  │    └─ buildPromptData(chatCopy, {runRag})        # 详见 5.2
  │    └─ 首条信息特判 + FIRST_MESSAGE_SUFFIX
- ├─ chat[chat.length-1].mes = result.lastMessage    # 先写最后一条
- ├─ notifyStats(...)                                # 广播统计给 UI
+  ├─ chat[chat.length-1].mes = result.lastMessage    # 先写最后一条
+  ├─ notifyParseFail(新失败楼层 failedDetails)        # 仅相对上次 stats 新增的失败，UI 弹气泡
+  ├─ notifyStats(...)                                # 广播统计给 UI
  └─ chat.length = 0; chat.push(chat[原最后一条])     # 原地替换为单条消息
 ```
 
@@ -190,7 +192,7 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
 1. **模板解析**：`parseTemplate(historyPrompt)`；`roleCardToggle` 开时还需 `parseTemplate(characterPrompt)`。解析失败仅 console.error，不中断（生成可能异常，UI 模板 tab 有有效性徽章）。
 2. **mergeDataInfo**：遍历楼层 1..n 的 assistant 消息，提取每层 `NEW_HISTORY`/`NEW_CHARACTER_CARD`，用 `deepMerge` 累积成全局 `historyData`（含 `故事历程` 数组）与 `characterData`（角色名→角色卡）。同时：
    - 每层写入 `item.messageCount = historyObj.故事历程.length`（该层贡献的历程条数，供正文覆盖计算）；
-   - 任何一层缺块/解析失败 → `failedFloors.push(j)`。
+    - 任何一层缺块/解析失败 → `failedFloors.push(j)`，并记录 `failedDetails` 原因（见 §4.2）。
 3. **processCharacterData 角色卡淘汰与蒸馏**：
    - `MAX_SLOTS = 10`。
    - 打分：最新用户消息（`chat[chat.length-1].mes`）中 `nameMatches` 命中 → `Constants.ROLE_CARD_MENTION_SCORE`（必保）；否则取**最后一次出现**的消息下标作为分数；都没出现 → `-1`。
@@ -428,6 +430,10 @@ score = 0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall
 
 - Mode A 发送前若需补生成缺失摘要，`recallcache.js` 经 `onFill(status)` 总线广播 `{filling, count}` / `{filled}`；`coo-window.js` 订阅后在右下角浮动 `#coo-fill-bubble`（`.coo-fill-bubble`，`coo.css` 新增样式）显示「正在补漏 N 个二级摘要…」，完成后淡出。仅 `subSummaryToggle` 开且确有缺失时弹出。
 
+### 11.2.2 解析失败气泡（v2.10.2）
+
+- 生成拦截器检测到**新出现**的 `<NEW_STORY_DATA>` 解析失败楼层时，`engine.js` 经 `onParseFail(details)` 总线广播 `[{index, reasons}]`（engine 不碰 DOM，模式同 onStats/onFill）；`coo-window.js` 订阅后在右下角浮动 `#coo-parsefail-bubble`（`.coo-parsefail-bubble`，红色，位于补漏气泡上方）显示「NEW_STORY_DATA 解析失败（楼层X：原因；…」，`Constants.PARSE_FAIL_BUBBLE_TIMEOUT_MS`（默认 8s）后自动隐藏；重复发送不重复弹出（历史失败楼层不触发）。
+
 ### 11.3 刷新链路
 
 - 打开/切换窗口 → `Engine.refreshStats()`（只读深拷贝 + 完整装配，**不改 ST chat**）→ `notifyStats` → `onStatsChanged` → `refreshActiveTabData`（stats 值、RAG 信息行、预览文本、当前 tab 数据重绘）。
@@ -521,8 +527,8 @@ node test/smoke-hybrid-recall.cjs
 ```
 
 - mock `window/document/navigator` + `NS.bridge`（假 `getTokenCountAsync` = 长度/1 且计数 `tokenCallCount`，假 `eventSource`），用 `(0,eval)` 按加载序注入 `settings/engine/subsummary/retrieval` 四个模块（**不加载 embedding/embedstore**——Node 无模型；`scoreFarEntries` 对缺失 `NS.EmbedStore` 有回退路径）。
-- 额外 mock：`NS.RecallCache`（内存、内容寻址忠实实现，验证 LRU 跨发送复用）、`Retriever.retrieve` 间谍（验证 Mode A 不调用 BM25）、`encodeBatch` 计数（验证缓存命中后不再编码）。
-- 构造 4 楼层 × 2 条目假聊天（含 6 条新 schema 摘要、1 条旧 schema、1 条无摘要），跑 7 个场景：
+- 额外 mock：`NS.RecallCache`（内存、内容寻址忠实实现，验证 LRU 跨发送复用）、`Retriever.retrieve` 间谍（验证 Mode A 不调用 BM25）、`encodeBatch` 计数（验证缓存命中后不再编码）、`Engine.onParseFail` 订阅间谍（验证解析失败气泡广播）。
+- 构造 4 楼层 × 2 条目假聊天（含 6 条新 schema 摘要、1 条旧 schema、1 条无摘要），跑 8 个场景：
   - **A**（Mode B，Embedder 就绪，稀有角色查询）：chat 压成 1 条、RAG 激活、最优命中是目标条目、走 summary 通道、actor 饱和=1、地点 2/2、分数 ∈ [0,1]。
   - **C**（Mode B，IDF 抑制）：只提高频主角时纯主角条目 actorScore ≈ 0.24 < 0.3，远低于稀有角色饱和分。
   - **B**（Mode B，Embedder 未就绪）：全池走 bm25 通道、分数 ∈ [0,1)。
@@ -530,6 +536,7 @@ node test/smoke-hybrid-recall.cjs
   - **D**（Mode A + LRU）：同内容连续两次装配，第二次 `encodeBatch` 计数 = 0（缓存命中）。
   - **E**（Mode A + 装箱剪枝）：精确计数（假 1 字符/token，比估算乐观）触发 `getTokenCountAsync` 多次且命中数 < 远端条目数。
   - **F**（Mode A + 发送前补生成）：e7 旧 schema + e8 无摘要 → 缺失 >0；`ensureRecallSummaries` 被调用 1 次且补后缺失归 0；全部走 summary 通道。
+  - **G**（解析失败气泡总线）：某楼层 NEW_STORY_DATA 块 JSON 损坏 → 拦截器经 `onParseFail` 广播该楼层与原因；同内容再次发送不重复广播（历史失败不触发）。
 - 改召回打分/装配/缓存逻辑后**必须跑此测试**；新增场景往 `runCase` + `check` 里加。
 
 ### 15.2 浏览器手工验证清单
@@ -561,6 +568,7 @@ node test/smoke-hybrid-recall.cjs
 | 2.9.1 | **预算扣除模板/包装开销**（contentLimit = tokenLimit - overheadTokens），最终 tokenCount 不再系统性超出 tokenLimit；侧边栏 token 行显示 `当前 / 上限` 且超限标红 |
 | 2.9.2 | **tokenLimit 硬保证**：召回段精确计数剔除去掉 3+1 次上限（剔除至 ≤ ragBudget，修复候选装多）；正文超 midBudget 时从最旧整条 assistant 消息丢弃；RAG 失败回退保留有上限窗口中段 |
 | 2.9.3 | 侧边栏 token 行标签中文化：`Chat History Token Count` → `将发送词元数`（修复窄侧边栏截断） |
+| 2.10.2 | **NEW_STORY_DATA 解析失败气泡**：`mergeDataInfo` 收集每层失败原因（`failedDetails`）；生成拦截器对新出现失败楼层经 `Engine.onParseFail` 总线广播，UI 右下角红色气泡提示（8s 自动隐藏，历史失败不重复弹出） |
 | 2.10.1 | `config/` 目录重命名为 `core/`（功能模块目录名更贴切）；无行为变更，冒烟测试全过 |
 | 2.10.0 | **可调常数集中到 `core/constant.js`**（`NS.Constants`，每项附调整指导）：召回打分权重/IDF 饱和/BM25 参数/停用词、角色卡槽位/蒸馏阈值、片段权重、装箱估算、重试、embedding 缓存/批大小、持久化与预热延迟、LRU 容量、菜单挂载时机；各模块改经 `NS.Constants` 读取；无行为变更，冒烟测试 7 场景全过 |
 

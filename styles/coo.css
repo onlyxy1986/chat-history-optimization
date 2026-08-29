@@ -1351,3 +1351,25 @@
 #coo-root .coo-fill-bubble[hidden] {
     display: none;
 }
+
+/* ------------------------------ NEW_STORY_DATA 解析失败气泡 ------------------------------- */
+
+#coo-root .coo-parsefail-bubble {
+    position: fixed;
+    right: 18px;
+    bottom: 78px;
+    z-index: 10001;
+    max-width: 280px;
+    padding: 10px 14px;
+    border-radius: 10px;
+    background: var(--coo-danger, #c0392b);
+    color: #fff;
+    font-size: 13px;
+    line-height: 1.4;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+    opacity: 0.96;
+}
+
+#coo-root .coo-parsefail-bubble[hidden] {
+    display: none;
+}

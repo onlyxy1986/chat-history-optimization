@@ -1318,6 +1318,39 @@
     }
 
     // ------------------------------------------------------------------
+    // <NEW_STORY_DATA> 解析失败气泡（NS.Engine.onParseFail 驱动，自动隐藏）
+    // ------------------------------------------------------------------
+    const PARSE_FAIL_BUBBLE_ID = 'coo-parsefail-bubble';
+    let parseFailTimer = null;
+
+    function showParseFailBubble(details) {
+        const root = document.getElementById(ROOT_ID) || ensureRoot();
+        let bubble = document.getElementById(PARSE_FAIL_BUBBLE_ID);
+        if (!bubble) {
+            bubble = document.createElement('div');
+            bubble.id = PARSE_FAIL_BUBBLE_ID;
+            bubble.className = 'coo-parsefail-bubble';
+            bubble.hidden = true;
+            root.appendChild(bubble);
+        }
+        const lines = (details || [])
+            .map(d => `楼层${d.index}：${(d.reasons || []).join('；')}`);
+        bubble.textContent = `NEW_STORY_DATA 解析失败（${lines.join('；')}）`;
+        bubble.hidden = false;
+        if (parseFailTimer) clearTimeout(parseFailTimer);
+        parseFailTimer = setTimeout(hideParseFailBubble, Constants.PARSE_FAIL_BUBBLE_TIMEOUT_MS);
+    }
+
+    function hideParseFailBubble() {
+        if (parseFailTimer) {
+            clearTimeout(parseFailTimer);
+            parseFailTimer = null;
+        }
+        const bubble = document.getElementById(PARSE_FAIL_BUBBLE_ID);
+        if (bubble) bubble.hidden = true;
+    }
+
+    // ------------------------------------------------------------------
     // Shell visibility
     // ------------------------------------------------------------------
 
@@ -1441,6 +1474,7 @@
         if (NS.Embedder) NS.Embedder.onStatus(onEmbedderStatusChanged);
         if (NS.EmbedStore) NS.EmbedStore.onStatus(onEmbedStoreStatusChanged);
         if (NS.RecallCache) NS.RecallCache.onFill(onFillStatusChanged);
+        Engine.onParseFail(showParseFailBubble);
         watchConnectionProfiles(root);
         startExtensionEntryRetry();
     }

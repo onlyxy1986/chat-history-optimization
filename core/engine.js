@@ -74,6 +74,26 @@
         return () => statsListeners.delete(listener);
     }
 
+    // <NEW_STORY_DATA> 解析失败总线：拦截器检测到新失败楼层时广播
+    // [{index, reasons: [原因, ...]}]，UI 订阅渲染提示气泡（engine 不碰 DOM）。
+    const parseFailListeners = new Set();
+
+    function onParseFail(listener) {
+        parseFailListeners.add(listener);
+        return () => parseFailListeners.delete(listener);
+    }
+
+    function notifyParseFail(details) {
+        if (!details || details.length === 0) return;
+        for (const listener of parseFailListeners) {
+            try {
+                listener(details);
+            } catch (e) {
+                console.error('[Chat History Optimization] parse-fail listener error', e);
+            }
+        }
+    }
+
     function getStats() {
         return {
             tokenCount: lastStats.tokenCount,
@@ -237,8 +257,15 @@
 
     function mergeDataInfo(chat, historyTemplate, characterTemplate) {
         let failedChars = [];
+        const failedReasons = {}; // 楼层下标 -> [原因, ...]
         let historyData = {};
         let characterData = {};
+
+        function markFailed(j, reason) {
+            if (!failedChars.includes(j)) failedChars.push(j);
+            if (!failedReasons[j]) failedReasons[j] = [];
+            if (!failedReasons[j].includes(reason)) failedReasons[j].push(reason);
+        }
 
         for (let j = 1; j < chat.length; j++) {
             const item = chat[j];
@@ -256,7 +283,6 @@
                 }
                 if (matches.length > 0) {
                     const block = matches[matches.length - 1][1];
-                    let failedSection = false;
 
                     // --- NEW_HISTORY 区段：必选 ---
                     const historyMatch = block.match(/<NEW_HISTORY>((?:(?!<NEW_HISTORY>)[\s\S])*?)<\/NEW_HISTORY>/i);
@@ -273,13 +299,13 @@
                             } catch (e) {
                                 console.error(`[Chat History Optimization] NEW_HISTORY JSON parse error at chat[${j}]:`, e);
                                 console.error(`[Chat History Optimization] NEW_HISTORY content:`, objMatch[0]);
-                                failedSection = true;
+                                markFailed(j, 'NEW_HISTORY 解析错误');
                             }
                         } else {
-                            failedSection = true;
+                            markFailed(j, 'NEW_HISTORY 缺少 JSON 对象');
                         }
                     } else {
-                        failedSection = true; // 缺 NEW_HISTORY 视为失败
+                        markFailed(j, '缺少 NEW_HISTORY 区段'); // 缺 NEW_HISTORY 视为失败
                     }
 
                     // --- NEW_CHARACTER_CARD 区段：可选（无新角色/开关关闭时合法缺失）---
@@ -296,19 +322,15 @@
                                 } catch (e) {
                                     console.error(`[Chat History Optimization] NEW_CHARACTER_CARD JSON parse error at chat[${j}]:`, e);
                                     console.error(`[Chat History Optimization] NEW_CHARACTER_CARD content:`, objMatch[0]);
-                                    failedSection = true;
+                                    markFailed(j, 'NEW_CHARACTER_CARD 解析错误');
                                 }
                             } else {
-                                failedSection = true;
+                                markFailed(j, 'NEW_CHARACTER_CARD 缺少 JSON 对象');
                             }
                         }
                     }
-
-                    if (failedSection) {
-                        failedChars.push(j);
-                    }
                 } else {
-                    failedChars.push(j);
+                    markFailed(j, '缺少 NEW_STORY_DATA 块');
                 }
             }
         }
@@ -321,6 +343,7 @@
             "historyData": historyData,
             "characterData": characterData,
             "failedFloors": failedChars,
+            "failedDetails": failedChars.map(j => ({ index: j, reasons: failedReasons[j] || [] })),
         };
     }
 
@@ -1286,6 +1309,7 @@ ${newCharacterCardTemplate}
             allCharacterData: mergedDataInfo.characterData,
             activeRoleNames: Object.keys(characterData),
             failedFloors: mergedDataInfo.failedFloors,
+            failedDetails: mergedDataInfo.failedDetails,
             ragMarkdown,
             lastMessage,
             tokenCount,
@@ -1352,6 +1376,12 @@ ${newCharacterCardTemplate}
 
         chat[chat.length - 1]['mes'] = result.lastMessage;
 
+        // 只对新出现的失败楼层弹气泡，历史失败不重复提示
+        const newlyFailed = result.failedFloors.filter(i => !lastStats.failedFloors.includes(i));
+        if (newlyFailed.length > 0) {
+            notifyParseFail(result.failedDetails.filter(d => newlyFailed.includes(d.index)));
+        }
+
         notifyStats({
             failedFloors: result.failedFloors,
             roles: JSON.parse(JSON.stringify(result.allCharacterData)),
@@ -1383,6 +1413,7 @@ ${newCharacterCardTemplate}
         parseTemplate,
         validateTemplate,
         onStats,
+        onParseFail,
         getStats,
         refreshStats,
         getFloorStoryBlock,

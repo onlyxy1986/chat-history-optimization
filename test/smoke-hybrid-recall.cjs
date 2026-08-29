@@ -55,6 +55,10 @@ NS.RecallCache = (function () {
     };
 })();
 
+// onParseFail 广播间谍（验证解析失败气泡总线只对新失败楼层触发）
+const parseFailEvents = [];
+NS.Engine.onParseFail((details) => parseFailEvents.push(details));
+
 // Retriever 调用间谍（验证 Mode A 绝不走 BM25）
 let retrieveCount = 0;
 if (NS.Retriever) {
@@ -307,4 +311,20 @@ function validSummaryFor(entry) {
     check('F: 发送前触发补生成', genCalls === 1, genCalls);
     check('F: 补生成后缺失为 0', countMissing() === 0, countMissing());
     check('F: RAG 激活且全部走 summary 通道', ragF && ragF.active === true && ragF.hits.length > 0 && ragF.hits.every(h => h.parts.source === 'summary'), ragF.hits);
+
+    // 场景 G（解析失败气泡总线）：楼层 3（第 2 个 assistant 楼层）的 NEW_HISTORY JSON 损坏
+    // → onParseFail 广播该楼层与原因；同内容再次发送不重复广播（历史失败楼层不触发）
+    const brokenMes = '损坏楼层\n<NEW_STORY_DATA>\n<NEW_HISTORY>\n{ "故事历程": [ { 损坏\n</NEW_HISTORY>\n</NEW_STORY_DATA>';
+    parseFailEvents.length = 0;
+    buildChat('陈九提到了码头仓库的货物', true);
+    chat[3].mes = brokenMes;
+    installFakeEmbedder(true);
+    NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings(modeAConfig());
+    await quiet(globalThis.replaceChatHistoryWithDetailsV2(chat, 4096, null, 0));
+    check('G: 首次发送广播一次', parseFailEvents.length === 1, parseFailEvents.length);
+    check('G: 广播含楼层 3 且原因非空', parseFailEvents[0] && parseFailEvents[0].some(d => d.index === 3 && d.reasons.length > 0), parseFailEvents[0]);
+    buildChat('陈九提到了码头仓库的货物', true);
+    chat[3].mes = brokenMes;
+    await quiet(globalThis.replaceChatHistoryWithDetailsV2(chat, 4096, null, 0));
+    check('G: 相同失败再次发送不重复广播', parseFailEvents.length === 1, parseFailEvents.length);
 })().catch(e => { console.error('TEST ERROR', e); process.exit(1); });
