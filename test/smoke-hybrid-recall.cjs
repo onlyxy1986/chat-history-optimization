@@ -29,11 +29,11 @@ function load(rel) {
     // eslint-disable-next-line no-eval
     (0, eval)(code);
 }
-load('config/constant.js');
-load('config/settings.js');
-load('config/engine.js');
-load('config/subsummary.js');
-load('config/retrieval.js');
+load('core/constant.js');
+load('core/settings.js');
+load('core/engine.js');
+load('core/subsummary.js');
+load('core/retrieval.js');
 
 const NS = window.ChatOptimizationV2;
 const Settings = NS.Settings;

@@ -13,18 +13,18 @@ import { ConnectionManagerRequestService } from '../../../extensions/shared.js';
     'use strict';
 
     const NAMESPACE = 'ChatOptimizationV2';
-    const VERSION = '2.10.0';
+    const VERSION = '2.10.1';
     const baseUrl = new URL('./', import.meta.url).href;
 
     const MODULES = [
-        'config/constant.js',
-        'config/settings.js',
-        'config/engine.js',
-        'config/subsummary.js',
-        'config/retrieval.js',
-        'config/embedding.js',
-        'config/embedstore.js',
-        'config/recallcache.js',
+        'core/constant.js',
+        'core/settings.js',
+        'core/engine.js',
+        'core/subsummary.js',
+        'core/retrieval.js',
+        'core/embedding.js',
+        'core/embedstore.js',
+        'core/recallcache.js',
         'ui/coo-window.js',
     ];
 
