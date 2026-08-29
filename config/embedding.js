@@ -183,6 +183,7 @@
     }
 
     NS.Embedder = Object.freeze({
+        model: MODEL_ID,
         init,
         isReady,
         getStatus,

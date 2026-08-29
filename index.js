@@ -3,8 +3,8 @@
 // SillyTavern chat history optimization plugin entry.
 // Keep this file as the loader/bootstrap only; feature logic belongs in modules.
 // ============================================================================
-import { extension_settings } from '../../../extensions.js';
-import { chat, saveChatDebounced, saveSettingsDebounced } from '../../../../script.js';
+import { extension_settings, saveMetadataDebounced } from '../../../extensions.js';
+import { chat, saveChatDebounced, saveSettingsDebounced, chat_metadata } from '../../../../script.js';
 import { getTokenCountAsync } from '../../../tokenizers.js';
 import { eventSource, event_types } from '../../../events.js';
 import { ConnectionManagerRequestService } from '../../../extensions/shared.js';
@@ -13,7 +13,7 @@ import { ConnectionManagerRequestService } from '../../../extensions/shared.js';
     'use strict';
 
     const NAMESPACE = 'ChatOptimizationV2';
-    const VERSION = '2.7.1';
+    const VERSION = '2.8.0';
     const baseUrl = new URL('./', import.meta.url).href;
 
     const MODULES = [
@@ -22,6 +22,7 @@ import { ConnectionManagerRequestService } from '../../../extensions/shared.js';
         'config/subsummary.js',
         'config/retrieval.js',
         'config/embedding.js',
+        'config/embedstore.js',
         'ui/coo-window.js',
     ];
 
@@ -37,9 +38,11 @@ import { ConnectionManagerRequestService } from '../../../extensions/shared.js';
         bridge: Object.freeze({
             extensionSettings: extension_settings,
             saveSettingsDebounced,
+            saveMetadataDebounced,
             getTokenCountAsync,
             getCurrentChat: () => chat,
             saveChatDebounced,
+            getChatMetadata: () => chat_metadata,
             eventSource,
             eventTypes: event_types,
             connectionManagerRequest: ConnectionManagerRequestService,

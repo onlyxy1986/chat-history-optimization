@@ -608,6 +608,7 @@
     NS.SubSummary = Object.freeze({
         EXTRA_KEY,
         PLACEHOLDER,
+        textHash: fnv1a32,
         isConfigured,
         getProfileOptions,
         validateTemplate,

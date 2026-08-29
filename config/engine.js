@@ -764,7 +764,16 @@ ${newCharacterCardTemplate}
         const queryVec = embedderReady && queryText !== ''
             ? (await NS.Embedder.encodeBatch([NS.Embedder.withQueryInstruction(queryText)]))[0]
             : null;
-        const vecs = jobTexts.length > 0 ? await NS.Embedder.encodeBatch(jobTexts) : [];
+        // 文档侧向量优先读 chat_metadata 持久化 store（缺失现场编码并回写）
+        let vecs = [];
+        if (jobTexts.length > 0) {
+            if (NS.EmbedStore && typeof NS.EmbedStore.resolve === 'function') {
+                const vecMap = await NS.EmbedStore.resolve(jobTexts);
+                vecs = jobTexts.map(t => vecMap.get(t) || null);
+            } else {
+                vecs = await NS.Embedder.encodeBatch(jobTexts);
+            }
+        }
 
         const clamp01 = v => Math.min(1, Math.max(0, v));
         const results = new Array(farEntries.length);

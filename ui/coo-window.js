@@ -831,6 +831,10 @@
         embedderStatus.dataset.cooField = 'embedderStatus';
         section.appendChild(embedderStatus);
 
+        const embedStoreStatus = createText('div', 'coo-subsummary-status', '嵌入向量持久化：未同步');
+        embedStoreStatus.dataset.cooField = 'embedStoreStatus';
+        section.appendChild(embedStoreStatus);
+
         const actions = document.createElement('div');
         actions.className = 'coo-subsummary-actions';
         const genMissingButton = createButton('生成所有缺失', 'coo-button coo-button-sm', 'fa-solid fa-wand-magic-sparkles');
@@ -862,6 +866,7 @@
         updateSubSummaryBadge(section);
         updateSubSummaryStatus(section);
         updateEmbedderStatus(section);
+        updateEmbedStoreStatus(section);
 
         panel.appendChild(section);
     }
@@ -880,6 +885,27 @@
                 el.className = 'coo-subsummary-status coo-subsummary-status-error';
             } else {
                 el.textContent = '召回嵌入模型：未启动';
+                el.className = 'coo-subsummary-status';
+            }
+        });
+    }
+
+    function updateEmbedStoreStatus(scope) {
+        scope.querySelectorAll('[data-coo-field="embedStoreStatus"]').forEach((el) => {
+            const status = NS.EmbedStore ? NS.EmbedStore.getStatus() : null;
+            if (!status) {
+                el.textContent = '嵌入向量持久化：模块未加载';
+                el.className = 'coo-subsummary-status';
+                return;
+            }
+            if (status.error) {
+                el.textContent = `嵌入向量持久化失败：${status.error}`;
+                el.className = 'coo-subsummary-status coo-subsummary-status-error';
+            } else if (status.running) {
+                el.textContent = `嵌入向量持久化：${status.message || '同步中'}（已存 ${status.persisted} 条）`;
+                el.className = 'coo-subsummary-status coo-subsummary-status-running';
+            } else {
+                el.textContent = `嵌入向量持久化：${status.message || `已持久化 ${status.persisted} 条`}`;
                 el.className = 'coo-subsummary-status';
             }
         });
@@ -1252,6 +1278,13 @@
         updateEmbedderStatus(shell);
     }
 
+    function onEmbedStoreStatusChanged() {
+        const root = document.getElementById(ROOT_ID);
+        const shell = root ? root.querySelector('.coo-shell') : null;
+        if (!shell || shell.hidden) return;
+        updateEmbedStoreStatus(shell);
+    }
+
     // ------------------------------------------------------------------
     // Shell visibility
     // ------------------------------------------------------------------
@@ -1374,6 +1407,7 @@
         Engine.onStats(onStatsChanged);
         if (NS.SubSummary) NS.SubSummary.onStatus(onSubSummaryStatusChanged);
         if (NS.Embedder) NS.Embedder.onStatus(onEmbedderStatusChanged);
+        if (NS.EmbedStore) NS.EmbedStore.onStatus(onEmbedStoreStatusChanged);
         watchConnectionProfiles(root);
         startExtensionEntryRetry();
     }
