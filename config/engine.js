@@ -40,7 +40,7 @@
     const ACTOR_IDF_SATURATION = 1.0;
     // 发送前补生成缺失二级摘要的最长等待（毫秒），超时后不取消后台批次，本次用已有摘要继续
     const SUBSUMMARY_WAIT_TIMEOUT_MS = 30000;
-    // 装箱用 token 估算常数（1 token ≈ 1.5 个汉字）；最终仅做 1~3 次精确计数 + 剪枝
+    // 装箱用 token 估算常数（1 token ≈ 1.5 个汉字）；装箱后做精确计数，超预算时从最低分逐条剔除直至 ≤ ragBudget（无次数上限）
     const EST_CHARS_PER_TOKEN = 1.5;
     // Mode A 片段权重：最新用户消息 1.0，最新窗口条目 0.95，次新 0.9，其余窗口 0.8
     const FRAG_WEIGHT_USER = 1.0;

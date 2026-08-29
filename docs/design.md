@@ -28,14 +28,14 @@
 │   ├── settings.js            # 设置存取（extension_settings["chat-optimization-v2"]）
 │   ├── engine.js              # 核心引擎（纯逻辑无 DOM）：解析/合并/装配/召回打分/拦截器
 │   ├── subsummary.js          # 二级摘要生成器（纯逻辑）：LLM 调用、extra 持久化、自动触发、缺失收集/补生成
-│   ├── recallcache.js         # 召回 LRU 缓存（fragVec/docVec/pairScore 内容寻址）+ 补全气泡总线 + 后台预热
+│   ├── recallcache.js         # 召回 LRU 缓存（fragVec/docVec/pairScore 内容寻址）+ 补漏气泡总线 + 后台预热
 │   ├── retrieval.js           # BM25 检索器（纯逻辑，中文 unigram+bigram 分词）
 │   ├── embedding.js           # 本地 embedding（transformers.js + 本地 ONNX 模型）
 │   └── embedstore.js          # 摘要向量持久化（chat_metadata）+ 后台完整性同步
 ├── ui/
 │   └── coo-window.js          # 浮动窗口 UI（6 个 tab，全 createElement）
 ├── styles/
-│   └── coo.css                # 全部样式（~1145 行，按区块注释分节）
+│   └── coo.css                # 全部样式（按区块注释分节）
 ├── lib/
 │   ├── transformers.min.js    # @huggingface/transformers v3 ESM 打包
 │   ├── ort/                   # onnxruntime-web wasm（jsep, simd-threaded）
@@ -43,7 +43,6 @@
 ├── test/
 │   └── smoke-hybrid-recall.cjs  # Node 冒烟测试（mock 浏览器环境，node 直接跑）
 └── docs/
-    ├── sub-summary-handoff.md # 二级摘要功能的历史交接文档（v2.4.0 时点）
     └── design.md              # 本文档
 ```
 
@@ -55,21 +54,21 @@
 
 `manifest.json` 声明 `js: index.js`、`css: styles/coo.css`、`loading_order: 30`、`generate_interceptor: "replaceChatHistoryWithDetailsV2"`。
 
-**硬约束**：`generate_interceptor` 必须与 `config/engine.js:1038` 中定义在全局 `globalThis.replaceChatHistoryWithDetailsV2` 的函数名一致，改名会静默断开 ST 的生成管线。
+**硬约束**：`generate_interceptor` 必须与 `config/engine.js` 中定义在全局 `globalThis.replaceChatHistoryWithDetailsV2` 的函数名一致，改名会静默断开 ST 的生成管线。
 
-### 3.2 index.js bootstrap（index.js:12-94）
+### 3.2 index.js bootstrap
 
 1. 仅 `index.js` 使用 ESM import，从 ST 内部文件引入：`extension_settings`、`saveMetadataDebounced`（extensions.js）、`chat`/`saveChatDebounced`/`saveSettingsDebounced`/`chat_metadata`（script.js）、`getTokenCountAsync`（tokenizers.js）、`eventSource`/`event_types`（events.js）、`ConnectionManagerRequestService`（extensions/shared.js）。
 2. 防重复加载：`window.ChatOptimizationV2.loaded` 已置位则直接 return。
 3. 初始化命名空间 `window.ChatOptimizationV2`（下称 `NS`）：`loaded / version / baseUrl / bridge`。
-4. **bridge（index.js:38-49）是唯一访问 ST 内部的通道**，`Object.freeze` 冻结：
+4. **bridge 是唯一访问 ST 内部的通道**，`Object.freeze` 冻结：
    - `extensionSettings`（引用）、`saveSettingsDebounced`、`saveMetadataDebounced`
    - `getTokenCountAsync`
    - `getCurrentChat()` → 当前 `chat` 数组引用
    - `saveChatDebounced`、`getChatMetadata()` → `chat_metadata`
    - `eventSource`、`eventTypes`
    - `connectionManagerRequest`（ConnectionManagerRequestService）
-5. 按 `MODULES` 数组顺序**同步**注入 `<script>`（`async = false`，URL 带 `?v=VERSION` 缓存击穿）：
+5. 按 `MODULES` 数组顺序**逐个 `await` 加载** `<script>`（`loadScript` 返回 Promise，`script.async = false`，URL 带 `?v=VERSION` 缓存击穿），全部就绪后才进入 DOM ready 挂窗口：
    ```
     config/settings.js → config/engine.js → config/subsummary.js
     → config/retrieval.js → config/embedding.js → config/embedstore.js
@@ -99,9 +98,9 @@
 
 | 模块 | 模块加载即执行 |
 |---|---|
-| `subsummary.js:626` | `init()` 注册 `GENERATION_ENDED` 事件监听 |
-| `embedding.js:198` | `init()` 立即预热加载 transformers + ONNX 模型（异步，失败可重试） |
-| `embedstore.js:344` | `init()` 注册事件监听 + 延迟 1s 首次向量完整性同步 |
+| `subsummary.js` | `init()` 注册 `GENERATION_ENDED` 事件监听 |
+| `embedding.js` | `init()` 立即预热加载 transformers + ONNX 模型（异步，失败可重试） |
+| `embedstore.js` | `init()` 注册事件监听 + 延迟 1s 首次向量完整性同步 |
 | `recallcache.js` | `init()` 订阅 `MESSAGE_RECEIVED`(2s 防抖)/`GENERATION_ENDED`/`CHAT_CHANGED`/`Embedder.onStatus` 做后台预热；`onFill` 气泡总线 |
 | `coo-window.js` | 由 index.js 在 DOM ready 后调 `mount()` |
 
@@ -112,7 +111,7 @@
 ### 4.1 chat 数组约定（ST 原生）
 
 - `chat` 是消息数组，`chat[0]` 为首条消息（通常为 system 或第一条回复），**楼层号 = 数组下标，楼层从 1 开始**。
-- AI（assistant）消息判定：`("is_user" in item && !item.is_user) || (item.role === "assistant")`。该判定式在 engine/subsummary 中反复出现，保持原样。
+- AI（assistant）消息判定：遍历原始 ST `chat` 数组时用 `!item.is_user`（ST 消息恒带 `is_user` 字段）；遍历故事历程条目时用完整判定式 `("is_user" in item && !item.is_user) || (item.role === "assistant")`。两种形式在 engine/subsummary/recallcache/embedstore 中反复出现，保持原样。
 - 消息 `mes` 为主文本；存在 swipe 时 `getFloorStoryBlock` 回退读 `item.swipes[item.swipe_id]`（当前激活 swipe）。
 
 ### 4.2 NEW_STORY_DATA 块协议
@@ -130,13 +129,13 @@ AI 回复末尾（由 `getCharPrompt` 注入的模板要求）输出：
 </NEW_STORY_DATA>
 ```
 
-- 提取正则：`<NEW_STORY_DATA>` 块取**最后一个**（`matches[matches.length-1]`），块内再取 `<NEW_HISTORY>` / `<NEW_CHARACTER_CARD>`（engine.js:262/274/299）。
+- 提取正则：`<NEW_STORY_DATA>` 块取**最后一个**（`matches[matches.length-1]`），块内再取 `<NEW_HISTORY>` / `<NEW_CHARACTER_CARD>`。
 - 解析前统一 `replace(/\/\/.*$/gm, '')` 去掉 `//` 行内注释（模板允许带注释，LLM 输出可能带回显）。
 - 取第一个 `{...}` 后 `JSON.parse`。
 - `NEW_HISTORY` **必选**：缺失/解析失败 → 该楼层进 `failedFloors`（UI 红色显示）。
 - `NEW_CHARACTER_CARD` **可选**：无新角色或角色卡功能关闭（`roleCardToggle`）时合法缺失。
 
-### 4.3 模板解析（`Engine.parseTemplate`, engine.js:56）
+### 4.3 模板解析（`Engine.parseTemplate`）
 
 - `historyPrompt` / `characterPrompt` 是**带 `//` 注释的 JSON 文本**。解析 = 去注释后 `JSON.parse`。
 - **默认模板与 UI 文案是中文产品数据，保留不翻译**；改默认模板必须保证「去注释后可被 `JSON.parse`」，且 `{{占位符}}` 动态键机制（见 5.3 checkPath）仍然成立。
@@ -151,7 +150,7 @@ item.extra["chat-optimization-v2"] = {
 ```
 
 - `summaries` 与该楼层 `故事历程` 数组**按下标一一对应**，缺失为 `null`（部分生成合法）。
-- **楼层级哈希失效**：读时重算 `storyHash`，不匹配即 `delete item.extra["chat-optimization-v2"]`（subsummary.js:184-192），全部条目视为未生成。失效场景：楼层重新生成、手动编辑消息、切换 swipe。
+- **楼层级哈希失效**：读时重算 `storyHash`，不匹配即 `delete item.extra["chat-optimization-v2"]`，全部条目视为未生成。失效场景：楼层重新生成、手动编辑消息、切换 swipe。
 - 向量持久化（v2.8.0）：
 
 ```js
@@ -166,7 +165,7 @@ chat_metadata["chat-optimization-v2-embed"] = {
 
 ## 5. 核心流程：生成拦截器（最重要）
 
-入口：`globalThis.replaceChatHistoryWithDetailsV2(chat, contextSize, abort, type)`（engine.js:1038）。ST 在每次生成前调用，**约定为原地修改 `chat` 数组并返回 undefined**——实现中把整个 `chat` 替换为**单条消息**，其 `mes` 是完整装配好的 prompt。
+入口：`globalThis.replaceChatHistoryWithDetailsV2(chat, contextSize, abort, type)`（定义在 `config/engine.js`）。ST 在每次生成前调用，**约定为原地修改 `chat` 数组并返回 undefined**——实现中把整个 `chat` 替换为**单条消息**，其 `mes` 是完整装配好的 prompt。
 
 ### 5.1 流程总览
 
@@ -182,18 +181,18 @@ replaceChatHistoryWithDetailsV2
  └─ chat.length = 0; chat.push(chat[原最后一条])     # 原地替换为单条消息
 ```
 
-UI 的「发送预览」与窗口打开时的 `refreshStats()`（engine.js:1023）走**同一个 `assembleFinalPrompt`**（`runRag: true`），保证预览 = 实际将发送的内容。
+UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同一个 `assembleFinalPrompt`**（`runRag: true`），保证预览 = 实际将发送的内容。
 
-### 5.2 buildPromptData（engine.js:835）逐步骤
+### 5.2 buildPromptData 逐步骤
 
 1. **模板解析**：`parseTemplate(historyPrompt)`；`roleCardToggle` 开时还需 `parseTemplate(characterPrompt)`。解析失败仅 console.error，不中断（生成可能异常，UI 模板 tab 有有效性徽章）。
-2. **mergeDataInfo（engine.js:250）**：遍历楼层 1..n 的 assistant 消息，提取每层 `NEW_HISTORY`/`NEW_CHARACTER_CARD`，用 `deepMerge` 累积成全局 `historyData`（含 `故事历程` 数组）与 `characterData`（角色名→角色卡）。同时：
+2. **mergeDataInfo**：遍历楼层 1..n 的 assistant 消息，提取每层 `NEW_HISTORY`/`NEW_CHARACTER_CARD`，用 `deepMerge` 累积成全局 `historyData`（含 `故事历程` 数组）与 `characterData`（角色名→角色卡）。同时：
    - 每层写入 `item.messageCount = historyObj.故事历程.length`（该层贡献的历程条数，供正文覆盖计算）；
    - 任何一层缺块/解析失败 → `failedFloors.push(j)`。
-3. **processCharacterData（engine.js:592）角色卡淘汰与蒸馏**：
+3. **processCharacterData 角色卡淘汰与蒸馏**：
    - `MAX_SLOTS = 10`。
    - 打分：最新用户消息（`chat[chat.length-1].mes`）中 `nameMatches` 命中 → `1,000,000`（必保）；否则取**最后一次出现**的消息下标作为分数；都没出现 → `-1`。
-   - `nameMatches`（engine.js:154）：角色名按 `()`/`（）`/`·`/`.` 拆出所有别名 term（`getNameSearchTerms`），任一 term 命中即可；**消歧义**：若 term 是另一个更长角色名的子串（「沈梦」⊂「沈梦瑶」），逐次出现检查是否被长名「吞掉」，至少一次独立出现才算命中。
+       - `nameMatches`：角色名按 `()`/`（）`/`·`/`.` 拆出所有别名 term（`getNameSearchTerms`），任一 term 命中即可；**消歧义**：若 term 是另一个更长角色名的子串（「沈梦」⊂「沈梦瑶」），逐次出现检查是否被长名「吞掉」，至少一次独立出现才算命中。
    - 按分数降序取前 10，其余物理删除。
    - **蒸馏**：分数 < 1,000,000 且距最后出现 > 30 条消息的角色，只保留 `{角色设定}`（丢弃穿戴/物品/技能等动态字段）。
 4. **正文尾部（verbatim）**：
@@ -207,7 +206,7 @@ UI 的「发送预览」与窗口打开时的 `refreshStats()`（engine.js:1023�
     - `useModeA = !!(NS.SubSummary && Settings.get('subSummaryToggle'))`。
     - `ragWillActivate = (Retriever ? Retriever.isReady() : false) || useModeA`，且 `fullTokens > contentLimit × (1 - ragRatio)`。
     - 未触发 → 全量注入（`midMarkdown = fullMidMarkdown`），不裁剪。
-7. **RAG 路径**（触发且 `runRag` 时，engine.js:902-977）：
+7. **RAG 路径**（触发且 `runRag` 时）：
      - `ragBudget = round(contentLimit × ragRatio)`；`midBudget = contentLimit - ragBudget`。
      - **正文硬上限（v2.9.2）**：`tokens(tailText + charJson) > midBudget` 时从最旧整条 assistant 消息丢弃（`tailPos` 右移，其历程条目回归中段，可被窗口/召回重新拾取），直到装下或只剩 1 条；仍超则 console.warn（此时最终必然超限）。
      - **二分搜索**最大后缀窗口 `bestK`：`tokens(窗口markdown + tailText + charJson) ≤ midBudget`。窗口 = `midEntries` 尾部 `bestK` 条（时间最近的）。
@@ -219,7 +218,7 @@ UI 的「发送预览」与窗口打开时的 `refreshStats()`（engine.js:1023�
     - `ragMarkdown = renderJourneyMarkdown(装入条目, midMaxDay)`；`rag.hits` 记录每条命中的 text/score/parts（UI 用 `entryToDocText` 反查标记）。
     - 检索抛错 → 保留二分窗口中段（有上限），仅放弃召回，`rag.active = false`（v2.9.2 起不再回退无上限全量）。
 8. **装配前文**：`historyData.前文 = joinNonEmpty([ragMarkdown, midMarkdown, tailText])`。
-9. **getCharPrompt（engine.js:544）**生成最终 `lastMessage`：
+9. **getCharPrompt** 生成最终 `lastMessage`：
 
 ```
 <STORY_DATA>
@@ -233,12 +232,12 @@ UI 的「发送预览」与窗口打开时的 `refreshStats()`（engine.js:1023�
 </NEW_STORY_DATA>
 ```
 
-   - `wordMapping`（engine.js:12-27）敏感词降级替换（如 崩溃→失控），同时作用于前文与角色卡 JSON——内容合规策略，改词表需谨慎。
+       - `wordMapping` 敏感词降级替换（如 崩溃→失控），同时作用于前文与角色卡 JSON——内容合规策略，改词表需谨慎。
    - `前文` 从 `historyData` 浅拷贝后剥离，不改调用方数据。
 10. **token 计数**：对最终 `lastMessage`（含 STORY_DATA 包装与 NEW_STORY_DATA 模板）计数，与实际发送一致。
-11. **首条信息特判**（assembleFinalPrompt, engine.js:1009）：`chat.length==2 且 chat[0] 是 AI、chat[1] 是用户` → 追加 `FIRST_MESSAGE_SUFFIX`（提示生成全量历程），并重新计数。
+11. **首条信息特判**（`assembleFinalPrompt`）：`chat.length==2 且 chat[0] 是 AI、chat[1] 是用户` → 追加 `FIRST_MESSAGE_SUFFIX`（提示生成全量历程），并重新计数。
 
-### 5.3 deepMerge 规则（engine.js:195，合并语义的核心）
+### 5.3 deepMerge 规则（合并语义的核心）
 
 - **数组 + 字符串 delta**：支持 LLM 发出 `"delete 2-4"` 指令删除数组下标区间（越界则 warn 不删）。这是历程条目修正通道。
 - **数组 + 数组**：源数组中 `JSON.stringify` 与目标重复的条目过滤后 append（**去重键 = 整条 JSON 全等**；摘要哈希键、`getStoryProgressRange` 的 `seen` 去重都与此一致）。
@@ -246,7 +245,7 @@ UI 的「发送预览」与窗口打开时的 `refreshStats()`（engine.js:1023�
 - **角色设定保护**：路径含 `角色设定` 的字符串值，若 `allowUpdate=false`、值不含「未知」、且 key 不是 `处女` → 拒绝更新（不可变核心设定；`allowUpdate` 由 LLM 在 NEW_CHARACTER_CARD 顶层显式声明后删除该字段）。
 - 合并后空字符串值 `delete`。
 
-### 5.4 历程渲染（`renderJourneyMarkdown`, engine.js:380）
+### 5.4 历程渲染（`renderJourneyMarkdown`）
 
 - 按 `第X天` 分组升序。
 - `maxDay`（当前天）与无法解析天数的条目 → 每条详细格式：`# 天数|时间段|地点\n## 历程`。
@@ -259,12 +258,12 @@ UI 的「发送预览」与窗口打开时的 `refreshStats()`（engine.js:1023�
 ## 6. RAG 检索器（retrieval.js）
 
 - `NS.Retriever.isReady()` 恒为 true（纯 JS，无加载态）。
-- **分词（tokenize, retrieval.js:27）无词典**：
+- **分词（`tokenize`）无词典**：
   - 中文连续段 → 单字（过滤 `STOP_UNI` 虚词：的了着在和与及或是等都就还又很太更最被把让向对从到为之其此该这那它我你他她吗吧啊呀嘛呢么）+ 全部 bigram（不过滤，保证短语片段可重叠）。
   - 英文/数字 → 整词小写，保留内部 `._-` 连接（如 `3.14`）。
 - **BM25**：`k1=1.5, b=0.75`，`idf = log(1 + (N-d+0.5)/(d+0.5))`；每次调用对传入 docs 现建统计（远端条目集合每次生成都不同，**不缓存**）。
-- `minScore=0` 表示取所有有词项命中的文档（`RAG_MIN_SCORE`，engine.js:30）。
-- 设计史：v2.2.0 用 bge embedding 余弦做 RAG → v2.3.0 发现 embedding 对中文短查询召回不稳，**整体换成 BM25** 并删除模型资产、`ragToggle` 改默认开启 → v2.5.0 混合召回把 embedding 以「摘要语义分量」的形式加回来（§7），v2.6.0 恢复模型资产。v2.9.0 引入 Mode A（§7.4）：`subSummaryToggle` 开启时**不再走 BM25 回退**——缺失摘要的条目直接排除，BM25 回退仅保留给 Mode B（二级摘要关闭）路径。
+- `minScore=0` 表示取所有有词项命中的文档（`RAG_MIN_SCORE`，engine.js 顶部常量）。
+- 设计史：v2.2.0 用 bge embedding 余弦做 RAG → v2.3.0 发现 embedding 对中文短查询召回不稳，**整体换成 BM25** 并删除模型资产与 `ragToggle`（稀疏远期记忆默认开启，见 §16 版本表） → v2.5.0 混合召回把 embedding 以「摘要语义分量」的形式加回来（§7），v2.6.0 恢复模型资产。v2.9.0 引入 Mode A（§7.4）：`subSummaryToggle` 开启时**不再走 BM25 回退**——缺失摘要的条目直接排除，BM25 回退仅保留给 Mode B（二级摘要关闭）路径。
 
 ---
 
@@ -279,7 +278,7 @@ UI 的「发送预览」与窗口打开时的 `refreshStats()`（engine.js:1023�
 score = 0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall
 ```
 
-（权重常量 engine.js:32-35）
+（权重常量为 engine.js 顶部常量）
 
 - **S_actor**：摘要 `actor` 中 `nameMatches(a, queryText, nameList)` 命中的人物的 **IDF 之和**，除以 `ACTOR_IDF_SATURATION=1.0` 截断到 1。
   - `idf(a) = log(1 + (N - d + 0.5)/(d + 0.5))`，`d` = 该人物出现的摘要条目数。
@@ -295,13 +294,13 @@ score = 0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall
 ### 7.2 BM25 回退通道（无摘要条目 / Embedder 未就绪时全池）
 
 - 无摘要条目池（Embedder 未就绪 = 全池）走 `Retriever.retrieve(queryText, docs, topK=池大小, minScore=0)`。
-- 归一化：`score = bm25 / (bm25 + BM25_NORM_K)`，`BM25_NORM_K=4`（engine.js:37），使两通道分数可比（都落在 [0,1)）。
+- 归一化：`score = bm25 / (bm25 + BM25_NORM_K)`，`BM25_NORM_K=4`（engine.js 顶部常量），使两通道分数可比（都落在 [0,1)）。
 
-### 7.3 buildSummaryMap（engine.js:675）
+### 7.3 buildSummaryMap
 
-收集全部楼层 `extra` 中有效摘要，键 = `JSON.stringify(故事历程条目)`（与 deepMerge 去重键一致，合并后的 `farEntries` 可直接命中）。条目级 `hasRecallFields` 校验（subsummary.js:137）：旧 schema（`{摘要, 关键}`）摘要返回 false → 回退 BM25 通道（仅 Mode B 路径）。
+收集全部楼层 `extra` 中有效摘要，键 = `JSON.stringify(故事历程条目)`（与 deepMerge 去重键一致，合并后的 `farEntries` 可直接命中）。条目级 `hasRecallFields` 校验：旧 schema（`{摘要, 关键}`）摘要返回 false → 回退 BM25 通道（仅 Mode B 路径）。
 
-### 7.4 Mode A 分段加权打分（`scoreFarEntriesModeA`, engine.js:867）
+### 7.4 Mode A 分段加权打分（`scoreFarEntriesModeA`）
 
 `subSummaryToggle` 开启时启用；把查询切成多个**片段**，逐条远端条目取「各片段加权分」的最大值（max-pooling），使「用户提到某角色」与「窗口条目提到同一角色」两个信号都能独立触发召回。
 
@@ -314,7 +313,7 @@ score = 0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall
 - **每片段对远端条目 computes 一个 fragScore**（与 §7.1 同公式）：`0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall`。其中：
   - `S_actor`：`user` 片段用 `nameMatches(a, query, nameList)`（IDF 之和，饱和 1）；`window` 片段用窗口条目 actor 与远端 actor 的**成对方差逐对匹配**（任一两集合人名 term 命中即得分，IDF 之和饱和 1）。
   - `S_location`：`user` 片段 `query.includes(loc)`；`window` 片段 **层级匹配** `isHierMatch`（如 `酒馆.二楼` ⊂ `酒馆.二楼.卡座`，按 `.` 分段前缀匹配）。
-  - `S_event` / `S_recall` = `clamp01(cosine(fragVec, docVec))`，`fragVec` 由 `Embedder.encodeText(withQueryInstruction(片段文本))` 得到。
+  - `S_event` / `S_recall` = `clamp01(cosine(fragVec, docVec))`，`fragVec` 由 `Embedder.encodeBatch([withQueryInstruction(片段文本)])[0]` 得到。
 - **最终分数**：`score = max_f(w_f · fragScore_f)`，并标注命中贡献最大的 `bestFrag`（UI 展示）。
 - **绝不 BM25**：Mode A 下缺失摘要的条目直接排除，不回退词法检索（设计决策：二级摘要开启即信任语义通道）。
 
@@ -350,11 +349,11 @@ score = 0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall
 - **目的**：让「发送新用户信息」只重算与新片段相关的远端条目，而非每次全量重算——缓存按**内容哈希**寻址，过期条目自然失效，避免脏缓存。
 - 三张 LRU（容量 `FRAG_VEC_CAP=4096` / `DOC_VEC_CAP=4096` / `PAIR_SCORE_CAP=262144`）：
   - `fragVec`：片段文本 → 向量（受 `Embedder.model` 校验，模型变了全清）。
-  - `docVec`：键 = `楼层:条目下标` + **摘要哈希**（`SubSummary.textHash(JSON.stringify([actor,location,event,recall_when]))`）；摘要一变即 miss 重算。
-  - `pairScore`：键 = `片段文本 + ' ' + 条目键 + 双方摘要哈希` → `{fragScore, parts}`；跨发送复用逐对分数。
-- 接口：`getFragVec/setFragVec`、`getDocVecs/setDocVecs`、`getPair/setPair`、`summaryHash`、`clear`、`setModel`（模型变化清全部）、`onFill/setFilling/setFilled`（补全气泡总线）、`warmup`、`init`。
+  - `docVec`：键 = 条目 `JSON.stringify(entry)`；**摘要哈希**（`SubSummary.textHash(JSON.stringify([actor,location,event,recall_when]))`）存于槽位、读取时校验，摘要一变即 miss 重算。
+  - `pairScore`：键 = `片段文本 + ' ' + 条目键`，双方摘要哈希存于槽位、读取时校验 → `{fragScore, parts}`；跨发送复用逐对分数。
+- 接口：`getFragVec/setFragVec`、`getDocVecs/setDocVecs`、`getPair/setPair`、`summaryHash`、`clear`、`setModel`（模型变化清全部）、`onFill/setFilling/setFilled`（补漏气泡总线）、`warmup`、`init`。
 - **后台预热 `warmup`**：解码所有楼层摘要向量（`EmbedStore.resolve`） + 编码最新用户消息片段 + 最近 `WARMUP_WINDOW_PREVIEW=16` 条事件片段；订阅 `MESSAGE_RECEIVED`(2s 防抖)/`GENERATION_ENDED`/`CHAT_CHANGED`/`Embedder.onStatus` 在空闲时预热。
-- 调用方：`scoreFarEntriesModeA` 全程经缓存读写（命中则跳过 `Embedder.encodeText` 与余弦计算），UI 不参与。
+- 调用方：`scoreFarEntriesModeA` 全程经缓存读写（命中则跳过 `Embedder.encodeBatch` 与余弦计算），UI 不参与。
 
 ---
 
@@ -367,7 +366,7 @@ score = 0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall
 - **fetch**（默认）：`subSummaryBaseUrl` + `subSummaryApiKey` + `subSummaryModel` 三项非空。浏览器直连 OpenAI 兼容接口（需对方允许 CORS）。
 - **profile**：`subSummaryProfileId` 指向 SillyTavern Connection Manager 的 **CC 类型** profile（`mode==='cc'` 且 url/model 齐全；secret-id 可缺省，服务端回退主 API Key）。走 `ConnectionManagerRequestService.sendRequest(profileId, messages, maxTokens, {stream:false, signal:null, extractData:true, includePreset:false, includeInstruct:false, instructSettings:{}}, {temperature})`——**API Key 由服务端解密，不经过浏览器**（比 fetch 模式更安全）。
 
-### 10.2 单条生成（runOne, subsummary.js:333）
+### 10.2 单条生成（`runOne`）
 
 1. `isConfigured()` 否则抛错（UI 状态行提示去配置）。
 2. 取楼层 story block（复用 `Engine.getFloorStoryBlock`）→ `journey[entryIndex]`。
@@ -385,7 +384,7 @@ score = 0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall
 
 ### 10.4 触发方式
 
-- **自动**：`GENERATION_ENDED` 事件（经 bridge 的 ST EventEmitter，**不是** CustomEvent）→ 条件 `subSummaryToggle && isConfigured` → 最后一条 assistant 楼层中缺失的条目走 `executeBatch(targets, force=false)`。天然覆盖「楼层重新生成 → 哈希失效 → 清空 → 重新生成」闭环。
+- **自动**：`GENERATION_ENDED` 事件（经 bridge 的 ST EventEmitter，**不是** CustomEvent）→ 条件 `subSummaryToggle && isConfigured` → 最后一条 assistant 楼层中缺失的条目走 `ensureRecallSummaries(lastFloor, lastFloor)`（复用 §10.6 的发送前补生成 API，与手动/Mode A 路径统一）。天然覆盖「楼层重新生成 → 哈希失效 → 清空 → 重新生成」闭环。
 - **手动**（不受 `subSummaryToggle` 限制，只受 `isConfigured()`）：
   - `generateForEntry(floor, index, {force})` — 单条/重新生成
   - `generateForRange(start, end, {force, onlyMissing})` — 范围生成（null 边界 = 全部楼层）
@@ -397,7 +396,7 @@ score = 0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall
 - `ensureRecallSummaries(startFloor, endFloor)`：收集缺失目标（`collectRecallMissingTargets`）→ 经 `batchChain` 串行 `executeBatch` 补齐，返回 `{done, failed}`。应由 `buildPromptData` 在 Mode A 打分前 `await withTimeout(..., SUBSUMMARY_WAIT_TIMEOUT_MS)` 调用。
 - `onGenerationEnded` 自动补生成已重构为复用 `ensureRecallSummaries(lastFloor, lastFloor)`，与手动/自动路径统一。
 
-### 10.5 默认摘要模板（settings.js:66-74）
+### 10.5 默认摘要模板
 
 要求 LLM 输出召回特化 JSON：`actor`（角色名非代词）、`location`（层级从大到小）、`event`（谁在哪做了什么结果如何）、`recall_when`（2~4 条未来触发条件，不复述 event）。该 schema 是混合召回的数据来源——**模板改动会直接影响召回质量**，属产品数据。
 
@@ -407,9 +406,9 @@ score = 0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall
 
 ### 11.1 结构
 
-- 入口：wand 扩展菜单（`#extensionsMenu`）顶部插入菜单项「剧情角色档案」；DOM 未就绪时 500ms 间隔重试最多 30 次，并监听 `#extensionsMenuButton` 点击后重挂。
+- 入口：wand 扩展菜单（`#extensionsMenu`）顶部插入菜单项「剧情角色档案」；`#extensionsMenu` 不存在时回退插入 `#top-settings-holder` 顶部；DOM 未就绪时 500ms 间隔重试最多 30 次，并监听 `#extensionsMenuButton` 点击后重挂。
 - 浮动窗口（`#coo-root > .coo-shell`）：顶栏（标题+版本+关闭）+ 左侧栏（tab 导航 + 底部运行状态：失败楼层/Token 数）+ 工作区。侧边栏可折叠（localStorage `coo_sidebar_collapsed`）。
-- **6 个 tab**（`TABS`, coo-window.js:25）：`settings` 基础设置 / `subsummary` 二级摘要 / `templates` 模板 / `roles` 角色查看 / `story` 故事历程 / `preview` 发送预览。激活 tab 记 localStorage `coo_active_tab`。
+- **6 个 tab**（`TABS`）：`settings` 基础设置 / `subsummary` 二级摘要 / `templates` 模板 / `roles` 角色查看 / `story` 故事历程 / `preview` 发送预览。激活 tab 记 localStorage `coo_active_tab`。
 - **DOM 全部 `createElement` 构建，无 HTML 字符串、无 jQuery**（硬约束）。
 - 事件全委托到 workspace：`input`（按 `data-coo-field` switch 分发到 `Settings.set`）、`change`（roleSelect）、`click`（按 `data-coo-action` / `data-coo-reset` 分发）。Esc 关窗。
 
@@ -423,9 +422,9 @@ score = 0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall
 - **故事历程**：楼层范围查询（起始/结束，空=全部）；单列表渲染每条历程：楼层号 + 天数|时间段|地点 + 历程正文 + 二级摘要块（有效→结构化展示 人物/地点/事件/触发 +「重新生成」；无效→「生成摘要」按钮）；**RAG 命中标记内联**在对应条目上（`hitMap` 以 `Engine.entryToDocText(entry)` 为键反查 `stats.rag.hits`）+ 分数明细徽章（`人x/y 地x/y 事0.xx 忆0.xx → 总分` 或 `BM25 0.xx`）；「仅显示选中楼层」复选框过滤到命中条目；「生成全部摘要」按钮（当前范围）。
 - **发送预览**：`Engine.getStats().lastMessage` 原文 `<pre>` 展示。
 
-### 11.2.1 补全气泡（v2.9.0）
+### 11.2.1 补漏气泡（v2.9.0）
 
-- Mode A 发送前若需补生成缺失摘要，`recallcache.js` 经 `onFill(status)` 总线广播 `{filling, count}` / `{filled}`；`coo-window.js` 订阅后在右下角浮动 `#coo-fill-bubble`（`.coo-fill-bubble`，`coo.css` 新增样式）显示「正在补全 N 条二级摘要…」，完成后淡出。仅 `subSummaryToggle` 开且确有缺失时弹出。
+- Mode A 发送前若需补生成缺失摘要，`recallcache.js` 经 `onFill(status)` 总线广播 `{filling, count}` / `{filled}`；`coo-window.js` 订阅后在右下角浮动 `#coo-fill-bubble`（`.coo-fill-bubble`，`coo.css` 新增样式）显示「正在补漏 N 个二级摘要…」，完成后淡出。仅 `subSummaryToggle` 开且确有缺失时弹出。
 
 ### 11.3 刷新链路
 
@@ -435,7 +434,7 @@ score = 0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall
 
 ---
 
-## 12. 设置清单（settings.js:13 defaultSettings）
+## 12. 设置清单（settings.js `defaultSettings`）
 
 存于 `extension_settings["chat-optimization-v2"]`；`Settings.get` 逐键回退默认，`set` 自动 `saveSettingsDebounced`。
 
@@ -478,11 +477,11 @@ score = 0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall
 | 楼层级 FNV 哈希失效（非逐条） | 楼层 story block 是整体重写的（重新生成/编辑/swipe），逐条哈希无意义；整层清空最简单正确 |
 | 摘要存 `extra`、向量存 `chat_metadata` | extra per-消息随 chat 走；metadata per-chat 存跨消息的派生物（向量按文本哈希跨楼层去重） |
 | 摘要生成串行 + 模块级 running 互斥 | LLM 限流友好；自动/手动互斥避免 extra 写竞争 |
-| 二级摘要手动生成不受总开关限制 | 开关只表达「自动行为」意愿（用户确认的决策，见 docs/sub-summary-handoff.md §9） |
+| 二级摘要手动生成不受总开关限制 | 开关只表达「自动行为」意愿（用户确认的决策） |
 | 摘要 schema 含 `recall_when` | 面向召回而非阅读：「未来何时想起」比事件复述更有检索区分度 |
 | Mode A 分段加权 max（v2.9.0） | 用户片段 + 各窗口条目片段独立计分后取 max → 任一信号（用户提角色 / 上下文提角色）都可触发召回，且天然按重要性加权（最新窗口 0.95 > 次新 0.90 > 其他 0.80 > 用户 1.0） |
 | Mode A 绝不 BM25 回退 | 二级摘要开启即信任结构化语义通道；未配置连接的缺失条目直接排除，不让词法检索污染语义排序 |
-| 发送前补生成（`ensureRecallSummaries` + 30s 超时） | 二级摘要开启时，缺失摘要先补齐再打分；超时降级为「缺哪些排除哪些」并 warn，不让一次补全阻塞整次生成 |
+| 发送前补生成（`ensureRecallSummaries` + 30s 超时） | 二级摘要开启时，缺失摘要先补齐再打分；超时降级为「缺哪些排除哪些」并 warn，不让一次补漏阻塞整次生成 |
 | 召回 LRU 内容寻址缓存（v2.9.0） | fragVec/docVec/pairScore 按内容哈希寻址，新发送只重算新相关远端条目；摘要一变即 miss，无脏缓存；模型切换全清 |
 | 装箱按估算 1.5 字符/token + 精确计数剪枝 | 估算优先保速度（`getTokenCountAsync` 调用重，尽量少调）；精确计数**无次数上限**地从最低分剔除至 ≤ ragBudget（v2.9.2：估算对中文偏乐观，旧版 3+1 次上限导致召回段超预算、最终 tokenCount 超限） |
 | 正文超 midBudget 时从最旧整条 assistant 消息丢弃（v2.9.2） | 单条超长回复会让 正文+角色卡 超 midBudget，旧版无上限直接溢出 tokenLimit；丢整条而非截断文本，且其历程条目回归中段不丢失 |
@@ -521,7 +520,7 @@ node test/smoke-hybrid-recall.cjs
 
 - mock `window/document/navigator` + `NS.bridge`（假 `getTokenCountAsync` = 长度/1 且计数 `tokenCallCount`，假 `eventSource`），用 `(0,eval)` 按加载序注入 `settings/engine/subsummary/retrieval` 四个模块（**不加载 embedding/embedstore**——Node 无模型；`scoreFarEntries` 对缺失 `NS.EmbedStore` 有回退路径）。
 - 额外 mock：`NS.RecallCache`（内存、内容寻址忠实实现，验证 LRU 跨发送复用）、`Retriever.retrieve` 间谍（验证 Mode A 不调用 BM25）、`encodeBatch` 计数（验证缓存命中后不再编码）。
-- 构造 4 楼层 × 2 条目假聊天（含 6 条新 schema 摘要、1 条旧 schema、1 条无摘要），跑 8 个场景：
+- 构造 4 楼层 × 2 条目假聊天（含 6 条新 schema 摘要、1 条旧 schema、1 条无摘要），跑 7 个场景：
   - **A**（Mode B，Embedder 就绪，稀有角色查询）：chat 压成 1 条、RAG 激活、最优命中是目标条目、走 summary 通道、actor 饱和=1、地点 2/2、分数 ∈ [0,1]。
   - **C**（Mode B，IDF 抑制）：只提高频主角时纯主角条目 actorScore ≈ 0.24 < 0.3，远低于稀有角色饱和分。
   - **B**（Mode B，Embedder 未就绪）：全池走 bm25 通道、分数 ∈ [0,1)。
@@ -551,12 +550,12 @@ node test/smoke-hybrid-recall.cjs
 | 2.2.5 | 最终消息计数；发送预览 tab |
 | 2.3.0 | **bge embedding RAG → 纯 BM25**；稀疏远期记忆默认开启，删 ragToggle |
 | 2.3.1 | BM25 停用词单字过滤（保 bigram） |
-| 2.4.0 | 二级摘要（fetch LLM、楼层哈希失效、二级摘要 tab）——详见 docs/sub-summary-handoff.md |
+| 2.4.0 | 二级摘要（fetch LLM、楼层哈希失效、二级摘要 tab） |
 | 2.5.0 | **召回特化摘要**（actor/location/event/recall_when）+ 混合召回（IDF 人物分 + 地点精确 + 本地 bge 余弦 + BM25 回退）；恢复模型资产 |
 | 2.6.0 | 故事 tab RAG 命中标记内联到条目；仅显示选中楼层 |
 | (2.6.x) | 批量状态全局进度；失败重试 3×1s；生成所有缺失；擦除口令确认 |
 | 2.8.0 | **向量持久化**（chat_metadata base64 + 文本哈希键 + 后台完整性同步 + 打分路径 store 优先） |
-| 2.9.0 | **Mode A 分段加权召回**（用户+窗口片段 max-pooling，权重 1.0/0.95/0.90/0.80）+ **召回 LRU 内容寻址缓存**（fragVec/docVec/pairScore）+ **发送前补生成二级摘要**（30s 超时，无 BM25 回退）+ **装箱估算(1.5字符/token)+精确计数剪枝** + **补全气泡 UI** |
+| 2.9.0 | **Mode A 分段加权召回**（用户+窗口片段 max-pooling，权重 1.0/0.95/0.90/0.80）+ **召回 LRU 内容寻址缓存**（fragVec/docVec/pairScore）+ **发送前补生成二级摘要**（30s 超时，无 BM25 回退）+ **装箱估算(1.5字符/token)+精确计数剪枝** + **补漏气泡 UI** |
 | 2.9.1 | **预算扣除模板/包装开销**（contentLimit = tokenLimit - overheadTokens），最终 tokenCount 不再系统性超出 tokenLimit；侧边栏 token 行显示 `当前 / 上限` 且超限标红 |
 | 2.9.2 | **tokenLimit 硬保证**：召回段精确计数剔除去掉 3+1 次上限（剔除至 ≤ ragBudget，修复候选装多）；正文超 midBudget 时从最旧整条 assistant 消息丢弃；RAG 失败回退保留有上限窗口中段 |
 | 2.9.3 | 侧边栏 token 行标签中文化：`Chat History Token Count` → `将发送词元数`（修复窄侧边栏截断） |
@@ -566,7 +565,7 @@ node test/smoke-hybrid-recall.cjs
 ## 17. 接手者常见任务指引
 
 - **加一个新 tab / 设置项**：TABS 数组 + 对应 `renderXxxTab` + input 委托 case + settings 默认值 + CSS。
-- **改召回策略**：常量在 engine.js:30-40；打分在 `scoreFarEntries`；装箱在 buildPromptData:940-963；改完跑冒烟测试。
+- **改召回策略**：常量在 engine.js 顶部；打分在 `scoreFarEntries` / `scoreFarEntriesModeA`；装箱在 `buildPromptData` 的 RAG 路径；改完跑冒烟测试。
 - **改摘要 schema**：`subSummaryPrompt` 默认模板 + `normalizeSummary` + `hasRecallFields` + UI `appendSummaryContent` + 打分分量，四处联动；旧摘要经 `hasRecallFields` 自动回退 BM25，无需迁移。
 - **新增模块依赖 ST 内部**：index.js import → bridge 追加 → 模块内 `NS.bridge.xxx`。
 - **发布**：bump `index.js` VERSION 与 `manifest.json` version（同步）→ 提交（本仓库）→ 用户侧强刷（`?v=` 缓存击穿自动生效）。
