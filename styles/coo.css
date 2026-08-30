@@ -743,12 +743,14 @@
 
 /* ------------------------------ templates ------------------------------- */
 
+/* flex-basis 必须为 auto（内容高）：窗口高度不足、section 无剩余空间时
+   basis=0 + min-height:0 会把块塌缩到 0px，内部 textarea（min-height 96px）
+   溢出绘制到下方状态行/按钮上；auto 时块至少占内容高，由 workspace 滚动 */
 #coo-root .coo-template-block {
     display: flex;
     flex-direction: column;
     gap: 6px;
-    flex: 1 1 0;
-    min-height: 0;
+    flex: 1 1 auto;
     padding: 10px;
     border: 1px solid var(--coo-border-soft);
     border-radius: 10px;
@@ -1200,6 +1202,7 @@
 
 #coo-root .coo-subsummary-actions {
     display: flex;
+    flex-wrap: wrap;
     gap: 8px;
 }
 

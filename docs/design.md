@@ -426,6 +426,7 @@ score = 0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall
 - **6 个 tab**（`TABS`）：`settings` 基础设置 / `subsummary` 二级摘要 / `templates` 模板 / `roles` 角色查看 / `story` 故事历程 / `preview` 发送预览。激活 tab 记 localStorage `coo_active_tab`。
 - **DOM 全部 `createElement` 构建，无 HTML 字符串、无 jQuery**（硬约束）。
 - 事件全委托到 workspace：`input`（按 `data-coo-field` switch 分发到 `Settings.set`）、`change`（roleSelect）、`click`（按 `data-coo-action` / `data-coo-reset` 分发）。Esc 关窗。
+- **布局与响应式**：workspace `overflow-y: auto`（内容高于窗口即滚动）；`.coo-tab-panel > .coo-section` 为 `flex: 1 0 auto`（永不压缩低于内容高）；模板 textarea 块 `.coo-template-block` 为 `flex: 1 1 auto`——**basis 必须是内容高**（v2.11.0 修复：旧值 `flex: 1 1 0` + `min-height: 0` 在窗口矮、section 无剩余空间时把块塌缩到 0px，内部 textarea（min-height 96px）溢出绘制到下方状态行/按钮上；二级摘要/模板 tab 均受影响）；高窗口时块按 `createTemplateBlock` 的 `flexGrow` 内联参数分配剩余空间撑满。`.coo-subsummary-actions` `flex-wrap: wrap`（窄窗换行）；`@media (max-width: 760px)` 侧栏缩为 56px 纯图标栏、窗口全屏、行内输入框缩窄。
 
 ### 11.2 各 tab 要点
 
@@ -567,6 +568,7 @@ node test/smoke-hybrid-recall.cjs
 7. 配置不允许 CORS 的 API → 状态行 + console 明确报错，extra 不被污染。
 8. （v2.11.0）生成二级摘要时页面保持可交互（推理在 WebWorker，DevTools → Workers 可见 `embed-worker.js`）；批量生成期间 story tab 条目逐条原地更新、状态行 300ms 节流刷新，批次结束后列表完整重绘；worker 不可用时自动回退主线程（状态行仍走 loading/ready）。
 9. （v2.11.0）WebGPU 加速：Chrome/Edge 打开 `chrome://gpu` 确认 WebGPU 可用后，二级摘要 tab 状态行显示「召回嵌入模型：就绪（bge-small-zh 本地，WebGPU）」，加载阶段显示「加载模型 bge-small-zh-v1.5（WebGPU fp32）…」；大批量补齐向量明显快于 WASM；无 WebGPU 的环境状态行无「，WebGPU」标记且加载阶段显示「（WASM q8）」；`Constants.EMBED_USE_WEBGPU=false` 时始终走 WASM q8。
+10. （v2.11.0）矮窗口/窄窗口响应式：把浏览器窗口高度压到 600px 左右打开二级摘要/模板 tab → 模板 textarea 保持内容高度、不与下方状态行/按钮重叠，超出部分经 workspace 滚动条访问；窗口宽度 <760px 时侧栏为纯图标栏、操作按钮自动换行不溢出。
 
 ---
 
@@ -574,7 +576,7 @@ node test/smoke-hybrid-recall.cjs
 
 | 版本 | 内容 |
 |---|---|
-| 2.11.0 | **UI 响应性修复**（生成二级摘要时界面卡死）：① embedding 推理移入 `core/embed-worker.js` module WebWorker（`embedding.js` 重写为 worker 编排 + 主线程回退，接口不变）；② 二级摘要状态通知 300ms trailing throttle + `lastDone` 单条目增量更新（story tab 不再每条整表重绘）；③ 楼层 story block 解析缓存（`Engine.storyBlockCache`）+ 摘要哈希缓存（`SubSummary.storyHashCache`）；④ 向量同步补齐逐批进度上报（`encodeBatch` 新增 `onProgress`，状态行实时显示 `补齐向量 done/total…`，消除大批量编码时状态行看似卡死）+ worker 初始化失败真正回退主线程（terminate 残留 worker 后走 `initMainThread`，与降级链一致）；⑤ 修复批量向量拆分：v3 feature-extraction 批量输入返回单个 `[N,D]` Tensor 而非逐条数组，旧代码 flatten 成单向量导致 embedstore 收到 `undefined`（`vecToBase64` 抛 `reading 'buffer'`）→ 始终传数组 + `batchToVectors` 按行拆分 + 条数一致性守卫（worker 与主线程回退路径同修）；⑥ WebGPU 加速：`EMBED_USE_WEBGPU` 开关下优先 `{dtype:'fp32', device:'webgpu'}`（捆绑 onnx-community fp32 model.onnx ~95MB），失败/不支持自动回退 q8/WASM，后端经 ready 消息上报、UI 状态行显示「，WebGPU」标记（fp32/q8 向量混用无害，不触发向量库重建）；⑦ 修复污染向量库导致刷新全量重算：旧批量 bug 曾把 7680 维（15×512）长向量写入持久化库，`loadStore`「首条定基准」被单条污染条目击溃 → 整库丢弃、每次刷新重算全部向量；改 `raw.dims` 优先 / 多数派基准维度（污染条目丢弃后按缺失自动重编码，库自愈）+ `persistVectors` 维度守卫 + `resolve` 跳过空向量；同步完成文案改为「向量库现有 X 条（本次新增 Y，清理失效 Z）」消除总数与增量数字不自洽的误读；最终渲染结果不变，冒烟测试全过 |
+| 2.11.0 | **UI 响应性修复**（生成二级摘要时界面卡死）：① embedding 推理移入 `core/embed-worker.js` module WebWorker（`embedding.js` 重写为 worker 编排 + 主线程回退，接口不变）；② 二级摘要状态通知 300ms trailing throttle + `lastDone` 单条目增量更新（story tab 不再每条整表重绘）；③ 楼层 story block 解析缓存（`Engine.storyBlockCache`）+ 摘要哈希缓存（`SubSummary.storyHashCache`）；④ 向量同步补齐逐批进度上报（`encodeBatch` 新增 `onProgress`，状态行实时显示 `补齐向量 done/total…`，消除大批量编码时状态行看似卡死）+ worker 初始化失败真正回退主线程（terminate 残留 worker 后走 `initMainThread`，与降级链一致）；⑤ 修复批量向量拆分：v3 feature-extraction 批量输入返回单个 `[N,D]` Tensor 而非逐条数组，旧代码 flatten 成单向量导致 embedstore 收到 `undefined`（`vecToBase64` 抛 `reading 'buffer'`）→ 始终传数组 + `batchToVectors` 按行拆分 + 条数一致性守卫（worker 与主线程回退路径同修）；⑥ WebGPU 加速：`EMBED_USE_WEBGPU` 开关下优先 `{dtype:'fp32', device:'webgpu'}`（捆绑 onnx-community fp32 model.onnx ~95MB），失败/不支持自动回退 q8/WASM，后端经 ready 消息上报、UI 状态行显示「，WebGPU」标记（fp32/q8 向量混用无害，不触发向量库重建）；⑦ 修复污染向量库导致刷新全量重算：旧批量 bug 曾把 7680 维（15×512）长向量写入持久化库，`loadStore`「首条定基准」被单条污染条目击溃 → 整库丢弃、每次刷新重算全部向量；改 `raw.dims` 优先 / 多数派基准维度（污染条目丢弃后按缺失自动重编码，库自愈）+ `persistVectors` 维度守卫 + `resolve` 跳过空向量；同步完成文案改为「向量库现有 X 条（本次新增 Y，清理失效 Z）」消除总数与增量数字不自洽的误读；⑧ 矮窗口模板块塌缩修复：`.coo-template-block` 旧值 `flex: 1 1 0` + `min-height: 0` 在窗口高度不足（section 无剩余空间）时塌缩到 0px，内部 textarea（min-height 96px）溢出绘制到下方状态行/按钮上（二级摘要/模板 tab 均受影响）→ 改 `flex: 1 1 auto`（块至少占内容高，超出经 workspace 滚动，高窗口撑满行为不变）+ `.coo-subsummary-actions` `flex-wrap: wrap`（窄窗换行）；最终渲染结果不变，冒烟测试全过 |
 | 2.2.0 | 分层注入 + 浏览器内 RAG（bge-small-zh via transformers.js） |
 | 2.2.5 | 最终消息计数；发送预览 tab |
 | 2.3.0 | **bge embedding RAG → 纯 BM25**；稀疏远期记忆默认开启，删 ragToggle |
