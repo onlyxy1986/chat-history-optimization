@@ -515,27 +515,41 @@
         box.appendChild(createText('div', 'coo-story-summary-body', json));
     }
 
-    function buildHitScoreLabel(hit) {
-        const parts = hit.parts || {};
-        let label;
-        if (parts.source === 'summary') {
-            label = `RAG命中 人${parts.actor || '0/0'} 地${parts.location || '0/0'} 事${Number(parts.event || 0).toFixed(2)} 忆${Number(parts.recall || 0).toFixed(2)} → ${Number(hit.score || 0).toFixed(2)}`;
-        } else {
-            label = `RAG命中 BM25 ${Number(hit.score || 0).toFixed(2)}`;
-        }
-        return createText('span', 'coo-rag-hit-score', label);
+    // bestFrag → 可读片段来源（user=最新用户消息；fN=窗口第 N 楼层条目；wN=片段序号回退，楼层未知）
+    function fragSourceLabel(bestFrag) {
+        if (!bestFrag) return '';
+        if (bestFrag === 'user') return '用户';
+        const m = String(bestFrag).match(/^([fw])(\d+)$/);
+        if (m) return m[1] === 'f' ? `楼层${m[2]}` : `窗口·第${m[2]}`;
+        return String(bestFrag);
     }
 
-    function buildStoryEntry(entry, hit) {
+    // 远端条目 RAG 标记：命中/未命中 + 片段来源（bestFrag）+ 分数明细
+    function buildFarScoreLabel(record) {
+        const parts = record.parts || {};
+        const prefix = record.hit ? 'RAG命中' : 'RAG未命中';
+        const frag = parts.bestFrag ? `（${fragSourceLabel(parts.bestFrag)}）` : '';
+        let label;
+        if (parts.source === 'summary') {
+            label = `${prefix}${frag} 人${parts.actor || '0/0'}(${Number(parts.actorScore || 0).toFixed(2)}) 地${parts.location || '0/0'}(${Number(parts.locationScore || 0).toFixed(2)}) 事${Number(parts.event || 0).toFixed(2)} 忆${Number(parts.recall || 0).toFixed(2)} → ${Number(record.score || 0).toFixed(2)}`;
+        } else if (parts.source === 'bm25') {
+            label = `${prefix}${frag} BM25 ${Number(record.score || 0).toFixed(2)}`;
+        } else {
+            label = `${prefix}${frag}（无二级摘要）`;
+        }
+        return createText('span', record.hit ? 'coo-rag-hit-score' : 'coo-rag-miss-score', label);
+    }
+
+    function buildStoryEntry(entry, far) {
         const item = document.createElement('div');
-        item.className = hit ? 'coo-story-item coo-story-item-hit' : 'coo-story-item';
+        item.className = far && far.hit ? 'coo-story-item coo-story-item-hit' : 'coo-story-item';
         const head = document.createElement('div');
         head.className = 'coo-story-item-head';
         head.appendChild(createText('span', 'coo-story-floor', `楼层 ${entry.floor}`));
         const meta = [entry.天数, entry.时间段, entry.地点].filter(Boolean).join(' · ');
         head.appendChild(createText('span', 'coo-story-item-meta', meta));
-        if (hit) {
-            head.appendChild(buildHitScoreLabel(hit));
+        if (far) {
+            head.appendChild(buildFarScoreLabel(far));
         }
         item.appendChild(head);
         if (entry.历程) {
@@ -557,7 +571,7 @@
         else item.appendChild(newBox);
     }
 
-    // 单列表渲染：RAG 命中条目直接在原条目上加标记与分数明细
+    // 单列表渲染：所有远端（far）条目在原条目上标记 RAG命中/未命中 + 分数明细
     function renderStoryList(scope) {
         const info = scope.querySelector('[data-coo-field="storyInfo"]');
         const list = scope.querySelector('[data-coo-field="storyList"]');
@@ -566,20 +580,28 @@
         const selectedOnly = Boolean(onlyBox && onlyBox.checked);
         const result = Engine.getStoryProgressRange(storyQuery.start, storyQuery.end);
         const rag = Engine.getStats().rag;
-        const hitMap = new Map();
-        if (rag && rag.active && Array.isArray(rag.hits)) {
-            for (const hit of rag.hits) {
-                if (hit && hit.text) hitMap.set(hit.text, hit);
+        // farMap：全部远端条目打分明细（命中+未命中），键 = entryToDocText
+        const farMap = new Map();
+        if (rag) {
+            if (Array.isArray(rag.farScores) && rag.farScores.length > 0) {
+                for (const rec of rag.farScores) {
+                    if (rec && rec.text) farMap.set(rec.text, rec);
+                }
+            } else if (rag.active && Array.isArray(rag.hits)) {
+                for (const hit of rag.hits) {
+                    if (hit && hit.text) farMap.set(hit.text, { text: hit.text, score: hit.score, parts: hit.parts, hit: true });
+                }
             }
         }
+        const hitCount = [...farMap.values()].filter((rec) => rec.hit).length;
         info.textContent = `楼层 ${result.startFloor} - ${result.endFloor}，共 ${result.entries.length} 条历程`
-            + (hitMap.size > 0 ? `，RAG 选中 ${hitMap.size} 条` : '');
+            + (hitCount > 0 ? `，RAG 选中 ${hitCount} 条` : '');
         list.textContent = '';
         let shown = 0;
         for (const entry of result.entries) {
-            const hit = hitMap.get(Engine.entryToDocText(entry));
-            if (selectedOnly && !hit) continue;
-            list.appendChild(buildStoryEntry(entry, hit));
+            const far = farMap.get(Engine.entryToDocText(entry));
+            if (selectedOnly && !(far && far.hit)) continue;
+            list.appendChild(buildStoryEntry(entry, far));
             shown++;
         }
         if (shown === 0) {

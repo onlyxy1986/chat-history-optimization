@@ -229,17 +229,21 @@ function validSummaryFor(entry) {
     const topA = ragA.hits.reduce((m, h) => (h.score > m.score ? h : m), ragA.hits[0]);
     check('A: 最优命中是陈九仓库条目', topA && topA.text.includes('陈九交付货物'), topA);
     check('A: 走 summary 通道', topA && topA.parts && topA.parts.source === 'summary', topA);
-    check('A: 人物 1/2 且 actorScore 饱和为 1', topA && topA.parts.actor === '1/2' && topA.parts.actorScore >= 0.99, topA && topA.parts);
+    check('A: 人物 1/2 且 actorScore=1（Dice 2·1/(1+1) 满分）', topA && topA.parts.actor === '1/2' && topA.parts.actorScore >= 0.99, topA && topA.parts);
     check('A: 地点 2/2 命中', topA && topA.parts.location === '2/2', topA && topA.parts);
     check('A: 分数在 [0,1]', ragA.hits.every(h => h.score >= 0 && h.score <= 1));
+    check('A: farScores 覆盖全部远端条目且命中数与 hits 一致', ragA && Array.isArray(ragA.farScores) && ragA.farScores.length === ragA.farCount && ragA.farScores.filter(r => r.hit).length === ragA.hits.length, ragA && ragA.farScores);
+    check('A: 每条 farScores 均有打分明细（无摘要被排除者 score 为 null）', ragA && ragA.farScores.every(r => r.score === null || (r.parts && r.parts.source)), ragA.farScores);
+    check('A: 存在未命中远端条目（全量标记而非仅 hits）', ragA && ragA.farScores.some(r => !r.hit), ragA.farScores && ragA.farScores.length);
 
-    // 场景 C（Mode B）：IDF —— 查询只提高频主角（沈梦瑶），纯主角条目的人物分必须远低于 1
+    // 场景 C（Mode B）：主角排除 —— 查询只提高频主角（沈梦瑶），主角两侧排除 → 全池人物分为 0
     const { rag: ragC } = await quiet(runCase(true, '沈梦瑶又出现了'));
     console.log('C rag:', JSON.stringify(ragC, null, 1));
-    const e5Hit = ragC.hits.find(h => h.text.includes('买药'));
-    check('C: 纯主角条目有命中记录', !!e5Hit, ragC.hits);
-    check('C: 纯主角条目 actorScore ≈0.24 < 0.3（IDF 抑制）', e5Hit && e5Hit.parts.actorScore < 0.3, e5Hit && e5Hit.parts);
-    check('C: 主角分数远低于稀有角色饱和分', e5Hit && topA && e5Hit.parts.actorScore < topA.parts.actorScore * 0.3, e5Hit && e5Hit.parts);
+    const e5Score = ragC.farScores.find(r => r.text && r.text.includes('买药'));
+    check('C: 纯主角条目有打分明细', !!e5Score, ragC.farScores);
+    check('C: 纯主角条目 actorScore = 0 且人物 0/1（主角两侧排除）', e5Score && e5Score.score !== null && e5Score.parts.actorScore === 0 && e5Score.parts.actor === '0/1', e5Score && e5Score.parts);
+    check('C: 全部 summary 通道条目人物分均为 0（查询侧 Q 为空）', ragC.farScores.every(r => r.score === null || r.parts.source !== 'summary' || r.parts.actorScore === 0), ragC.farScores);
+    check('C: 主角条目人物分低于稀有角色满分条目', e5Score && topA && e5Score.parts.actorScore < topA.parts.actorScore, e5Score && e5Score.parts);
 
     // 场景 B（Mode B）：Embedder 未就绪，全池 BM25 归一化降级
     const { rag: ragB } = await quiet(runCase(false, '陈九提到了码头仓库的货物'));
@@ -256,6 +260,8 @@ function validSummaryFor(entry) {
     check('A\': 走 summary 通道（无 BM25）', ragA2.hits.length > 0 && ragA2.hits.every(h => h.parts.source === 'summary'), ragA2.hits);
     check('A\': 绝不调用 Retriever', retrieveCount === 0, retrieveCount);
     check('A\': 有 bestFrag 标记', ragA2.hits.every(h => h.parts && h.parts.bestFrag), ragA2.hits);
+    check('A\': farScores 覆盖全部远端条目且每条有 bestFrag', ragA2 && Array.isArray(ragA2.farScores) && ragA2.farScores.length === ragA2.farCount && ragA2.farScores.every(r => r.score === null || (r.parts && r.parts.bestFrag)), ragA2 && ragA2.farScores);
+    check('A\': 未命中远端条目同样有明细（score 非 null）', ragA2 && ragA2.farScores.some(r => !r.hit && r.score !== null), ragA2.farScores && ragA2.farScores.length);
     const topA2 = ragA2.hits.reduce((m, h) => (h.score > m.score ? h : m), ragA2.hits[0]);
     check('A\': 最优命中是陈九仓库条目', topA2 && topA2.text.includes('陈九交付货物'), topA2);
 
@@ -328,6 +334,12 @@ function validSummaryFor(entry) {
     check('F: 发送前触发补生成', genCalls === 1, genCalls);
     check('F: 补生成后缺失为 0', countMissing() === 0, countMissing());
     check('F: RAG 激活且全部走 summary 通道', ragF && ragF.active === true && ragF.hits.length > 0 && ragF.hits.every(h => h.parts.source === 'summary'), ragF.hits);
+
+    // 场景 H（Mode A + 非空窗口）：tokenLimit 放大 → bestK>0，窗口片段参与打分，bestFrag 标记为 user 或 f+楼层号
+    const { rag: ragH } = await quiet(runCase(true, '陈九提到了码头仓库的货物', { allSummaries: true, settings: Object.assign({}, modeAConfig(), { tokenLimit: 1300 }) }));
+    console.log('H rag:', JSON.stringify({ active: ragH.active, windowCount: ragH.windowCount, farCount: ragH.farCount, farScores: ragH.farScores }, null, 1));
+    check('H: RAG 激活且窗口/远端非空（对齐后窗口=楼层3+5 共4条，远端=楼层1 共2条）', ragH && ragH.active === true && ragH.windowCount === 4 && ragH.farCount === 2, ragH && { active: ragH.active, windowCount: ragH.windowCount, farCount: ragH.farCount });
+    check('H: 窗口对齐楼层边界 → 楼层 1 整体在远端，bestFrag 只能是 user/f3/f5（不得出现 f1 或 wN 回退）', ragH && ragH.farScores.length > 0 && ragH.farScores.every(r => r.score === null || (/^(user|f3|f5)$/.test(r.parts && r.parts.bestFrag))), ragH.farScores);
 
     // 场景 G（解析失败气泡总线，v2.11.1 事件驱动）：楼层 3（第 2 个 assistant 楼层）的 NEW_HISTORY JSON 损坏
     // → MESSAGE_RECEIVED 到达事件触发引擎检查，onParseFail 广播该楼层与原因；同内容再次到达不重复广播（历史失败楼层不触发）

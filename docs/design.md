@@ -1,6 +1,6 @@
 # Chat History Optimization (chat-optimization-v2) — 完整流程交接文档
 
-> 版本：v2.11.0（2026-08-30）
+> 版本：v2.12.0（2026-08-30）
 > 仓库：本目录是独立 git 仓库（嵌套在 SillyTavern 安装目录内），在此提交，不要提交到父仓库。
 > 无 package.json、无构建、无 lint。功能模块为浏览器端普通脚本。
 
@@ -214,13 +214,14 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
 7. **RAG 路径**（触发且 `runRag` 时）：
      - `ragBudget = round(contentLimit × ragRatio)`；`midBudget = contentLimit - ragBudget`。
      - **正文硬上限（v2.9.2）**：`tokens(tailText + charJson) > midBudget` 时从最旧整条 assistant 消息丢弃（`tailPos` 右移，其历程条目回归中段，可被窗口/召回重新拾取），直到装下或只剩 1 条；仍超则 console.warn（此时最终必然超限）。
-     - **二分搜索**最大后缀窗口 `bestK`：`tokens(窗口markdown + tailText + charJson) ≤ midBudget`。窗口 = `midEntries` 尾部 `bestK` 条（时间最近的）。
+      - **二分搜索**最大后缀窗口 `bestK`：`tokens(窗口markdown + tailText + charJson) ≤ midBudget`。窗口 = `midEntries` 尾部 `bestK` 条（时间最近的）。
+      - **楼层对齐（v2.12.0）**：二分后把 `bestK` 收缩到楼层边界——楼层不可拆，整层要么在窗口要么在远端（避免同一楼层一部分被 RAG 打分、一部分在窗口内，导致 bestFrag 标注与 UI 标记矛盾）。楼层归属按首现顺序扫各楼层 `NEW_HISTORY` 块、原始条目 JSON 作键（与 `getStoryProgressRange` 全局去重语义一致）。
     - `farEntries = midEntries` 前段（窗口外）；`query = 最后一条消息（用户消息）mes`。
     - **Mode A（`useModeA`）**：发送前先补齐缺失二级摘要——`SubSummary.getRecallMissingCount(1, lastFloor) > 0` 且 `isConfigured()` 则 `await withTimeout(SubSummary.ensureRecallSummaries(1, lastFloor), SUBSUMMARY_WAIT_TIMEOUT_MS)`（超时 30s，见 §10.6）；未配置连接则 warning 并跳过缺失条目（**绝不 BM25 回退**）。打分走 `scoreFarEntriesModeA`（见 §7.4）。
     - **Mode B（`!useModeA`）**：`queryText = query + 窗口各条目 docText`（`entryToDocText`），打分走 `scoreFarEntries`（见 §7.1-7.3）。
     - **贪心装箱**：按分数降序遍历，单条**估算**成本 = 该条目**详细格式** markdown 长度 / `EST_CHARS_PER_TOKEN`(1.5)（即最大成本估计）；重复文本去重（`packedSet`）；停止条件：预算满 / 全部唯一条目装完 / 已见最小条目也装不下。装入的按**原始时间顺序**重排。
     - **精确计数剪枝**：`ragMarkdown` 渲染后做 `getTokenCountAsync` 精确计数；若精确 token 超预算，从**最低分**逐条剔除后再渲染，**直至 ≤ ragBudget（v2.9.2 起无次数上限**——估算 1 token≈1.5 汉字对中文偏乐观，旧版 3+1 次上限会漏剔，召回段可超预算数千 token）。
-    - `ragMarkdown = renderJourneyMarkdown(装入条目, midMaxDay)`；`rag.hits` 记录每条命中的 text/score/parts（UI 用 `entryToDocText` 反查标记）。
+    - `ragMarkdown = renderJourneyMarkdown(装入条目, midMaxDay)`；`rag.hits` 记录每条命中的 text/score/parts；`rag.farScores`（v2.12.0）记录**全部**远端条目的打分明细 `{text, score, parts, hit}`（无摘要被排除者 score/parts 为 null），UI 用 `entryToDocText` 反查，在每个 far 卡片上标记 RAG命中/未命中。
     - 检索抛错 → 保留二分窗口中段（有上限），仅放弃召回，`rag.active = false`（v2.9.2 起不再回退无上限全量）。
 8. **装配前文**：`historyData.前文 = joinNonEmpty([ragMarkdown, midMarkdown, tailText])`。
 9. **getCharPrompt** 生成最终 `lastMessage`：
@@ -280,15 +281,15 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
 ### 7.1 摘要通道（条目有召回特化摘要 且 `NS.Embedder.isReady()`；Mode B 路径之一）
 
 ```
-score = 0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall
+score = 0.25·S_actor + 0.15·S_location + 0.20·S_event + 0.40·S_recall
 ```
 
 （权重常量为 `core/constant.js` 的 `Constants.SUMMARY_W_*`，各项附调整指导）
 
-- **S_actor**：摘要 `actor` 中 `nameMatches(a, queryText, nameList)` 命中的人物的 **IDF 之和**，除以 `Constants.ACTOR_IDF_SATURATION(1.0)` 截断到 1。
-  - `idf(a) = log(1 + (N - d + 0.5)/(d + 0.5))`，`d` = 该人物出现的摘要条目数。
-  - **设计决策**：绝对饱和而非条目内归一 → 只命中高频主角（几乎每条都在场，idf 低）的条目拿不满人物分，稀有角色命中才能饱和。测试 `smoke-hybrid-recall.cjs` 场景 C 专门验证此点。
-  - `nameList` 消歧名单 = 全部摘要人物 ∪ 已知角色名。
+- **S_actor**（v2.13.0 起，原为 IDF 之和绝对饱和）：**Dice 系数** `2|Q∩F|/(|Q|+|F|)`，天然 [0,1]。
+  - `Q` = 从消歧名单 `nameList`（全部摘要人物 ∪ 已知角色名）中 `nameMatches(n, queryText, nameList)` 命中的已知人物集；`F` = 摘要 `actor` 去重集。同一查询对池内所有条目共用同一个 `Q`，分数跨条目可比。
+  - **主角排除**：far 池中 df（出现的摘要条目数）最高的前 `Constants.ACTOR_EXCLUDE_TOP(1)` 名人物在 `Q`、`F` 两侧均剔除 → 纯主角查询的人物分全池为 0（已接受的取舍，由 event/recall 分量兜底）；测试 `smoke-hybrid-recall.cjs` 场景 C 专门验证此点。
+  - **设计决策**：放弃 IDF 稀有度加权（非主角人物等权），换得查询侧/远端侧人数比的可比性——旧版 IDF 之和只反映 far 侧稀有度，查询提到一堆人时无法体现「对不上」。
 - **S_location**：`location` 数组中 `queryText.includes(loc)` 的命中比例。
 - **S_event**：`cosine(queryVec, eventVec)`，clamp 到 [0,1]。
 - **S_recall**：`max(cosine(queryVec, recall_when[i]))`。
@@ -311,15 +312,15 @@ score = 0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall
 
 - **片段（fragments）**：
   - `user` 片段：最新用户消息 `query`（权重 `FRAG_WEIGHT_USER=1.0`）。
-  - `winNew` 片段：窗口中最新的 1 条（权重 `FRAG_WEIGHT_WIN_NEW=0.95`）。
-  - `winNext` 片段：窗口倒数第 2 条（权重 `FRAG_WEIGHT_WIN_NEXT=0.90`）。
+  - `winNew` 片段：窗口中最新的 1 条（权重 `FRAG_WEIGHT_WIN_NEW=0.90`）。
+  - `winNext` 片段：窗口倒数第 2 条（权重 `FRAG_WEIGHT_WIN_NEXT=0.85`）。
   - `winOther` 片段：窗口其余条目（权重 `FRAG_WEIGHT_WIN_OTHER=0.80`）。
   - 窗口为空时只保留 `user` 片段。
-- **每片段对远端条目 computes 一个 fragScore**（与 §7.1 同公式）：`0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall`。其中：
-  - `S_actor`：`user` 片段用 `nameMatches(a, query, nameList)`（IDF 之和，饱和 1）；`window` 片段用窗口条目 actor 与远端 actor 的**成对方差逐对匹配**（任一两集合人名 term 命中即得分，IDF 之和饱和 1）。
+- **每片段对远端条目 computes 一个 fragScore**（与 §7.1 同公式）：`0.25·S_actor + 0.15·S_location + 0.20·S_event + 0.40·S_recall`。其中：
+  - `S_actor`（与 §7.1 同 Dice 公式 + 主角排除）：`user` 片段的 `Q` = 从全角色名单提取消息提及的人物集；`window` 片段的 `Q` = 窗口条目 actor 集；`F` = 远端条目 actor 集。匹配：`user` 片段按集合成员判定，`window` 片段**成对匹配**（任一 `(winActor, farActor)` 对 `nameMatches(winActor, farActor, nameList)` 命中即计 1）。
   - `S_location`：`user` 片段 `query.includes(loc)`；`window` 片段 **层级匹配** `isHierMatch`（如 `酒馆.二楼` ⊂ `酒馆.二楼.卡座`，按 `.` 分段前缀匹配）。
   - `S_event` / `S_recall` = `clamp01(cosine(fragVec, docVec))`，`fragVec` 由 `Embedder.encodeBatch([withQueryInstruction(片段文本)])[0]` 得到。
-- **最终分数**：`score = max_f(w_f · fragScore_f)`，并标注命中贡献最大的 `bestFrag`（UI 展示）。
+- **最终分数**：`score = max_f(w_f · fragScore_f)`，并标注命中贡献最大的 `bestFrag`（`'user'` 或 `'fN'`，N=该窗口条目所在楼层号，楼层由首现归属映射得到；归属缺失时回退 `'wN'`=片段序号；UI 展示为「用户 / 楼层N / 窗口·第N」）。因窗口起点对齐楼层边界，`fN` 必对应整层在窗口内的楼层。
 - **绝不 BM25**：Mode A 下缺失摘要的条目直接排除，不回退词法检索（设计决策：二级摘要开启即信任语义通道）。
 
 ---
@@ -435,7 +436,7 @@ score = 0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall
   - profile 下拉监听 `CONNECTION_PROFILE_LOADED/CREATED/UPDATED/DELETED` 事件刷新；已保存 id 失效时自动清空设置。
 - **模板**：historyPrompt / characterPrompt textarea + JSON 有效性徽章 + 重置按钮（回 `Settings.defaultSettings`）。
 - **角色查看**：角色下拉（活跃角色标 `<活跃角色>`）+ `buildRoleTree` 递归树渲染。
-- **故事历程**：楼层范围查询（起始/结束，空=全部）；单列表渲染每条历程：楼层号 + 天数|时间段|地点 + 历程正文 + 二级摘要块（有效→结构化展示 人物/地点/事件/触发 +「重新生成」；无效→「生成摘要」按钮）；**RAG 命中标记内联**在对应条目上（`hitMap` 以 `Engine.entryToDocText(entry)` 为键反查 `stats.rag.hits`）+ 分数明细徽章（`人x/y 地x/y 事0.xx 忆0.xx → 总分` 或 `BM25 0.xx`）；「仅显示选中楼层」复选框过滤到命中条目；「生成全部摘要」按钮（当前范围）。
+- **故事历程**：楼层范围查询（起始/结束，空=全部）；单列表渲染每条历程：楼层号 + 天数|时间段|地点 + 历程正文 + 二级摘要块（有效→结构化展示 人物/地点/事件/触发 +「重新生成」；无效→「生成摘要」按钮）；**RAG 命中/未命中标记内联**在所有远端（far）条目上（v2.12.0：`farMap` 以 `Engine.entryToDocText(entry)` 为键反查 `stats.rag.farScores`，未命中/被排除条目同样显示；旧格式 stats 降级为仅标记 `rag.hits`）+ 分数明细徽章（`RAG命中/未命中（片段来源） 人x/y(分) 地x/y(分) 事0.xx 忆0.xx → 总分` 或 `BM25 0.xx` 或 `（无二级摘要）`，Mode A 的片段来源即 bestFrag：「用户 / 楼层N / 窗口·第N」（楼层N 必为整层在窗口内的楼层）；命中条目卡片高亮（`.coo-story-item-hit`）；「仅显示选中楼层」复选框过滤到命中条目；「生成全部摘要」按钮（当前范围）。
 - **发送预览**：`Engine.getStats().lastMessage` 原文 `<pre>` 展示。
 
 ### 11.2.1 补漏气泡（v2.9.0）
@@ -496,14 +497,14 @@ score = 0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall
 | 单条装箱按「详细格式」计费 | 最坏成本估计，避免混入聚合天分组后超预算 |
 | BM25 中文 unigram+bigram 无词典分词 | 无词典依赖；bigram 保短语重叠；停用词只滤单字保 bigram |
 | 召回分数双通道归一到 [0,1)（Mode B） | 摘要语义分与 BM25 回退分可比，可混排；Mode A 仅语义通道，无 BM25 |
-| actor 分用 IDF 绝对饱和 | 抑制高频主角的无区分度命中，稀有角色/具体人物才拿满分 |
+| actor 分用 Dice + 出场最多者排除（v2.13.0） | 主角几乎每条在场无判别力，直接两侧剔除；Dice = 查询侧/远端侧命中人数比，同一查询对所有条目用同一个 Q，跨条目可比（v2.13.0 前为 IDF 绝对饱和） |
 | 楼层级 FNV 哈希失效（非逐条） | 楼层 story block 是整体重写的（重新生成/编辑/swipe），逐条哈希无意义；整层清空最简单正确 |
 | 摘要存 `extra`、向量存 `chat_metadata` | extra per-消息随 chat 走；metadata per-chat 存跨消息的派生物（向量按文本哈希跨楼层去重） |
 | 向量库基准维度 = `raw.dims` 优先 / 多数派（v2.11.0） | 旧批量 bug 曾把整批 flatten 的 7680 维长向量写入库（15×512）；「首条定基准」+ 数字哈希键升序迭代 → 单条污染条目令整库丢弃、每次刷新全量重算；多数派 + `raw.dims` 使污染库自愈（污染条目按缺失重编码），`persistVectors` 维度守卫防再发 |
 | 摘要生成串行 + 模块级 running 互斥 | LLM 限流友好；自动/手动互斥避免 extra 写竞争 |
 | 二级摘要手动生成不受总开关限制 | 开关只表达「自动行为」意愿（用户确认的决策） |
 | 摘要 schema 含 `recall_when` | 面向召回而非阅读：「未来何时想起」比事件复述更有检索区分度 |
-| Mode A 分段加权 max（v2.9.0） | 用户片段 + 各窗口条目片段独立计分后取 max → 任一信号（用户提角色 / 上下文提角色）都可触发召回，且天然按重要性加权（最新窗口 0.95 > 次新 0.90 > 其他 0.80 > 用户 1.0） |
+| Mode A 分段加权 max（v2.9.0） | 用户片段 + 各窗口条目片段独立计分后取 max → 任一信号（用户提角色 / 上下文提角色）都可触发召回，且天然按重要性加权（用户 1.0 > 最新窗口 0.90 > 次新 0.85 > 其他 0.80） |
 | Mode A 绝不 BM25 回退 | 二级摘要开启即信任结构化语义通道；未配置连接的缺失条目直接排除，不让词法检索污染语义排序 |
 | 发送前补生成（`ensureRecallSummaries` + 30s 超时） | 二级摘要开启时，缺失摘要先补齐再打分；超时降级为「缺哪些排除哪些」并 warn，不让一次补漏阻塞整次生成 |
 | 召回 LRU 内容寻址缓存（v2.9.0） | fragVec/docVec/pairScore 按内容哈希寻址，新发送只重算新相关远端条目；摘要一变即 miss，无脏缓存；模型切换全清 |
@@ -549,10 +550,11 @@ node test/smoke-hybrid-recall.cjs
 - mock `window/document/navigator` + `NS.bridge`（假 `getTokenCountAsync` = 长度/1 且计数 `tokenCallCount`，最小事件总线 `eventSource` + `fireEvent` 触发器——engine.js 依此订阅 `MESSAGE_RECEIVED` 等消息事件），用 `(0,eval)` 按加载序注入 `settings/engine/subsummary/retrieval` 四个模块（**不加载 embedding/embedstore**——Node 无模型；`scoreFarEntries` 对缺失 `NS.EmbedStore` 有回退路径）。
 - 额外 mock：`NS.RecallCache`（内存、内容寻址忠实实现，验证 LRU 跨发送复用）、`Retriever.retrieve` 间谍（验证 Mode A 不调用 BM25）、`encodeBatch` 计数（验证缓存命中后不再编码）、`Engine.onParseFail` 订阅间谍（验证解析失败气泡广播）。
 - 构造 4 楼层 × 2 条目假聊天（含 6 条新 schema 摘要、1 条旧 schema、1 条无摘要），跑 9 个场景：
-  - **A**（Mode B，Embedder 就绪，稀有角色查询）：chat 压成 1 条、RAG 激活、最优命中是目标条目、走 summary 通道、actor 饱和=1、地点 2/2、分数 ∈ [0,1]。
-  - **C**（Mode B，IDF 抑制）：只提高频主角时纯主角条目 actorScore ≈ 0.24 < 0.3，远低于稀有角色饱和分。
+  - **A**（Mode B，Embedder 就绪，稀有角色查询）：chat 压成 1 条、RAG 激活、最优命中是目标条目、走 summary 通道、actor 1/2 且 actorScore=1（Dice 满分）、地点 2/2、分数 ∈ [0,1]、`farScores` 覆盖全部远端条目（条数=farCount、命中数=hits 数、每条有明细、存在未命中条目）。
+  - **C**（Mode B，主角排除）：只提高频主角时主角两侧剔除 → 纯主角条目 actorScore = 0 且人物 0/1，全部 summary 通道条目人物分均为 0。
   - **B**（Mode B，Embedder 未就绪）：全池走 bm25 通道、分数 ∈ [0,1)。
-  - **A'**（Mode A，全部有摘要）：RAG 激活、全部 summary 通道、**绝不调用 `Retriever.retrieve`**、有 `bestFrag` 标记、最优命中是陈九仓库条目。
+  - **A'**（Mode A，全部有摘要）：RAG 激活、全部 summary 通道、**绝不调用 `Retriever.retrieve`**、有 `bestFrag` 标记、最优命中是陈九仓库条目、`farScores` 全部条目有 `bestFrag` 且未命中条目同样有明细。
+  - **H**（Mode A + 非空窗口，tokenLimit 放大）：RAG 激活、窗口/远端非空、**窗口起点对齐楼层边界**（测试数据对齐后窗口=楼层3+5 共 4 条、远端=楼层1 共 2 条）、全部 `farScores` 的 `bestFrag` ∈ `user/f3/f5`（楼层 1 整体在远端，不得出现 `f1` 或 `wN` 回退）。
   - **D**（Mode A + LRU）：同内容连续两次装配，第二次 `encodeBatch` 计数 = 0（缓存命中）。
   - **E**（Mode A + 装箱剪枝）：精确计数（假 1 字符/token，比估算乐观）触发 `getTokenCountAsync` 多次且命中数 < 远端条目数。
   - **F**（Mode A + 发送前补生成）：e7 旧 schema + e8 无摘要 → 缺失 >0；`ensureRecallSummaries` 被调用 1 次且补后缺失归 0；全部走 summary 通道。
@@ -564,7 +566,7 @@ node test/smoke-hybrid-recall.cjs
 
 1. wand 菜单出现「剧情角色档案」，打开窗口 6 个 tab 正常，控制台无红错。
 2. 开 `extensionToggle`，正常聊天 → 控制台看 `全量 X tokens…RAG 将启用/不启用`、`Final last message`；发送预览与之一致。
-3. 超预算 → RAG 激活，故事历程 tab 条目出现命中高亮 + 分数明细；「仅显示选中楼层」过滤正确。
+3. 超预算 → RAG 激活，故事历程 tab **全部远端条目**出现 RAG命中/未命中徽章 + 分数明细（`人x/y(分) 地x/y(分) 事 忆 → 总分`，Mode A 附 bestFrag 片段来源）；命中条目卡片高亮；「仅显示选中楼层」过滤正确。
 4. 配置二级摘要（fetch 或 profile），发消息 → 最后楼层自动生成摘要并落盘（刷新仍在）；手动 生成所有缺失/强制生成/擦除（口令）行为正确。
 5. 重新生成某楼层 → 该层摘要清空并自动重新生成；向量 store 对应清理（二级摘要 tab 持久化状态行）。
 6. Embedder 加载失败（断网/模型损坏）→ 召回降级纯 BM25，功能不中断，状态行报错。
@@ -580,6 +582,8 @@ node test/smoke-hybrid-recall.cjs
 
 | 版本 | 内容 |
 |---|---|
+| 2.13.0 | **S_actor 计算方式改为 Dice + 主角排除**：原「命中人物 IDF 之和 / `ACTOR_IDF_SATURATION` 饱和」改为 Dice 系数 `2\|Q∩F\|/(|Q|+|F|)`（Q=查询侧人物集，F=远端摘要 actor，两侧去重），并剔除 far 池出场最多（df 最高）的前 `Constants.ACTOR_EXCLUDE_TOP(1)` 名人物——Mode B 的 Q 为查询中 nameMatches 命中的已知人物集（同一查询对全池共用，跨条目可比），Mode A 的 Q 为 user 片段全名单提取 / window 片段条目 actor 集（成对匹配语义不变）；行为变化：纯主角查询人物分全池为 0（旧版约 0.1）、非主角人物不再按稀有度加权；`ACTOR_IDF_SATURATION` 删除；冒烟测试场景 A/C 断言同步更新，9 场景全过 |
+| 2.12.0 | **远端条目 RAG 全量命中/未命中标记**：`rag.farScores` 记录全部远端条目打分明细（text/score/parts/hit，无摘要被排除者为 null）；故事历程 tab 每个 far 卡片显示 `RAG命中/未命中（bestFrag 片段来源：用户/楼层N） 人x/y(人物分) 地x/y(地点分) 事 忆 → 总分`（BM25 通道显示 `BM25 0.xx`，无摘要显示 `（无二级摘要）`），未命中用弱化徽章（`.coo-rag-miss-score`），命中卡片高亮不变；「仅显示选中楼层」仍只过滤命中条目；bestFrag 标记为真实楼层号 `fN`（首现楼层归属映射，UI 显示「用户 / 楼层N」，归属缺失回退 `wN`「窗口·第N」）；**窗口起点对齐楼层边界**（楼层不可拆，被引用的楼层必整层在窗口内，不会与 farEntries 矛盾）；冒烟测试 A/A' 新增 farScores 断言、新增 H 场景（非空窗口对齐 + bestFrag 楼层号）全过 |
 | 2.11.1 | **NEW_STORY_DATA 解析失败检查时机改为消息事件驱动**：原在生成拦截器（发送时）检查，导致某次回复损坏要到下一条消息发送时才提示（滞后一轮）；新增 `Engine.checkParseFailures()`，订阅 `MESSAGE_RECEIVED`（回复到达）/`MESSAGE_EDITED`/`MESSAGE_UPDATED`（修改）/`MESSAGE_SWIPED`（切 swipe）即时检查当前聊天并对新出现失败楼层经 `onParseFail` 广播，基线变化同步 `notifyStats` 刷新失败楼层显示；`MESSAGE_DELETED`/`CHAT_CHANGED`/`CHAT_LOADED` 静默重建基线（楼层下标错位防护）；拦截器内检查移除；修复后重新损坏可再次提示；冒烟测试新增 G2 场景（编辑修复/再损坏），9 场景全过 |
 | 2.11.0 | **UI 响应性修复**（生成二级摘要时界面卡死）：① embedding 推理移入 `core/embed-worker.js` module WebWorker（`embedding.js` 重写为 worker 编排 + 主线程回退，接口不变）；② 二级摘要状态通知 300ms trailing throttle + `lastDone` 单条目增量更新（story tab 不再每条整表重绘）；③ 楼层 story block 解析缓存（`Engine.storyBlockCache`）+ 摘要哈希缓存（`SubSummary.storyHashCache`）；④ 向量同步补齐逐批进度上报（`encodeBatch` 新增 `onProgress`，状态行实时显示 `补齐向量 done/total…`，消除大批量编码时状态行看似卡死）+ worker 初始化失败真正回退主线程（terminate 残留 worker 后走 `initMainThread`，与降级链一致）；⑤ 修复批量向量拆分：v3 feature-extraction 批量输入返回单个 `[N,D]` Tensor 而非逐条数组，旧代码 flatten 成单向量导致 embedstore 收到 `undefined`（`vecToBase64` 抛 `reading 'buffer'`）→ 始终传数组 + `batchToVectors` 按行拆分 + 条数一致性守卫（worker 与主线程回退路径同修）；⑥ WebGPU 加速：`EMBED_USE_WEBGPU` 开关下优先 `{dtype:'fp32', device:'webgpu'}`（捆绑 onnx-community fp32 model.onnx ~95MB），失败/不支持自动回退 q8/WASM，后端经 ready 消息上报、UI 状态行显示「，WebGPU」标记（fp32/q8 向量混用无害，不触发向量库重建）；⑦ 修复污染向量库导致刷新全量重算：旧批量 bug 曾把 7680 维（15×512）长向量写入持久化库，`loadStore`「首条定基准」被单条污染条目击溃 → 整库丢弃、每次刷新重算全部向量；改 `raw.dims` 优先 / 多数派基准维度（污染条目丢弃后按缺失自动重编码，库自愈）+ `persistVectors` 维度守卫 + `resolve` 跳过空向量；同步完成文案改为「向量库现有 X 条（本次新增 Y，清理失效 Z）」消除总数与增量数字不自洽的误读；⑧ 矮窗口模板块塌缩修复：`.coo-template-block` 旧值 `flex: 1 1 0` + `min-height: 0` 在窗口高度不足（section 无剩余空间）时塌缩到 0px，内部 textarea（min-height 96px）溢出绘制到下方状态行/按钮上（二级摘要/模板 tab 均受影响）→ 改 `flex: 1 1 auto`（块至少占内容高，超出经 workspace 滚动，高窗口撑满行为不变）+ `.coo-subsummary-actions` `flex-wrap: wrap`（窄窗换行）；最终渲染结果不变，冒烟测试全过 |
 | 2.2.0 | 分层注入 + 浏览器内 RAG（bge-small-zh via transformers.js） |

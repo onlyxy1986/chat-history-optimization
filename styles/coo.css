@@ -705,16 +705,26 @@
     color: var(--coo-muted);
 }
 
-#coo-root .coo-rag-hit-score {
+#coo-root .coo-rag-hit-score,
+#coo-root .coo-rag-miss-score {
     flex: 0 0 auto;
     font-size: 11px;
     line-height: 1;
     padding: 4px 8px;
     border-radius: 999px;
+    font-variant-numeric: tabular-nums;
+}
+
+#coo-root .coo-rag-hit-score {
     color: var(--coo-valid);
     background: var(--coo-valid-soft);
     border: 1px solid var(--coo-valid-border);
-    font-variant-numeric: tabular-nums;
+}
+
+#coo-root .coo-rag-miss-score {
+    color: var(--coo-muted);
+    background: var(--coo-row-bg);
+    border: 1px solid var(--coo-border-soft);
 }
 
 

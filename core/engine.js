@@ -727,8 +727,10 @@ ${newCharacterCardTemplate}
     /**
      * 远端条目混合打分（与 farEntries 同序返回）：
      * - 有召回特化摘要且 Embedder 就绪：
-     *   score = W_ACTOR·(命中人物/总数) + W_LOCATION·(命中地点/总数)
+     *   score = W_ACTOR·S_actor + W_LOCATION·(命中地点/总数)
      *         + W_EVENT·cos(query,event) + W_RECALL·max(cos(query,recall_when))
+     *   S_actor = 2|Q∩F|/(|Q|+|F|)（Dice），Q=查询提及的已知人物集，F=摘要 actor，
+     *   两侧均排除 far 池 df 最高的前 ACTOR_EXCLUDE_TOP 名人物（主角排除）
      * - 否则：BM25 回退，score = bm25/(bm25+Constants.BM25_NORM_K)
      * Embedder 未就绪时全池走 BM25 归一化（等价于纯 BM25 排序）。
      */
@@ -759,20 +761,22 @@ ${newCharacterCardTemplate}
         }
         const nameList = [...allNames];
 
-        // actor IDF：高频人物（主角几乎每条都在场）命中权重降低，
-        // idf = log(1 + (N - d + 0.5) / (d + 0.5))，d 为该人物出现的摘要条目数；
-        // S_actor 取命中人物 idf 之和的绝对饱和（非条目内归一），
-        // 使"只命中主角"的条目无法拿满人物分
-        const summaryPoolSize = summaries.filter(Boolean).length;
+        // actor 打分：df 最高的前 N 名人物（主角，几乎每条都在场）两侧排除，
+        // S_actor = 2|Q∩F|/(|Q|+|F|)（Dice 系数，天然 [0,1]）；
+        // Q = 查询中 nameMatches 命中的已知人物集（nameList 消歧），同一查询对所有条目共用
         const actorDf = new Map();
         for (const s of summaries) {
             if (!s || !Array.isArray(s.actor)) continue;
             for (const a of new Set(s.actor)) actorDf.set(a, (actorDf.get(a) || 0) + 1);
         }
-        const actorIdf = name => {
-            const d = actorDf.get(name) || 0;
-            return Math.log(1 + (summaryPoolSize - d + 0.5) / (d + 0.5));
-        };
+        const excludedActors = new Set(
+            [...actorDf.entries()].sort((a, b) => b[1] - a[1]).slice(0, Constants.ACTOR_EXCLUDE_TOP).map((e) => e[0])
+        );
+        const queryActorSet = new Set();
+        for (const n of nameList) {
+            if (excludedActors.has(n)) continue;
+            if (nameMatches(n, queryText, nameList)) queryActorSet.add(n);
+        }
 
         // 批量编码 event / recall_when（文档侧不加查询指令）
         const jobTexts = [];
@@ -810,15 +814,11 @@ ${newCharacterCardTemplate}
             const s = summaries[i];
             if (s) {
                 const actors = Array.isArray(s.actor) ? s.actor : [];
+                const farActors = [...new Set(actors)].filter((a) => !excludedActors.has(a));
                 let actorHit = 0;
-                let actorIdfHit = 0;
-                for (const a of new Set(actors)) {
-                    if (nameMatches(a, queryText, nameList)) {
-                        actorHit++;
-                        actorIdfHit += actorIdf(a);
-                    }
-                }
-                const actorScore = Math.min(1, actorIdfHit / Constants.ACTOR_IDF_SATURATION);
+                for (const a of farActors) if (queryActorSet.has(a)) actorHit++;
+                const actorScore = (queryActorSet.size + farActors.length) > 0
+                    ? 2 * actorHit / (queryActorSet.size + farActors.length) : 0;
                 const locations = Array.isArray(s.location) ? s.location : [];
                 let locHit = 0;
                 for (const loc of locations) {
@@ -889,9 +889,32 @@ ${newCharacterCardTemplate}
     // 每个片段对 farEntry 的打分为纯内容函数，缓存于 RecallCache（跨发送精确复用）。
     // 无摘要 farEntry 直接排除（不占预算，绝不 BM25 回退）。
     // ------------------------------------------------------------------
-    async function scoreFarEntriesModeA(queryUserText, farEntries, summaryMap, allRoleNames, windowEntries) {
+    async function scoreFarEntriesModeA(queryUserText, farEntries, summaryMap, allRoleNames, windowEntries, windowFloors) {
         const embedderReady = !!(NS.Embedder && NS.Embedder.isReady());
         const RecallCache = NS.RecallCache;
+
+        // far 池摘要集合：actor df 统计 + 主角排除集 + 消歧名单
+        const farSummaries = farEntries
+            .map((e) => summaryMap.get(JSON.stringify(e)) || null)
+            .filter(Boolean);
+        const actorDf = new Map();
+        for (const s of farSummaries) {
+            if (!Array.isArray(s.actor)) continue;
+            for (const a of new Set(s.actor)) actorDf.set(a, (actorDf.get(a) || 0) + 1);
+        }
+        const excludedActors = new Set(
+            [...actorDf.entries()].sort((a, b) => b[1] - a[1]).slice(0, Constants.ACTOR_EXCLUDE_TOP).map((e) => e[0])
+        );
+        const allNames = new Set(allRoleNames || []);
+        for (const s of farSummaries) if (Array.isArray(s.actor)) for (const a of s.actor) allNames.add(a);
+        const nameList = [...allNames];
+
+        // user 片段人物集：从全角色名单提取消息中提及的人物（排除主角）
+        const userActorSet = new Set();
+        for (const n of nameList) {
+            if (excludedActors.has(n)) continue;
+            if (nameMatches(n, queryUserText, nameList)) userActorSet.add(n);
+        }
 
         // 窗口片段（最新→最旧）
         const windowFrags = [];
@@ -901,11 +924,14 @@ ${newCharacterCardTemplate}
             if (!s) continue; // 无摘要窗口条目：跳过该片段
             const weight = k === windowEntries.length - 1 ? Constants.FRAG_WEIGHT_WIN_NEW
                 : (k === windowEntries.length - 2 ? Constants.FRAG_WEIGHT_WIN_NEXT : Constants.FRAG_WEIGHT_WIN_OTHER);
+            const winActorSet = new Set();
+            if (Array.isArray(s.actor)) for (const a of s.actor) if (!excludedActors.has(a)) winActorSet.add(a);
             windowFrags.push({
                 kind: 'window',
                 weight,
+                floor: windowFloors ? (windowFloors[k] != null ? windowFloors[k] : null) : null,
                 text: (s.event && String(s.event).trim()) || '',
-                actor: Array.isArray(s.actor) ? s.actor : [],
+                actorSet: winActorSet,
                 location: Array.isArray(s.location) ? s.location : [],
                 summary: s,
             });
@@ -914,28 +940,10 @@ ${newCharacterCardTemplate}
             kind: 'user',
             weight: Constants.FRAG_WEIGHT_USER,
             text: queryUserText || '',
-            actor: [],
+            actorSet: userActorSet,
             location: [],
             summary: null,
         }].concat(windowFrags);
-
-        // far 池摘要集合：IDF 统计 + 消歧名单
-        const farSummaries = farEntries
-            .map((e) => summaryMap.get(JSON.stringify(e)) || null)
-            .filter(Boolean);
-        const summaryPoolSize = farSummaries.length;
-        const actorDf = new Map();
-        for (const s of farSummaries) {
-            if (!Array.isArray(s.actor)) continue;
-            for (const a of new Set(s.actor)) actorDf.set(a, (actorDf.get(a) || 0) + 1);
-        }
-        const actorIdf = (name) => {
-            const d = actorDf.get(name) || 0;
-            return Math.log(1 + (summaryPoolSize - d + 0.5) / (d + 0.5));
-        };
-        const allNames = new Set(allRoleNames || []);
-        for (const s of farSummaries) if (Array.isArray(s.actor)) for (const a of s.actor) allNames.add(a);
-        const nameList = [...allNames];
 
         // 文档侧向量：优先命中 RecallCache.docVec，缺失经 EmbedStore 解析并回写
         const entryDocs = new Array(farEntries.length);
@@ -1037,21 +1045,20 @@ ${newCharacterCardTemplate}
                     fragScore = cached.fragScore;
                     parts = cached.parts;
                 } else {
-                    // S_actor
-                    let actorIdfHit = 0, actorHit = 0;
-                    const farActorSet = new Set(actors);
+                    // S_actor：Dice = 2|Q∩F|/(|Q|+|F|)，Q=片段人物集，F=远端 actor，两侧均排除主角
+                    const farActors = [...new Set(actors)].filter((a) => !excludedActors.has(a));
+                    let actorHit = 0;
                     if (f.kind === 'window') {
-                        for (const aFar of farActorSet) {
-                            for (const aWin of f.actor) {
-                                if (nameMatches(aWin, aFar, nameList)) { actorIdfHit += actorIdf(aFar); actorHit++; break; }
+                        for (const aFar of farActors) {
+                            for (const aWin of f.actorSet) {
+                                if (nameMatches(aWin, aFar, nameList)) { actorHit++; break; }
                             }
                         }
                     } else {
-                        for (const aFar of farActorSet) {
-                            if (nameMatches(aFar, f.text, nameList)) { actorIdfHit += actorIdf(aFar); actorHit++; }
-                        }
+                        for (const aFar of farActors) if (f.actorSet.has(aFar)) actorHit++;
                     }
-                    const actorScore = Math.min(1, actorIdfHit / Constants.ACTOR_IDF_SATURATION);
+                    const actorScore = (f.actorSet.size + farActors.length) > 0
+                        ? 2 * actorHit / (f.actorSet.size + farActors.length) : 0;
                     // S_location
                     let locHit = 0;
                     if (f.kind === 'window') {
@@ -1086,7 +1093,7 @@ ${newCharacterCardTemplate}
                 const weighted = f.weight * fragScore;
                 if (weighted > bestScore) {
                     bestScore = weighted;
-                    bestLabel = (fi === 0) ? 'user' : ('w' + fi);
+                    bestLabel = (fi === 0) ? 'user' : (f.floor != null ? ('f' + f.floor) : ('w' + fi));
                     bestParts = parts;
                 }
             }
@@ -1172,6 +1179,7 @@ ${newCharacterCardTemplate}
             active: false,
             willActivate: ragWillActivate,
             hits: [],
+            farScores: [],
             windowCount: midEntries.length,
             farCount: 0,
             query: '',
@@ -1199,6 +1207,28 @@ ${newCharacterCardTemplate}
             if (tailTok > midBudget) {
                 console.warn(`[Chat History Optimization] 正文+角色卡（${tailTok}）超出中段预算（${midBudget}）且无可丢弃消息，最终将超 tokenLimit，请调大 tokenLimit 或调小 keepCount`);
             }
+            // 楼层归属：按首现顺序扫各楼层 NEW_HISTORY 块，原始条目 JSON 作键
+            // （与 getStoryProgressRange 的全局去重语义一致），供窗口对齐与 bestFrag 楼层标注
+            const floorByKey = new Map();
+            {
+                const seen = new Set();
+                for (let f = 1; f < chatCopy.length; f++) {
+                    const item = chatCopy[f];
+                    if (!item) continue;
+                    const isAssistant = ("is_user" in item && !item.is_user) || (item.role && item.role == "assistant");
+                    if (!isAssistant) continue;
+                    const block = getFloorStoryBlock(item);
+                    if (!block || !Array.isArray(block.故事历程)) continue;
+                    for (const e of block.故事历程) {
+                        if (!e || typeof e !== 'object') continue;
+                        const key = JSON.stringify(e);
+                        if (seen.has(key)) continue;
+                        seen.add(key);
+                        floorByKey.set(key, f);
+                    }
+                }
+            }
+            const midFloors = midEntries.map((e) => floorByKey.get(JSON.stringify(e)) ?? null);
             // 二分搜索最大后缀窗口 k：tokens(窗口markdown + 正文 + 角色卡) ≤ midBudget
             let lo = 0, hi = midEntries.length, bestK = 0;
             while (lo <= hi) {
@@ -1211,6 +1241,14 @@ ${newCharacterCardTemplate}
                 } else {
                     hi = k - 1;
                 }
+            }
+            // 窗口起点对齐楼层边界：楼层不可拆，整层要么在窗口要么在远端
+            while (bestK > 0) {
+                const start = midEntries.length - bestK;
+                if (start === 0) break;
+                const fCur = midFloors[start], fPrev = midFloors[start - 1];
+                if (fCur == null || fPrev == null || fCur !== fPrev) break;
+                bestK--;
             }
             const farEntries = midEntries.slice(0, midEntries.length - bestK);
             midMarkdown = bestK === 0 ? '' : renderJourneyMarkdown(midEntries.slice(midEntries.length - bestK), midMaxDay);
@@ -1252,7 +1290,8 @@ ${newCharacterCardTemplate}
                             console.warn(`[Chat History Optimization] 二级摘要功能已开启但未配置连接，缺失 ${missing} 条摘要未生成，相关条目本次不参与召回`);
                         }
                         const windowEntries = bestK === 0 ? [] : midEntries.slice(midEntries.length - bestK);
-                        scored = await scoreFarEntriesModeA(query, farEntries, summaryMap, allRoleNames, windowEntries);
+                        const windowFloors = bestK === 0 ? [] : midFloors.slice(midEntries.length - bestK);
+                        scored = await scoreFarEntriesModeA(query, farEntries, summaryMap, allRoleNames, windowEntries, windowFloors);
                     } else {
                         scored = await scoreFarEntries(queryText, farEntries, docs, summaryMap, allRoleNames);
                     }
@@ -1304,9 +1343,21 @@ ${newCharacterCardTemplate}
                             tok = await getTokenCountAsync(ragMarkdown);
                         }
                     }
+                    // 全部远端条目的打分明细（命中 + 未命中 + 无摘要被排除），
+                    // UI 以 entryToDocText 反查，在每个 far 卡片上标记 RAG命中/未命中
+                    rag.farScores = farEntries.map((entry, i) => {
+                        const r = scored[i];
+                        const text = docs[i];
+                        return {
+                            text,
+                            score: r ? r.score : null,
+                            parts: r ? r.parts : null,
+                            hit: !!(text && packedSet.has(text)),
+                        };
+                    });
                 } catch (e) {
                     console.error('[Chat History Optimization] RAG retrieval failed, keeping capped window mid', e);
-                    rag = { active: false, willActivate: true, hits: [], windowCount: bestK, farCount: farEntries.length, query: rag.query };
+                    rag = { active: false, willActivate: true, hits: [], farScores: [], windowCount: bestK, farCount: farEntries.length, query: rag.query };
                     ragMarkdown = '';
                     // midMarkdown 保持二分窗口结果（≤ midBudget），不退回无上限全量
                 }
