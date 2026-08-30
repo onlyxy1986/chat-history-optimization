@@ -37,10 +37,6 @@
     };
     const statsListeners = new Set();
 
-    function printObj(comment, obj) {
-        console.log(`[${comment}]`, JSON.parse(JSON.stringify(obj, null, 2)));
-    }
-
     function parseTemplate(text, verbose = false) {
         if (typeof text !== 'string' || text.trim() === '') return null;
         // 移除//开头的注释
@@ -1386,8 +1382,6 @@ ${newCharacterCardTemplate}
             return;
         }
 
-        printObj("[Chat History Optimization] Original chat history:", chat);
-
         // 深拷贝：mergeDataInfo 会写入 item.messageCount，不能污染 ST 数据
         const chatCopy = JSON.parse(JSON.stringify(chat));
         const result = await assembleFinalPrompt(chatCopy, { runRag: true });
@@ -1412,7 +1406,6 @@ ${newCharacterCardTemplate}
         });
 
         console.log("[Chat History Optimization] token count:", result.tokenCount);
-        printObj("[Chat History Optimization] Final Summary Info", { historyData, characterData, ragMarkdown: result.ragMarkdown });
         if (result.tokenCount > Settings.get('tokenLimit')) {
             console.warn(`[Chat History Optimization] 最终 ${result.tokenCount} tokens 仍超 tokenLimit=${Settings.get('tokenLimit')}（正文/角色卡本身超预算且无可丢弃消息），请调大 tokenLimit 或调小 keepCount`);
         }
