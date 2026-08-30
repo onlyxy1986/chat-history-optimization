@@ -70,7 +70,7 @@
         return () => statsListeners.delete(listener);
     }
 
-    // <NEW_STORY_DATA> 解析失败总线：拦截器检测到新失败楼层时广播
+    // <NEW_STORY_DATA> 解析失败总线：回复到达/消息修改后检测到新失败楼层时广播
     // [{index, reasons: [原因, ...]}]，UI 订阅渲染提示气泡（engine 不碰 DOM）。
     const parseFailListeners = new Set();
 
@@ -1372,6 +1372,33 @@ ${newCharacterCardTemplate}
         });
     }
 
+    /**
+     * 轻量检查当前聊天中新出现的 NEW_STORY_DATA 解析失败楼层，
+     * 经 onParseFail 总线广播（只报相对上次基线新出现的，历史失败不重复提示）。
+     * 由消息事件驱动（回复到达/编辑/更新/切 swipe），不在生成发送时检查。
+     * silent 模式（删消息/切聊天）：楼层下标整体错位，只静默重建基线不广播。
+     */
+    function checkParseFailures(options) {
+        const silent = !!(options && options.silent);
+        if (!Settings.get('extensionToggle')) return;
+        const sourceChat = NS.bridge && NS.bridge.getCurrentChat ? NS.bridge.getCurrentChat() : null;
+        if (!sourceChat || !Array.isArray(sourceChat) || sourceChat.length === 0) return;
+        const chatCopy = JSON.parse(JSON.stringify(sourceChat));
+        const historyTemplate = parseTemplate(Settings.get('historyPrompt'));
+        const characterTemplate = isRoleCardEnabled() ? parseTemplate(Settings.get('characterPrompt')) : null;
+        const { failedFloors, failedDetails } = mergeDataInfo(chatCopy, historyTemplate, characterTemplate);
+        const newlyFailed = failedFloors.filter(i => !lastStats.failedFloors.includes(i));
+        if (!silent && newlyFailed.length > 0) {
+            notifyParseFail(failedDetails.filter(d => newlyFailed.includes(d.index)));
+        }
+        const prev = lastStats.failedFloors;
+        const changed = failedFloors.length !== prev.length || failedFloors.some((i, idx) => prev[idx] !== i);
+        if (changed) {
+            if (silent) lastStats = { ...lastStats, failedFloors };
+            else notifyStats({ failedFloors });
+        }
+    }
+
     globalThis.replaceChatHistoryWithDetailsV2 = async function (chat, contextSize, abort, type) {
         if (!chat || !Array.isArray(chat) || chat.length === 0) {
             console.warn("[Chat History Optimization] No chat history to process.");
@@ -1389,12 +1416,6 @@ ${newCharacterCardTemplate}
         const characterData = result.characterData;
 
         chat[chat.length - 1]['mes'] = result.lastMessage;
-
-        // 只对新出现的失败楼层弹气泡，历史失败不重复提示
-        const newlyFailed = result.failedFloors.filter(i => !lastStats.failedFloors.includes(i));
-        if (newlyFailed.length > 0) {
-            notifyParseFail(result.failedDetails.filter(d => newlyFailed.includes(d.index)));
-        }
 
         notifyStats({
             failedFloors: result.failedFloors,
@@ -1420,6 +1441,19 @@ ${newCharacterCardTemplate}
         }
         console.log("[Chat History Optimization] Final last message:", chat[chat.length - 1]['mes']);
     };
+
+    // 解析失败检查改为消息事件驱动（v2.11.1）：回复到达/编辑/更新/切 swipe 时检查；
+    // 删消息/切聊天时楼层下标错位，静默重建失败楼层基线避免误报
+    const { eventSource, eventTypes } = NS.bridge;
+    if (eventSource && eventTypes) {
+        if (eventTypes.MESSAGE_RECEIVED) eventSource.on(eventTypes.MESSAGE_RECEIVED, () => checkParseFailures());
+        if (eventTypes.MESSAGE_EDITED) eventSource.on(eventTypes.MESSAGE_EDITED, () => checkParseFailures());
+        if (eventTypes.MESSAGE_UPDATED) eventSource.on(eventTypes.MESSAGE_UPDATED, () => checkParseFailures());
+        if (eventTypes.MESSAGE_SWIPED) eventSource.on(eventTypes.MESSAGE_SWIPED, () => checkParseFailures());
+        if (eventTypes.MESSAGE_DELETED) eventSource.on(eventTypes.MESSAGE_DELETED, () => checkParseFailures({ silent: true }));
+        if (eventTypes.CHAT_CHANGED) eventSource.on(eventTypes.CHAT_CHANGED, () => checkParseFailures({ silent: true }));
+        if (eventTypes.CHAT_LOADED) eventSource.on(eventTypes.CHAT_LOADED, () => checkParseFailures({ silent: true }));
+    }
 
     NS.Engine = Object.freeze({
         wordMapping,

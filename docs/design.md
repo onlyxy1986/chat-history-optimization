@@ -137,7 +137,7 @@ AI 回复末尾（由 `getCharPrompt` 注入的模板要求）输出：
 - 取第一个 `{...}` 后 `JSON.parse`。
 - `NEW_HISTORY` **必选**：缺失/解析失败 → 该楼层进 `failedFloors`（UI 红色显示）。
 - `NEW_CHARACTER_CARD` **可选**：无新角色或角色卡功能关闭（`roleCardToggle`）时合法缺失。
-- **失败原因明细（v2.10.2）**：`mergeDataInfo` 同时收集 `failedDetails = [{index, reasons:[...]}]`（每层去重原因，如「缺少 NEW_STORY_DATA 块 / 缺少 NEW_HISTORY 区段 / NEW_HISTORY 解析错误 / NEW_CHARACTER_CARD 解析错误」）。生成拦截器对**新出现**的失败楼层（相对上次 stats）经 `Engine.onParseFail` 总线广播，UI 弹出解析失败气泡（见 §11.2.2）；历史失败不重复提示。
+- **失败原因明细（v2.10.2，v2.11.1 改为事件驱动）**：`mergeDataInfo` 同时收集 `failedDetails = [{index, reasons:[...]}]`（每层去重原因，如「缺少 NEW_STORY_DATA 块 / 缺少 NEW_HISTORY 区段 / NEW_HISTORY 解析错误 / NEW_CHARACTER_CARD 解析错误」）。`Engine.checkParseFailures()` 在**回复到达/消息修改后**（非生成发送时）重解析当前聊天，对**新出现**的失败楼层（相对上次基线）经 `Engine.onParseFail` 总线广播，UI 弹出解析失败气泡（见 §11.2.2）；历史失败不重复提示。
 
 ### 4.3 模板解析（`Engine.parseTemplate`）
 
@@ -442,9 +442,11 @@ score = 0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall
 
 - Mode A 发送前若需补生成缺失摘要，`recallcache.js` 经 `onFill(status)` 总线广播 `{filling, count}` / `{filled}`；`coo-window.js` 订阅后在右下角浮动 `#coo-fill-bubble`（`.coo-fill-bubble`，`coo.css` 新增样式）显示「正在补漏 N 个二级摘要…」，完成后淡出。仅 `subSummaryToggle` 开且确有缺失时弹出。
 
-### 11.2.2 解析失败气泡（v2.10.2）
+### 11.2.2 解析失败气泡（v2.10.2，v2.11.1 检查时机改为消息事件驱动）
 
-- 生成拦截器检测到**新出现**的 `<NEW_STORY_DATA>` 解析失败楼层时，`engine.js` 经 `onParseFail(details)` 总线广播 `[{index, reasons}]`（engine 不碰 DOM，模式同 onStats/onFill）；`coo-window.js` 订阅后在右下角浮动 `#coo-parsefail-bubble`（`.coo-parsefail-bubble`，红色，位于补漏气泡上方）显示「NEW_STORY_DATA 解析失败（楼层X：原因；…」，`Constants.PARSE_FAIL_BUBBLE_TIMEOUT_MS`（默认 8s）后自动隐藏；重复发送不重复弹出（历史失败楼层不触发）。
+- 检查时机：`engine.js` 订阅 ST 消息事件——`MESSAGE_RECEIVED`（回复到达）/`MESSAGE_EDITED`/`MESSAGE_UPDATED`（消息修改）/`MESSAGE_SWIPED`（切 swipe）触发 `checkParseFailures()`；`MESSAGE_DELETED`/`CHAT_CHANGED`/`CHAT_LOADED` 触发**静默重建基线**（`silent` 模式：只更新 `lastStats.failedFloors` 不广播、不通知 UI，避免楼层下标错位导致误报/漏报）。不在生成拦截器（发送时）检查——发送时最新回复尚未到达，检查必然滞后一轮。
+- `checkParseFailures` 深拷贝当前 chat 走 `mergeDataInfo`（与生成同一解析逻辑），对**新出现**的失败楼层（相对上次基线）经 `onParseFail(details)` 总线广播 `[{index, reasons}]`（engine 不碰 DOM，模式同 onStats/onFill）；基线变化时同步 `notifyStats({failedFloors})` 刷新 UI 失败楼层显示（silent 模式除外）。
+- `coo-window.js` 订阅后在右下角浮动 `#coo-parsefail-bubble`（`.coo-parsefail-bubble`，红色，位于补漏气泡上方）显示「NEW_STORY_DATA 解析失败（楼层X：原因；…」，`Constants.PARSE_FAIL_BUBBLE_TIMEOUT_MS`（默认 8s）后自动隐藏；已入基线的失败楼层不重复弹出，修复后再损坏会重新提示。
 
 ### 11.3 刷新链路
 
@@ -544,9 +546,9 @@ score = 0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall
 node test/smoke-hybrid-recall.cjs
 ```
 
-- mock `window/document/navigator` + `NS.bridge`（假 `getTokenCountAsync` = 长度/1 且计数 `tokenCallCount`，假 `eventSource`），用 `(0,eval)` 按加载序注入 `settings/engine/subsummary/retrieval` 四个模块（**不加载 embedding/embedstore**——Node 无模型；`scoreFarEntries` 对缺失 `NS.EmbedStore` 有回退路径）。
+- mock `window/document/navigator` + `NS.bridge`（假 `getTokenCountAsync` = 长度/1 且计数 `tokenCallCount`，最小事件总线 `eventSource` + `fireEvent` 触发器——engine.js 依此订阅 `MESSAGE_RECEIVED` 等消息事件），用 `(0,eval)` 按加载序注入 `settings/engine/subsummary/retrieval` 四个模块（**不加载 embedding/embedstore**——Node 无模型；`scoreFarEntries` 对缺失 `NS.EmbedStore` 有回退路径）。
 - 额外 mock：`NS.RecallCache`（内存、内容寻址忠实实现，验证 LRU 跨发送复用）、`Retriever.retrieve` 间谍（验证 Mode A 不调用 BM25）、`encodeBatch` 计数（验证缓存命中后不再编码）、`Engine.onParseFail` 订阅间谍（验证解析失败气泡广播）。
-- 构造 4 楼层 × 2 条目假聊天（含 6 条新 schema 摘要、1 条旧 schema、1 条无摘要），跑 8 个场景：
+- 构造 4 楼层 × 2 条目假聊天（含 6 条新 schema 摘要、1 条旧 schema、1 条无摘要），跑 9 个场景：
   - **A**（Mode B，Embedder 就绪，稀有角色查询）：chat 压成 1 条、RAG 激活、最优命中是目标条目、走 summary 通道、actor 饱和=1、地点 2/2、分数 ∈ [0,1]。
   - **C**（Mode B，IDF 抑制）：只提高频主角时纯主角条目 actorScore ≈ 0.24 < 0.3，远低于稀有角色饱和分。
   - **B**（Mode B，Embedder 未就绪）：全池走 bm25 通道、分数 ∈ [0,1)。
@@ -554,7 +556,8 @@ node test/smoke-hybrid-recall.cjs
   - **D**（Mode A + LRU）：同内容连续两次装配，第二次 `encodeBatch` 计数 = 0（缓存命中）。
   - **E**（Mode A + 装箱剪枝）：精确计数（假 1 字符/token，比估算乐观）触发 `getTokenCountAsync` 多次且命中数 < 远端条目数。
   - **F**（Mode A + 发送前补生成）：e7 旧 schema + e8 无摘要 → 缺失 >0；`ensureRecallSummaries` 被调用 1 次且补后缺失归 0；全部走 summary 通道。
-  - **G**（解析失败气泡总线）：某楼层 NEW_STORY_DATA 块 JSON 损坏 → 拦截器经 `onParseFail` 广播该楼层与原因；同内容再次发送不重复广播（历史失败不触发）。
+  - **G**（解析失败气泡总线，事件驱动）：某楼层 NEW_STORY_DATA 块 JSON 损坏 → `MESSAGE_RECEIVED` 事件触发引擎检查，经 `onParseFail` 广播该楼层与原因；同内容再次到达不重复广播（历史失败不触发）。
+  - **G2**（编辑修复/再损坏）：修复楼层后 `MESSAGE_EDITED` 不再广播且失败基线清空；再次损坏则重新广播（修复后重新损坏可再提示）。
 - 改召回打分/装配/缓存逻辑后**必须跑此测试**；新增场景往 `runCase` + `check` 里加。
 
 ### 15.2 浏览器手工验证清单
@@ -569,6 +572,7 @@ node test/smoke-hybrid-recall.cjs
 8. （v2.11.0）生成二级摘要时页面保持可交互（推理在 WebWorker，DevTools → Workers 可见 `embed-worker.js`）；批量生成期间 story tab 条目逐条原地更新、状态行 300ms 节流刷新，批次结束后列表完整重绘；worker 不可用时自动回退主线程（状态行仍走 loading/ready）。
 9. （v2.11.0）WebGPU 加速：Chrome/Edge 打开 `chrome://gpu` 确认 WebGPU 可用后，二级摘要 tab 状态行显示「召回嵌入模型：就绪（bge-small-zh 本地，WebGPU）」，加载阶段显示「加载模型 bge-small-zh-v1.5（WebGPU fp32）…」；大批量补齐向量明显快于 WASM；无 WebGPU 的环境状态行无「，WebGPU」标记且加载阶段显示「（WASM q8）」；`Constants.EMBED_USE_WEBGPU=false` 时始终走 WASM q8。
 10. （v2.11.0）矮窗口/窄窗口响应式：把浏览器窗口高度压到 600px 左右打开二级摘要/模板 tab → 模板 textarea 保持内容高度、不与下方状态行/按钮重叠，超出部分经 workspace 滚动条访问；窗口宽度 <760px 时侧栏为纯图标栏、操作按钮自动换行不溢出。
+11. （v2.11.1）解析失败气泡时机：让某次回复的 `<NEW_STORY_DATA>` JSON 损坏 → **回复到达即**弹出红色气泡（无需再发一条消息）；手动编辑修复该楼层后气泡不再出现、侧栏失败楼层消失；再次编辑弄坏 → 重新弹出；删除消息/切换聊天不产生误报气泡。
 
 ---
 
@@ -576,6 +580,7 @@ node test/smoke-hybrid-recall.cjs
 
 | 版本 | 内容 |
 |---|---|
+| 2.11.1 | **NEW_STORY_DATA 解析失败检查时机改为消息事件驱动**：原在生成拦截器（发送时）检查，导致某次回复损坏要到下一条消息发送时才提示（滞后一轮）；新增 `Engine.checkParseFailures()`，订阅 `MESSAGE_RECEIVED`（回复到达）/`MESSAGE_EDITED`/`MESSAGE_UPDATED`（修改）/`MESSAGE_SWIPED`（切 swipe）即时检查当前聊天并对新出现失败楼层经 `onParseFail` 广播，基线变化同步 `notifyStats` 刷新失败楼层显示；`MESSAGE_DELETED`/`CHAT_CHANGED`/`CHAT_LOADED` 静默重建基线（楼层下标错位防护）；拦截器内检查移除；修复后重新损坏可再次提示；冒烟测试新增 G2 场景（编辑修复/再损坏），9 场景全过 |
 | 2.11.0 | **UI 响应性修复**（生成二级摘要时界面卡死）：① embedding 推理移入 `core/embed-worker.js` module WebWorker（`embedding.js` 重写为 worker 编排 + 主线程回退，接口不变）；② 二级摘要状态通知 300ms trailing throttle + `lastDone` 单条目增量更新（story tab 不再每条整表重绘）；③ 楼层 story block 解析缓存（`Engine.storyBlockCache`）+ 摘要哈希缓存（`SubSummary.storyHashCache`）；④ 向量同步补齐逐批进度上报（`encodeBatch` 新增 `onProgress`，状态行实时显示 `补齐向量 done/total…`，消除大批量编码时状态行看似卡死）+ worker 初始化失败真正回退主线程（terminate 残留 worker 后走 `initMainThread`，与降级链一致）；⑤ 修复批量向量拆分：v3 feature-extraction 批量输入返回单个 `[N,D]` Tensor 而非逐条数组，旧代码 flatten 成单向量导致 embedstore 收到 `undefined`（`vecToBase64` 抛 `reading 'buffer'`）→ 始终传数组 + `batchToVectors` 按行拆分 + 条数一致性守卫（worker 与主线程回退路径同修）；⑥ WebGPU 加速：`EMBED_USE_WEBGPU` 开关下优先 `{dtype:'fp32', device:'webgpu'}`（捆绑 onnx-community fp32 model.onnx ~95MB），失败/不支持自动回退 q8/WASM，后端经 ready 消息上报、UI 状态行显示「，WebGPU」标记（fp32/q8 向量混用无害，不触发向量库重建）；⑦ 修复污染向量库导致刷新全量重算：旧批量 bug 曾把 7680 维（15×512）长向量写入持久化库，`loadStore`「首条定基准」被单条污染条目击溃 → 整库丢弃、每次刷新重算全部向量；改 `raw.dims` 优先 / 多数派基准维度（污染条目丢弃后按缺失自动重编码，库自愈）+ `persistVectors` 维度守卫 + `resolve` 跳过空向量；同步完成文案改为「向量库现有 X 条（本次新增 Y，清理失效 Z）」消除总数与增量数字不自洽的误读；⑧ 矮窗口模板块塌缩修复：`.coo-template-block` 旧值 `flex: 1 1 0` + `min-height: 0` 在窗口高度不足（section 无剩余空间）时塌缩到 0px，内部 textarea（min-height 96px）溢出绘制到下方状态行/按钮上（二级摘要/模板 tab 均受影响）→ 改 `flex: 1 1 auto`（块至少占内容高，超出经 workspace 滚动，高窗口撑满行为不变）+ `.coo-subsummary-actions` `flex-wrap: wrap`（窄窗换行）；最终渲染结果不变，冒烟测试全过 |
 | 2.2.0 | 分层注入 + 浏览器内 RAG（bge-small-zh via transformers.js） |
 | 2.2.5 | 最终消息计数；发送预览 tab |

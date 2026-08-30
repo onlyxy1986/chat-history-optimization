@@ -9,6 +9,11 @@ global.document = { readyState: 'complete', addEventListener() { }, createElemen
 
 const chat = [];
 let tokenCallCount = 0;
+// 最小事件总线 mock：engine.js 依此订阅 MESSAGE_RECEIVED 等消息事件
+const eventListeners = {};
+function fireEvent(type, ...args) {
+    (eventListeners[type] || []).slice().forEach(fn => fn(...args));
+}
 window.ChatOptimizationV2 = {
     loaded: true,
     version: '2.5.0-test',
@@ -19,8 +24,20 @@ window.ChatOptimizationV2 = {
         getTokenCountAsync: async (text) => { tokenCallCount++; return Math.ceil(String(text || '').length / 1); },
         getCurrentChat: () => chat,
         saveChatDebounced: () => { },
-        eventSource: { on() { }, off() { } },
-        eventTypes: { GENERATION_ENDED: 'GENERATION_ENDED' },
+        eventSource: {
+            on: (type, fn) => { (eventListeners[type] = eventListeners[type] || []).push(fn); },
+            off: (type, fn) => { eventListeners[type] = (eventListeners[type] || []).filter(f => f !== fn); },
+        },
+        eventTypes: {
+            GENERATION_ENDED: 'GENERATION_ENDED',
+            MESSAGE_RECEIVED: 'message_received',
+            MESSAGE_EDITED: 'message_edited',
+            MESSAGE_UPDATED: 'message_updated',
+            MESSAGE_SWIPED: 'message_swiped',
+            MESSAGE_DELETED: 'message_deleted',
+            CHAT_CHANGED: 'chat_id_changed',
+            CHAT_LOADED: 'chatLoaded',
+        },
     },
 };
 
@@ -312,19 +329,30 @@ function validSummaryFor(entry) {
     check('F: 补生成后缺失为 0', countMissing() === 0, countMissing());
     check('F: RAG 激活且全部走 summary 通道', ragF && ragF.active === true && ragF.hits.length > 0 && ragF.hits.every(h => h.parts.source === 'summary'), ragF.hits);
 
-    // 场景 G（解析失败气泡总线）：楼层 3（第 2 个 assistant 楼层）的 NEW_HISTORY JSON 损坏
-    // → onParseFail 广播该楼层与原因；同内容再次发送不重复广播（历史失败楼层不触发）
+    // 场景 G（解析失败气泡总线，v2.11.1 事件驱动）：楼层 3（第 2 个 assistant 楼层）的 NEW_HISTORY JSON 损坏
+    // → MESSAGE_RECEIVED 到达事件触发引擎检查，onParseFail 广播该楼层与原因；同内容再次到达不重复广播（历史失败楼层不触发）
     const brokenMes = '损坏楼层\n<NEW_STORY_DATA>\n<NEW_HISTORY>\n{ "故事历程": [ { 损坏\n</NEW_HISTORY>\n</NEW_STORY_DATA>';
     parseFailEvents.length = 0;
     buildChat('陈九提到了码头仓库的货物', true);
     chat[3].mes = brokenMes;
     installFakeEmbedder(true);
     NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings(modeAConfig());
-    await quiet(globalThis.replaceChatHistoryWithDetailsV2(chat, 4096, null, 0));
-    check('G: 首次发送广播一次', parseFailEvents.length === 1, parseFailEvents.length);
+    fireEvent('message_received', 3);
+    check('G: 回复到达时广播一次', parseFailEvents.length === 1, parseFailEvents.length);
     check('G: 广播含楼层 3 且原因非空', parseFailEvents[0] && parseFailEvents[0].some(d => d.index === 3 && d.reasons.length > 0), parseFailEvents[0]);
     buildChat('陈九提到了码头仓库的货物', true);
     chat[3].mes = brokenMes;
-    await quiet(globalThis.replaceChatHistoryWithDetailsV2(chat, 4096, null, 0));
-    check('G: 相同失败再次发送不重复广播', parseFailEvents.length === 1, parseFailEvents.length);
+    fireEvent('message_received', 3);
+    check('G: 相同失败再次到达不重复广播', parseFailEvents.length === 1, parseFailEvents.length);
+    // 场景 G2（消息编辑修复）：修复楼层 3 后编辑事件不再广播；再弄坏则重新广播
+    buildChat('陈九提到了码头仓库的货物', true);
+    chat[3].mes = brokenMes;
+    fireEvent('message_received', 3);
+    chat[3].mes = makeFloor([e3, e4], null).mes;
+    fireEvent('message_edited', 3);
+    check('G2: 修复后无新广播', parseFailEvents.length === 1, parseFailEvents.length);
+    check('G2: 失败楼层基线已更新', NS.Engine.getStats().failedFloors.length === 0, NS.Engine.getStats().failedFloors);
+    chat[3].mes = brokenMes;
+    fireEvent('message_edited', 3);
+    check('G2: 重新损坏后再次广播', parseFailEvents.length === 2, parseFailEvents.length);
 })().catch(e => { console.error('TEST ERROR', e); process.exit(1); });
