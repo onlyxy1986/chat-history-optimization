@@ -447,20 +447,40 @@
         return parts.map(s => (s || '').trim()).filter(Boolean).join('\n');
     }
 
+    // 故事块解析结果缓存：以楼层消息对象为键，
+    // 按 (mes 引用 + 当前 swipe 文本引用) 双重校验有效性——
+    // 字符串不可变，mes 被替换或当前 swipe 内容变化都会导致引用不同而自动重解析。
+    // 上限由 Constants.STORY_PARSE_CACHE_MAX 控制，超限整体清空重建。
+    const storyBlockCache = new Map();
+
     /**
-     * 解析单条楼层消息中的 <NEW_STORY_DATA><NEW_HISTORY> 区段，返回解析后的对象。
-     * 与 mergeDataInfo 的提取逻辑一致（mes 优先，swipes 回退），解析失败返回 null。
-     */
+      * 解析单条楼层消息中的 <NEW_STORY_DATA><NEW_HISTORY> 区段，返回解析后的对象。
+      * 与 mergeDataInfo 的提取逻辑一致（mes 优先，swipes 回退），解析失败返回 null。
+      */
     function getFloorStoryBlock(item) {
         if (!item) return null;
+        const mes = item.mes;
+        const swipeText = ("swipes" in item && "swipe_id" in item && item.swipes[item.swipe_id])
+            ? item.swipes[item.swipe_id] : null;
+        let slot = storyBlockCache.get(item);
+        if (slot && slot.mes === mes && slot.swipeText === swipeText) {
+            return slot.result;
+        }
+        const result = parseFloorStoryBlock(item, mes, swipeText);
+        if (storyBlockCache.size >= Constants.STORY_PARSE_CACHE_MAX) storyBlockCache.clear();
+        storyBlockCache.set(item, { mes, swipeText, result });
+        return result;
+    }
+
+    function parseFloorStoryBlock(item, mes, swipeText) {
         let matches = [];
-        if (item.mes) {
-            matches = [...item.mes
+        if (mes) {
+            matches = [...mes
                 .replace(/\/\/.*$/gm, '')
                 .matchAll(/<NEW_STORY_DATA>((?:(?!<NEW_STORY_DATA>)[\s\S])*?)<\/NEW_STORY_DATA>/gi)];
         }
-        if (matches.length == 0 && ("swipes" in item && "swipe_id" in item && item.swipes[item.swipe_id])) {
-            matches = [...item.swipes[item.swipe_id]
+        if (matches.length == 0 && swipeText) {
+            matches = [...swipeText
                 .replace(/\/\/.*$/gm, '')
                 .matchAll(/<NEW_STORY_DATA>((?:(?!<NEW_STORY_DATA>)[\s\S])*?)<\/NEW_STORY_DATA>/gi)];
         }

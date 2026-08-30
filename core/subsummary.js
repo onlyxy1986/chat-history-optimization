@@ -16,7 +16,8 @@
     const EXTRA_KEY = 'chat-optimization-v2';
     const PLACEHOLDER = '{{故事历程}}';
 
-    let lastStatus = { running: false, current: '', done: 0, failed: 0, error: null, message: null };
+    // lastDone：最近一次成功生成/擦除影响的 {floor, index}，供 UI 做单条目增量刷新
+    let lastStatus = { running: false, current: '', done: 0, failed: 0, error: null, message: null, lastDone: null };
     const statusListeners = new Set();
     let running = false;
     let initialized = false;
@@ -34,6 +35,20 @@
             hash = Math.imul(hash, 0x01000193) >>> 0;
         }
         return hash.toString(16).padStart(8, '0');
+    }
+
+    // storyHash 缓存：楼层解析缓存命中时 故事历程 数组引用不变，
+    // 直接复用哈希，避免逐条目重复 JSON.stringify 全数组 + FNV 哈希
+    // （故事历程 tab 每次重绘都逐条目取摘要，无此缓存时成本随条目数放大）
+    const storyHashCache = new Map();
+
+    function getStoryHash(item, journey) {
+        let slot = storyHashCache.get(item);
+        if (slot && slot.journey === journey) return slot.hash;
+        const hash = fnv1a32(JSON.stringify(journey));
+        if (storyHashCache.size >= Constants.STORY_PARSE_CACHE_MAX) storyHashCache.clear();
+        storyHashCache.set(item, { journey, hash });
+        return hash;
     }
 
     // ------------------------------------------------------------------
@@ -194,7 +209,7 @@
     function getFloorSummaries(floor) {
         const floorData = getFloorJourney(floor);
         if (!floorData) return { valid: false, summaries: [], storyHash: null };
-        const storyHash = fnv1a32(JSON.stringify(floorData.journey));
+        const storyHash = getStoryHash(floorData.item, floorData.journey);
         const extra = readFloorExtra(floorData.item, storyHash);
         return {
             valid: !!extra,
@@ -340,7 +355,7 @@
         const entry = journey[entryIndex];
         if (!entry || typeof entry !== 'object') throw new Error(`楼层 ${floor} 条目 ${entryIndex + 1} 不存在`);
 
-        const storyHash = fnv1a32(JSON.stringify(journey));
+        const storyHash = getStoryHash(item, journey);
         const extra = readFloorExtra(item, storyHash);
         if (!force && extra) {
             const existing = extra.summaries[entryIndex];
@@ -389,34 +404,70 @@
         throw lastErr;
     }
 
-    // 串行执行一批 {floor, index} 目标，统一维护状态总线
+    // 串行执行一批 {floor, index} 目标，统一维护状态总线。
+    // 进度通知按 Constants.SUBSUMMARY_STATUS_NOTIFY_INTERVAL_MS 做 trailing 节流：
+    // 每条完成都尝试通知，间隔不足时合并进下一次，保证批次最后一条进度不丢失；
+    // 批次终态（成功/失败汇总）不受节流、始终立即通知。
+    // 成功生成的通知附带 lastDone={floor,index}，UI 据此只原地更新该条目摘要块，
+    // 避免大批量时逐条全量重绘。
     async function executeBatch(targets, force) {
         const total = targets.length;
         if (total === 0) {
-            notifyStatus({ running: false, current: '', done: 0, failed: 0, error: '没有可生成的故事历程条目' });
+            notifyStatus({ running: false, current: '', done: 0, failed: 0, error: '没有可生成的故事历程条目', lastDone: null });
             return { done: 0, failed: 0 };
         }
         let done = 0;
         let failed = 0;
         let lastError = null;
         running = true;
+        const interval = Constants.SUBSUMMARY_STATUS_NOTIFY_INTERVAL_MS;
+        let lastNotifyAt = 0;
+        let throttleTimer = null;
+        let pendingPatch = null;
+        const emitStatus = (patch) => {
+            pendingPatch = Object.assign({}, pendingPatch, patch);
+            const now = Date.now();
+            if (now - lastNotifyAt >= interval) {
+                lastNotifyAt = now;
+                const flush = pendingPatch;
+                pendingPatch = null;
+                notifyStatus(flush);
+            } else if (throttleTimer === null) {
+                throttleTimer = setTimeout(() => {
+                    throttleTimer = null;
+                    lastNotifyAt = Date.now();
+                    const flush = pendingPatch;
+                    pendingPatch = null;
+                    if (flush) notifyStatus(flush);
+                }, interval - (now - lastNotifyAt));
+            }
+        };
         try {
             for (let k = 0; k < total; k++) {
                 const floor = targets[k].floor;
                 const index = targets[k].index;
-                notifyStatus({ running: true, current: `第${k + 1}/${total}条 · 楼层${floor} 条目${index + 1}`, done, failed, error: null });
+                emitStatus({ running: true, current: `第${k + 1}/${total}条 · 楼层${floor} 条目${index + 1}`, done, failed, error: null, lastDone: null });
                 try {
                     const result = await runOneWithRetry(floor, index, force);
-                    if (result === 'ok') done++;
+                    if (result === 'ok') {
+                        done++;
+                        emitStatus({ done, lastDone: { floor, index } });
+                    }
                 } catch (e) {
                     failed++;
                     lastError = String((e && e.message) || e);
+                    emitStatus({ failed, lastDone: null });
                     console.error(`[Chat History Optimization] 楼层 ${floor} 条目 ${index + 1} 二级摘要生成失败:`, e);
                 }
             }
             if (done > 0) saveChatDebounced();
         } finally {
             running = false;
+            if (throttleTimer !== null) {
+                clearTimeout(throttleTimer);
+                throttleTimer = null;
+            }
+            pendingPatch = null;
             notifyStatus({
                 running: false,
                 current: '',
@@ -424,6 +475,7 @@
                 failed,
                 error: failed > 0 ? `失败 ${failed} 条${lastError ? '：' + lastError : ''}` : null,
                 message: (failed === 0 && done === 0) ? '范围内条目均已有有效摘要，无需生成' : null,
+                lastDone: null,
             });
         }
         return { done, failed };
@@ -440,7 +492,7 @@
         let error = null;
         let message = null;
         running = true;
-        notifyStatus({ running: true, current: `楼层${floor} 条目${entryIndex + 1}`, done: 0, failed: 0, error: null, message: null });
+        notifyStatus({ running: true, current: `楼层${floor} 条目${entryIndex + 1}`, done: 0, failed: 0, error: null, message: null, lastDone: null });
         try {
             const result = await runOneWithRetry(floor, entryIndex, force);
             if (result === 'ok') done = 1;
@@ -451,7 +503,15 @@
             console.error(`[Chat History Optimization] 楼层 ${floor} 条目 ${entryIndex + 1} 二级摘要生成失败:`, e);
         } finally {
             running = false;
-            notifyStatus({ running: false, current: '', done, failed, error, message });
+            notifyStatus({
+                running: false,
+                current: '',
+                done,
+                failed,
+                error,
+                message,
+                lastDone: done === 1 ? { floor, index: entryIndex } : null,
+            });
         }
         return failed === 0;
     }
@@ -561,11 +621,11 @@
         const onlyMissing = Boolean(options && options.onlyMissing);
         const targets = collectRangeTargets(startFloor, endFloor, onlyMissing);
         if (targets === null) {
-            notifyStatus({ running: false, current: '', done: 0, failed: 0, error: '没有可用的楼层范围' });
+            notifyStatus({ running: false, current: '', done: 0, failed: 0, error: '没有可用的楼层范围', lastDone: null });
             return false;
         }
         if (targets.length === 0 && onlyMissing) {
-            notifyStatus({ running: false, current: '', done: 0, failed: 0, error: null, message: '没有缺失的条目，无需生成' });
+            notifyStatus({ running: false, current: '', done: 0, failed: 0, error: null, message: '没有缺失的条目，无需生成', lastDone: null });
             return true;
         }
         await executeBatch(targets, force);
@@ -575,12 +635,12 @@
     // 强制擦除范围内全部楼层的二级摘要（无视哈希有效性），返回擦除的楼层数
     function eraseForRange(startFloor, endFloor) {
         if (running) {
-            notifyStatus({ running: false, current: '', done: 0, failed: 0, error: '生成进行中，请稍后再擦除', message: null });
+            notifyStatus({ running: false, current: '', done: 0, failed: 0, error: '生成进行中，请稍后再擦除', message: null, lastDone: null });
             return 0;
         }
         const chat = NS.bridge.getCurrentChat ? NS.bridge.getCurrentChat() : null;
         if (!chat || !Array.isArray(chat)) {
-            notifyStatus({ running: false, current: '', done: 0, failed: 0, error: '没有可用的聊天数据', message: null });
+            notifyStatus({ running: false, current: '', done: 0, failed: 0, error: '没有可用的聊天数据', message: null, lastDone: null });
             return 0;
         }
         const totalFloors = Math.max(0, chat.length - 1);
@@ -604,6 +664,7 @@
             }
         }
         if (erased > 0) saveChatDebounced();
+        // 擦除影响多个楼层，无法用单个 lastDone 表达，置 null 让 UI 全量重绘
         notifyStatus({
             running: false,
             current: '',
@@ -611,6 +672,7 @@
             failed: 0,
             error: null,
             message: erased > 0 ? `已擦除 ${erased} 个楼层的二级摘要` : '楼层范围内没有可擦除的二级摘要',
+            lastDone: null,
         });
         return erased;
     }

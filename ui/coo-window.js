@@ -456,18 +456,18 @@
         return fieldBox;
     }
 
-    function buildStorySummary(entry) {
+    function buildStorySummary(floor, index) {
         const box = document.createElement('div');
         box.className = 'coo-story-summary';
-        const valid = NS.SubSummary ? NS.SubSummary.getValidSummary(entry.floor, entry.index) : null;
+        const valid = NS.SubSummary ? NS.SubSummary.getValidSummary(floor, index) : null;
         const head = document.createElement('div');
         head.className = 'coo-story-summary-head';
         head.appendChild(createText('span', 'coo-story-summary-label', '二级摘要'));
 
         const button = document.createElement('button');
         button.type = 'button';
-        button.dataset.cooFloor = String(entry.floor);
-        button.dataset.cooIndex = String(entry.index);
+        button.dataset.cooFloor = String(floor);
+        button.dataset.cooIndex = String(index);
         if (valid) {
             button.className = 'coo-button coo-button-ghost coo-button-sm';
             button.dataset.cooAction = 'entryRegenerate';
@@ -541,8 +541,20 @@
         if (entry.历程) {
             item.appendChild(createText('div', 'coo-story-item-body', entry.历程));
         }
-        item.appendChild(buildStorySummary(entry));
+        item.appendChild(buildStorySummary(entry.floor, entry.index));
         return item;
+    }
+
+    // 单条目摘要块增量更新：只替换该条目的 coo-story-summary 子块，不整列表重绘
+    function updateStoryEntrySummary(scope, floor, index) {
+        const button = scope.querySelector(`.coo-story-item [data-coo-floor="${floor}"][data-coo-index="${index}"]`);
+        if (!button) return;
+        const item = button.closest('.coo-story-item');
+        if (!item) return;
+        const newBox = buildStorySummary(floor, index);
+        const oldBox = item.querySelector('.coo-story-summary');
+        if (oldBox) item.replaceChild(newBox, oldBox);
+        else item.appendChild(newBox);
     }
 
     // 单列表渲染：RAG 命中条目直接在原条目上加标记与分数明细
@@ -876,7 +888,7 @@
         scope.querySelectorAll('[data-coo-field="embedderStatus"]').forEach((el) => {
             const status = NS.Embedder ? NS.Embedder.getStatus() : { state: 'idle', message: '' };
             if (status.state === 'ready') {
-                el.textContent = '召回嵌入模型：就绪（bge-small-zh 本地）';
+                el.textContent = '召回嵌入模型：就绪（bge-small-zh 本地' + (status.backend === 'webgpu' ? '，WebGPU' : '') + '）';
                 el.className = 'coo-subsummary-status';
             } else if (status.state === 'loading') {
                 el.textContent = `召回嵌入模型：${status.message || '加载中'}`;
@@ -1075,6 +1087,9 @@
         buildRoleTree(info, role);
     }
 
+    // 故事历程 tab 的列表重绘统一由 updateStatsValues → updateRagDisplay → renderStoryList
+    // 承担（此处不再二次 queryStoryRange，避免同一次刷新重绘两遍）；
+    // 楼层范围输入框只在点击「查看/全部楼层」时（queryStoryRange）生效。
     function refreshActiveTabData(shell) {
         const workspace = shell.querySelector('.coo-workspace');
         if (!workspace) return;
@@ -1083,12 +1098,6 @@
         if (activeTabId === 'roles') {
             renderRoleSelect(workspace);
             renderRoleInfo(workspace);
-        } else if (activeTabId === 'story') {
-            const startInput = workspace.querySelector('[data-coo-field="storyStart"]');
-            const endInput = workspace.querySelector('[data-coo-field="storyEnd"]');
-            if (startInput && endInput) {
-                queryStoryRange(workspace, startInput.value, endInput.value);
-            }
         }
     }
 
@@ -1265,13 +1274,25 @@
         refreshActiveTabData(shell);
     }
 
-    function onSubSummaryStatusChanged() {
+    // 二级摘要状态变化：状态行文本始终原地更新；故事历程 tab 下，
+    // 单条完成（lastDone 非空）只原地替换该条目的摘要块，
+    // 批次结束（running=false）全量重绘一次，覆盖增量期间未刷新的条目
+    // （如窗口隐藏 / 切换 tab 期间完成的条目）。
+    // 不再走 refreshActiveTabData 全量重绘，避免批量生成时逐条重绘导致界面卡死。
+    function onSubSummaryStatusChanged(snapshot) {
         const root = document.getElementById(ROOT_ID);
         const shell = root ? root.querySelector('.coo-shell') : null;
         if (!shell || shell.hidden) return;
         updateSubSummaryStatus(shell);
-        if (activeTabId === 'story') {
-            refreshActiveTabData(shell);
+        if (activeTabId !== 'story') return;
+        const workspace = shell.querySelector('.coo-workspace');
+        if (!workspace) return;
+        const lastDone = snapshot && snapshot.lastDone;
+        if (lastDone && typeof lastDone.floor === 'number' && typeof lastDone.index === 'number') {
+            updateStoryEntrySummary(workspace, lastDone.floor, lastDone.index);
+        }
+        if (snapshot && snapshot.running === false) {
+            renderStoryList(workspace);
         }
     }
 

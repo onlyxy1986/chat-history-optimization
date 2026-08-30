@@ -1,6 +1,6 @@
 # Chat History Optimization (chat-optimization-v2) — 完整流程交接文档
 
-> 版本：v2.10.0（2026-08-29）
+> 版本：v2.11.0（2026-08-30）
 > 仓库：本目录是独立 git 仓库（嵌套在 SillyTavern 安装目录内），在此提交，不要提交到父仓库。
 > 无 package.json、无构建、无 lint。功能模块为浏览器端普通脚本。
 
@@ -14,7 +14,7 @@
 2. **分层注入**：把最终 prompt 装配为三层——`RAG 远端召回段 + 中段历程窗口 + 正文 verbatim 尾部`，在 `tokenLimit` 预算内最大化保留上下文；超预算时用检索从远期条目中挑回相关条目。
 3. **角色卡管理**：槽位上限淘汰 + 蒸馏（久未出场角色只保留核心设定），阈值见 `core/constant.js`。
 4. **二级摘要（recall-specialized sub-summary）**：对每条历程条目调用 LLM 生成 `{actor, location, event, recall_when}` 结构化摘要，持久化在楼层消息 `extra` 中，既供 UI 浏览，也作为混合召回的语义信号。
-5. **混合召回（v2.5.0+）**：BM25 词法检索 + 本地 ONNX embedding（bge-small-zh-v1.5, transformers.js）语义打分，向量持久化在 `chat_metadata`。
+5. **混合召回（v2.5.0+）**：BM25 词法检索 + 本地 ONNX embedding（bge-small-zh-v1.5, transformers.js）语义打分，向量持久化在 `chat_metadata`；推理在 WebWorker 中执行（v2.11.0，主线程回退）。
 6. **LRU 召回缓存 + Mode A 分段加权打分（v2.9.0）**：`recallcache.js` 对片段向量 / 远端条目向量 / 逐对分数做内容寻址 LRU 缓存，使「发送新用户信息只重算新相关远端条目」；`subSummaryToggle` 开启时走 Mode A（按最新用户消息 + 每个窗口条目的二级摘要切成多个片段，逐片段加权 max），缺失摘要发送前先补生成（带超时），绝不 BM25 回退。
 
 ---
@@ -31,7 +31,8 @@
 │   ├── subsummary.js          # 二级摘要生成器（纯逻辑）：LLM 调用、extra 持久化、自动触发、缺失收集/补生成
 │   ├── recallcache.js         # 召回 LRU 缓存（fragVec/docVec/pairScore 内容寻址）+ 补漏气泡总线 + 后台预热
 │   ├── retrieval.js           # BM25 检索器（纯逻辑，中文 unigram+bigram 分词）
-│   ├── embedding.js           # 本地 embedding（transformers.js + 本地 ONNX 模型）
+│   ├── embedding.js           # 本地 embedding 编排（transformers.js + 本地 ONNX 模型；worker 优先，主线程回退）
+│   ├── embed-worker.js        # module WebWorker：transformers.js 推理跑在独立线程（不经 MODULES 注入，由 embedding.js `new Worker` 加载）
 │   └── embedstore.js          # 摘要向量持久化（chat_metadata）+ 后台完整性同步
 ├── ui/
 │   └── coo-window.js          # 浮动窗口 UI（6 个 tab，全 createElement）
@@ -70,12 +71,12 @@
    - `eventSource`、`eventTypes`
    - `connectionManagerRequest`（ConnectionManagerRequestService）
 5. 按 `MODULES` 数组顺序**逐个 `await` 加载** `<script>`（`loadScript` 返回 Promise，`script.async = false`，URL 带 `?v=VERSION` 缓存击穿），全部就绪后才进入 DOM ready 挂窗口：
-    ```
-     core/constant.js → core/settings.js → core/engine.js
-     → core/subsummary.js → core/retrieval.js → core/embedding.js
-     → core/embedstore.js → core/recallcache.js → ui/coo-window.js
-    ```
-   **新增模块文件必须加入此数组**，否则不加载。
+     ```
+      core/constant.js → core/settings.js → core/engine.js
+      → core/subsummary.js → core/retrieval.js → core/embedding.js
+      → core/embedstore.js → core/recallcache.js → ui/coo-window.js
+     ```
+    **新增脚本模块文件必须加入此数组**，否则不加载。例外：`core/embed-worker.js` 是 WebWorker 脚本，由 `embedding.js` 经 `new Worker(url, {type:'module'})` 独立加载，**不进此数组**。
 6. `DOMContentLoaded` 后调用 `NS.CooWindow.mount()`。
 
 ### 3.3 模块模式（NS 模式）
@@ -101,7 +102,7 @@
 |---|---|
 | `constant.js` | 无（仅定义并冻结 `NS.Constants`） |
 | `subsummary.js` | `init()` 注册 `GENERATION_ENDED` 事件监听 |
-| `embedding.js` | `init()` 立即预热加载 transformers + ONNX 模型（异步，失败可重试） |
+| `embedding.js` | `init()` 立即预热：优先启动 `core/embed-worker.js` WebWorker 并在其中加载 transformers + ONNX 模型（异步，失败可重试）；worker 不可用时回退主线程加载（v2.11.0）；模型加载 WebGPU fp32 优先、失败回退 q8/WASM（v2.11.0） |
 | `embedstore.js` | `init()` 注册事件监听 + 延迟 1s 首次向量完整性同步 |
 | `recallcache.js` | `init()` 订阅 `MESSAGE_RECEIVED`(2s 防抖)/`GENERATION_ENDED`/`CHAT_CHANGED`/`Embedder.onStatus` 做后台预热；`onFill` 气泡总线 |
 | `coo-window.js` | 由 index.js 在 DOM ready 后调 `mount()` |
@@ -323,26 +324,34 @@ score = 0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall
 
 ---
 
-## 8. Embedding 模块（embedding.js）
+## 8. Embedding 模块（embedding.js + embed-worker.js，v2.11.0 起 worker 架构）
 
-- 加载本地 `lib/transformers.min.js`（transformers.js v3 ESM）+ `lib/models/bge-small-zh-v1.5`（q8 外部数据格式 onnx）。
-- **v3 加载要点**（历史坑）：v3 不支持把完整 URL 当 model_id → `env.remoteHost = <baseUrl>lib/models/`，`env.remotePathTemplate = '{model}/'`，model_id 用 repo 风格 `'bge-small-zh-v1.5'`。
-- `env.useBrowserCache = false`、`allowLocalModels = false`；wasm 指向本地 `lib/ort/`（mjs+wasm），`numThreads = navigator.hardwareConcurrency`。
-- pipeline: `feature-extraction`，`dtype: 'q8'`；编码：`pooling: 'mean', normalize: true`（BGE 用法）。
-- **LRU 缓存** 2048 条（精确文本键），`BATCH_SIZE=16` 批量推理。
-- 状态总线 `onStatus`（idle/loading/ready/error），模块加载即 `init()` 预热；失败置 `initPromise=null` 允许重试。
-- **降级链**：Embedder 未就绪 → 全池 BM25 归一化（等价纯 BM25 排序），功能不中断。
+- **推理在 WebWorker 中执行**：`embedding.js` 经 `new Worker(<baseUrl>core/embed-worker.js?v=VERSION, {type:'module'})` 启动 worker（`NS.baseUrl` 以 `/` 结尾，URL 带 `?v=` 缓存击穿），WASM 多线程推理不占主线程；worker 不可用（构造/onerror/超时）时**自动回退主线程**加载，接口与行为不变。
+- worker 内动态 `import` 本地 `lib/transformers.min.js`（绝对 URL，transformers.js v3 ESM，内置 ORT Web 1.22 含 WebGPU EP）+ `lib/models/bge-small-zh-v1.5`（外部数据格式 onnx：`onnx/model.onnx` fp32 ~95MB 供 WebGPU，`onnx/model_quantized.onnx` q8 ~24MB 供 WASM）；协议消息：`init`（主→worker，附 env 配置 + `useWebgpu`）/`encode`（附 id+texts）/`result`/`encodeError`（按 id 配对）/`status`/`ready`（附 `backend: 'webgpu' | 'wasm'`）/`error`；pipeline 单例 + `initPromise` 防重入。
+- **v3 加载要点**（历史坑，主线程回退路径同此）：v3 不支持把完整 URL 当 model_id → `env.remoteHost = <baseUrl>lib/models/`，`env.remotePathTemplate = '{model}/'`，model_id 用 repo 风格 `'bge-small-zh-v1.5'`。
+- `env.useBrowserCache = false`、`allowLocalModels = false`；wasm 指向本地 `lib/ort/`（mjs+wasm），`numThreads = navigator.hardwareConcurrency`（worker 内由主线程经 init 消息传入配置）。
+- pipeline: `feature-extraction`；编码：`pooling: 'mean', normalize: true`（BGE 用法）。
+- **后端选择（v2.11.0，`Constants.EMBED_USE_WEBGPU`）**：开关开时先试 `createPipeline('feature-extraction', modelId, { dtype: 'fp32', device: 'webgpu' })`（加载 `onnx/model.onnx` fp32）；WebGPU 不可用（`device:'webgpu'` 抛 `Unsupported device`）或会话创建失败 → 捕获后回退 `dtype: 'q8'`（WASM，原行为）。worker 与主线程回退路径同一逻辑；实际后端经 `ready` 消息（worker）/返回值（主线程）记入 `getStatus().backend`，UI 状态行就绪文案追加「，WebGPU」标记。
+- **为何 GPU 必须 fp32**：WebGPU EP 不支持 int8 量化 GEMM（MatMulInteger），q8 模型走 GPU 重计算仍落回 CPU 无加速意义；wasmPaths 仍须配置——WebGPU 会话中个别不支持的算子由 WASM CPU EP 兜底。
+- **fp32/q8 向量混用无害**：两后端向量仅数值精度差异（均为 512 维 L2 归一化），余弦排序影响可忽略；embedstore 按文本哈希存向量且模型名不变，**后端切换不触发向量库重建**（避免 3095 条级重编码）。
+- **批量输出形态（历史坑，v2.11.0 修复）**：v3 的 feature-extraction pipeline 对批量输入**不逐条拆分**，直接返回单个 Tensor（mean pooling 后 dims `[N, D]`）。因此调用时**始终传数组**（单条也传 `[text]`，保证输出 dims `[1, D]`），返回后经 `batchToVectors(output, count)` 按行 `subarray` 拆成 N 个独立 Float32Array（worker 与主线程回退路径同一实现）；拆后校验 `vectors.length === 输入条数`，不一致即抛错。旧版把整批 flatten 成单个 8192 维向量，embedstore 收到 `undefined` 后在 `vecToBase64` 抛 `Cannot read properties of undefined (reading 'buffer')`。
+- **LRU 缓存** 2048 条（精确文本键，`encodeBatch` 主线程侧，worker 前拦截），`BATCH_SIZE=16` 批量推理。
+- `encodeBatch(texts, {onProgress})`：每完成一批回调 `onProgress(done, total)`（done/total 为缓存未命中条数），供调用方刷新进度。
+- 状态总线 `onStatus`（idle/loading/ready/error），模块加载即 `init()` 预热；失败置 `initPromise=null` 允许重试；`isReady()` 为纯状态检查。
+- **降级链**：worker 失败 → 主线程加载；Embedder 未就绪 → 全池 BM25 归一化（等价纯 BM25 排序），功能不中断。
 
 ## 9. 向量持久化（embedstore.js，v2.8.0）
 
 - 存储：`chat_metadata["chat-optimization-v2-embed"]`（per-chat），`saveMetadataDebounced` 落盘。
 - 键 = 文本 FNV-1a 哈希（`NS.SubSummary.textHash`）→ **跨楼层去重、不受楼层下标漂移影响**。
 - 序列化：Float32Array ↔ base64（8KB 分片 `String.fromCharCode` 防栈溢出）。
-- `loadStore`：模型名不匹配 → 全量作废重建；逐条解码校验维度，损坏丢弃；全部损坏视为 reset。
+- `loadStore`：模型名不匹配 → 全量作废重建；逐条解码校验，损坏丢弃；**基准维度 = 优先 `raw.dims`（须与向量维度分布命中），否则按条数多数派**；维度不符的条目丢弃（视为缺失，由 sync 重新编码补齐）；全部不可用视为 reset。旧版「首条定基准」被单条 7680 维污染条目（旧批量 bug 把 15×512 flatten 成长向量写入；哈希键是数字字符串按升序迭代，污染条恰好排在最前）击溃 → 整库丢弃、每次刷新全量重算（v2.11.0 修复，污染库自动愈合）。
+- `persistVectors` 写守卫（v2.11.0）：跳过 `undefined`/空向量与维度不符库基准的条目，防批量形状异常再次污染库。
 - **完整性同步 `sync()`**：
   - 期望集合 = 全部楼层有效摘要的 `event` + 各 `recall_when`（trim 非空）文本。
   - 缺失 → `encodeBatch` 补齐并持久化；store 中不在期望集合的哈希 → 删除（摘要被擦除/哈希失效的残留）。
-  - 触发时机：模块加载后 1s（`Constants.EMBED_SYNC_FIRST_DELAY_MS`）、`MESSAGE_RECEIVED`（`Constants.EMBED_SYNC_DEBOUNCE_MS` 防抖）、`CHAT_CHANGED`、SubSummary 生成批次结束（`done>0`）。`syncing` 互斥 + `syncQueued` 补跑一次。
+   - 触发时机：模块加载后 1s（`Constants.EMBED_SYNC_FIRST_DELAY_MS`）、`MESSAGE_RECEIVED`（`Constants.EMBED_SYNC_DEBOUNCE_MS` 防抖）、`CHAT_CHANGED`、SubSummary 生成批次结束（`done>0`）。`syncing` 互斥 + `syncQueued` 补跑一次。
+   - 补齐阶段经 `encodeBatch` 的 `onProgress` 逐批广播 `补齐向量 done/total…`（v2.11.0）——大批量 CPU 推理可达数分钟，无进度时状态行看似卡死。
   - 前提：`subSummaryToggle` 开。
 - **打分路径 `resolve(texts)`**：store 命中直接解码；缺失现场编码 + 回写；store 不可用降级为纯现场编码。
 
@@ -384,7 +393,9 @@ score = 0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall
 
 - `runOneWithRetry`：失败等 1s 重试，最多 3 次（`RETRY_DELAY_MS`/`MAX_RETRIES`），全失败抛最后错误。
 - `executeBatch`：串行（按楼层序、条目序），统一维护状态总线；模块级 `running` 互斥，进行中再次触发直接忽略（自动/手动互斥）。
-- 状态总线 `onStatus/getStatus`：`{running, current:"第k/N条·楼层x 条目y", done, failed, error, message}`，快照广播（模式同 Engine.onStats）。
+- 状态总线 `onStatus/getStatus`：`{running, current:"第k/N条·楼层x 条目y", done, failed, error, message, lastDone}`，快照广播（模式同 Engine.onStats）。
+- **状态通知节流（v2.11.0）**：`executeBatch` 内广播走 trailing throttle（`SUBSUMMARY_STATUS_NOTIFY_INTERVAL_MS=300ms`），合并期间最后一次进度；批次结束（`finally`）立即广播终态。成功条目附 `lastDone: {floor, index}`，供 UI 单条目增量更新；`generateForEntry`/`generateForRange`/`eraseForRange` 的即时通知同样带 `lastDone`。
+- **解析缓存（v2.11.0）**：楼层 story block 解析结果按楼层缓存（`Engine.storyBlockCache`，`STORY_PARSE_CACHE_MAX=4096`，键含 mes/swipeText 引用校验，超限全清）；摘要哈希按 (楼层, 历程) 缓存（`SubSummary.storyHashCache`）。生成路径反复取同一楼层时不再重复正则解析。
 
 ### 10.4 触发方式
 
@@ -436,8 +447,9 @@ score = 0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall
 
 ### 11.3 刷新链路
 
-- 打开/切换窗口 → `Engine.refreshStats()`（只读深拷贝 + 完整装配，**不改 ST chat**）→ `notifyStats` → `onStatsChanged` → `refreshActiveTabData`（stats 值、RAG 信息行、预览文本、当前 tab 数据重绘）。
-- `SubSummary.onStatus` → 状态行 + story tab 重绘；`Embedder.onStatus` / `EmbedStore.onStatus` → 对应状态行。
+- 打开/切换窗口 → `Engine.refreshStats()`（只读深拷贝 + 完整装配，**不改 ST chat**）→ `notifyStats` → `onStatsChanged` → `refreshActiveTabData`（stats 值、RAG 信息行、预览文本，**不再重绘 story 列表**——story 数据由下方增量链路维护）。
+- `SubSummary.onStatus`（v2.11.0 增量更新）→ 仅刷新状态行文本；`lastDone` 非空时 `updateStoryEntrySummary` **单条目原地替换**（重建该条目 DOM，保留 `data-coo-*` 委托属性，点击仍有效）；`running === false` 时全量重绘一次 story 列表。避免每条摘要完成都整表重绘。
+- `Embedder.onStatus` / `EmbedStore.onStatus` → 对应状态行。
 - 侧边栏状态（失败楼层/tokenCount）随 `updateStatsValues` 更新；「将发送词元数」行显示为 `当前 / tokenLimit`，超限时标红（`coo-stat-bad`）。
 
 ---
@@ -484,6 +496,7 @@ score = 0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall
 | actor 分用 IDF 绝对饱和 | 抑制高频主角的无区分度命中，稀有角色/具体人物才拿满分 |
 | 楼层级 FNV 哈希失效（非逐条） | 楼层 story block 是整体重写的（重新生成/编辑/swipe），逐条哈希无意义；整层清空最简单正确 |
 | 摘要存 `extra`、向量存 `chat_metadata` | extra per-消息随 chat 走；metadata per-chat 存跨消息的派生物（向量按文本哈希跨楼层去重） |
+| 向量库基准维度 = `raw.dims` 优先 / 多数派（v2.11.0） | 旧批量 bug 曾把整批 flatten 的 7680 维长向量写入库（15×512）；「首条定基准」+ 数字哈希键升序迭代 → 单条污染条目令整库丢弃、每次刷新全量重算；多数派 + `raw.dims` 使污染库自愈（污染条目按缺失重编码），`persistVectors` 维度守卫防再发 |
 | 摘要生成串行 + 模块级 running 互斥 | LLM 限流友好；自动/手动互斥避免 extra 写竞争 |
 | 二级摘要手动生成不受总开关限制 | 开关只表达「自动行为」意愿（用户确认的决策） |
 | 摘要 schema 含 `recall_when` | 面向召回而非阅读：「未来何时想起」比事件复述更有检索区分度 |
@@ -495,6 +508,10 @@ score = 0.30·S_actor + 0.15·S_location + 0.20·S_event + 0.35·S_recall
 | 正文超 midBudget 时从最旧整条 assistant 消息丢弃（v2.9.2） | 单条超长回复会让 正文+角色卡 超 midBudget，旧版无上限直接溢出 tokenLimit；丢整条而非截断文本，且其历程条目回归中段不丢失 |
 | fetch 与 profile 双连接方式 | fetch 简单但 Key 过浏览器+CORS 风险；profile 走 ST 服务端解密更安全（UI 文案已注明） |
 | Embedder 失败全链降级 | embedding 是增强项，BM25 兜底保证核心功能不中断 |
+| embedding 推理移入 WebWorker（v2.11.0） | WASM 多线程推理在主线程会阻塞 UI（生成二级摘要时界面卡死无响应）；worker 独立线程消除阻塞，worker 不可用（老浏览器/file:// 限制）自动回退主线程，最终渲染结果不变 |
+| WebGPU fp32 优先 + q8/WASM 回退（v2.11.0） | WASM CPU 推理大批量补齐可达数分钟；WebGPU 下 GEMM 上 GPU 可降到秒级。WebGPU EP 不支持 int8 GEMM → GPU 路径必须 fp32（捆绑 95MB model.onnx）；`device:'webgpu'` 在不支持的浏览器直接抛错 → try/catch 回退 q8/WASM 与降级链一致；`EMBED_USE_WEBGPU` 可整体关闭 |
+| 二级摘要状态节流 + lastDone 增量更新（v2.11.0） | 每条摘要完成都整表重绘 story 列表造成卡顿；300ms trailing throttle + 单条目原地替换（保留事件委托属性）+ 终态全量重绘一次，渲染结果与旧版一致 |
+| 楼层解析/摘要哈希缓存（v2.11.0） | 生成批次反复取同一楼层 story block，正则解析成本随楼层长度放大；缓存键含引用校验，楼层重写即失效，无脏缓存 |
 | UI 全 createElement + 事件委托 | AGENTS.md 硬约束；委托使 tab 每次重建 DOM 无需重绑 |
 | 菜单项 500ms×30 重试 | ST 扩展菜单 DOM 就绪时机不定 |
 
@@ -548,6 +565,8 @@ node test/smoke-hybrid-recall.cjs
 5. 重新生成某楼层 → 该层摘要清空并自动重新生成；向量 store 对应清理（二级摘要 tab 持久化状态行）。
 6. Embedder 加载失败（断网/模型损坏）→ 召回降级纯 BM25，功能不中断，状态行报错。
 7. 配置不允许 CORS 的 API → 状态行 + console 明确报错，extra 不被污染。
+8. （v2.11.0）生成二级摘要时页面保持可交互（推理在 WebWorker，DevTools → Workers 可见 `embed-worker.js`）；批量生成期间 story tab 条目逐条原地更新、状态行 300ms 节流刷新，批次结束后列表完整重绘；worker 不可用时自动回退主线程（状态行仍走 loading/ready）。
+9. （v2.11.0）WebGPU 加速：Chrome/Edge 打开 `chrome://gpu` 确认 WebGPU 可用后，二级摘要 tab 状态行显示「召回嵌入模型：就绪（bge-small-zh 本地，WebGPU）」，加载阶段显示「加载模型 bge-small-zh-v1.5（WebGPU fp32）…」；大批量补齐向量明显快于 WASM；无 WebGPU 的环境状态行无「，WebGPU」标记且加载阶段显示「（WASM q8）」；`Constants.EMBED_USE_WEBGPU=false` 时始终走 WASM q8。
 
 ---
 
@@ -555,6 +574,7 @@ node test/smoke-hybrid-recall.cjs
 
 | 版本 | 内容 |
 |---|---|
+| 2.11.0 | **UI 响应性修复**（生成二级摘要时界面卡死）：① embedding 推理移入 `core/embed-worker.js` module WebWorker（`embedding.js` 重写为 worker 编排 + 主线程回退，接口不变）；② 二级摘要状态通知 300ms trailing throttle + `lastDone` 单条目增量更新（story tab 不再每条整表重绘）；③ 楼层 story block 解析缓存（`Engine.storyBlockCache`）+ 摘要哈希缓存（`SubSummary.storyHashCache`）；④ 向量同步补齐逐批进度上报（`encodeBatch` 新增 `onProgress`，状态行实时显示 `补齐向量 done/total…`，消除大批量编码时状态行看似卡死）+ worker 初始化失败真正回退主线程（terminate 残留 worker 后走 `initMainThread`，与降级链一致）；⑤ 修复批量向量拆分：v3 feature-extraction 批量输入返回单个 `[N,D]` Tensor 而非逐条数组，旧代码 flatten 成单向量导致 embedstore 收到 `undefined`（`vecToBase64` 抛 `reading 'buffer'`）→ 始终传数组 + `batchToVectors` 按行拆分 + 条数一致性守卫（worker 与主线程回退路径同修）；⑥ WebGPU 加速：`EMBED_USE_WEBGPU` 开关下优先 `{dtype:'fp32', device:'webgpu'}`（捆绑 onnx-community fp32 model.onnx ~95MB），失败/不支持自动回退 q8/WASM，后端经 ready 消息上报、UI 状态行显示「，WebGPU」标记（fp32/q8 向量混用无害，不触发向量库重建）；⑦ 修复污染向量库导致刷新全量重算：旧批量 bug 曾把 7680 维（15×512）长向量写入持久化库，`loadStore`「首条定基准」被单条污染条目击溃 → 整库丢弃、每次刷新重算全部向量；改 `raw.dims` 优先 / 多数派基准维度（污染条目丢弃后按缺失自动重编码，库自愈）+ `persistVectors` 维度守卫 + `resolve` 跳过空向量；同步完成文案改为「向量库现有 X 条（本次新增 Y，清理失效 Z）」消除总数与增量数字不自洽的误读；最终渲染结果不变，冒烟测试全过 |
 | 2.2.0 | 分层注入 + 浏览器内 RAG（bge-small-zh via transformers.js） |
 | 2.2.5 | 最终消息计数；发送预览 tab |
 | 2.3.0 | **bge embedding RAG → 纯 BM25**；稀疏远期记忆默认开启，删 ragToggle |

@@ -80,7 +80,11 @@
         return meta;
     }
 
-    // 读取当前 store；结构非法或模型不匹配时返回全新空 store（reset=true 表示旧数据作废）
+    // 读取当前 store；结构非法或模型不匹配时返回全新空 store（reset=true 表示旧数据作废）。
+    // 基准维度判定：优先取 raw.dims（须有向量与之匹配），否则按条数多数派；
+    // 维度不符的条目直接丢弃（缺失后由 sync 重新编码补齐）。
+    // 历史污染：旧版批量路径曾把整批 flatten 成单条长向量写入（如 7680 = 15×512），
+    // 若按"首条定基准"，单条污染条目会导致整库被丢弃、刷新后全量重算。
     function loadStore(meta) {
         const embedder = NS.Embedder;
         const model = embedder ? embedder.model : '';
@@ -89,18 +93,30 @@
         if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { store: fresh(), reset: true };
         if (!raw.v || typeof raw.v !== 'object' || Array.isArray(raw.v)) return { store: fresh(), reset: true };
         if (model && raw.model && raw.model !== model) return { store: fresh(), reset: true };
-        // 逐条校验向量可解码，损坏条目直接丢弃
-        const clean = {};
-        let dims = 0;
+        // 逐条校验向量可解码并统计维度分布，损坏条目直接丢弃
+        const kept = []; // [hash, slot, dims]
+        const dimTally = {};
         for (const hash of Object.keys(raw.v)) {
             const slot = raw.v[hash];
             const vec = slot && typeof slot === 'object' ? base64ToVec(slot.b) : null;
             if (!vec || vec.length === 0) continue;
-            if (dims === 0) dims = vec.length;
-            if (vec.length !== dims) continue;
+            dimTally[vec.length] = (dimTally[vec.length] || 0) + 1;
+            kept.push([hash, slot, vec.length]);
+        }
+        let dims = 0;
+        if (Number.isInteger(raw.dims) && dimTally[raw.dims]) {
+            dims = raw.dims;
+        } else {
+            for (const d of Object.keys(dimTally)) {
+                if (dims === 0 || dimTally[d] > dimTally[dims]) dims = d;
+            }
+        }
+        const clean = {};
+        for (const [hash, slot, len] of kept) {
+            if (len !== dims) continue;
             clean[hash] = { b: slot.b, t: typeof slot.t === 'number' ? slot.t : 0 };
         }
-        return { store: { model, dims, v: clean }, reset: dims === 0 && Object.keys(raw.v).length > 0 };
+        return { store: { model, dims, v: clean }, reset: Object.keys(clean).length === 0 && kept.length > 0 };
     }
 
     function saveStore(store) {
@@ -114,8 +130,13 @@
     function persistVectors(store, items) {
         let changed = false;
         for (const item of items) {
-            store.v[item.hash] = { b: vecToBase64(item.vec), t: Date.now() };
-            store.dims = item.vec.length;
+            const vec = item.vec;
+            // 防御：批量路径形状异常（undefined / 整批 flatten 的长向量）不得写入 store，
+            // 否则会污染库并让 loadStore 的多数派判定失效
+            if (!vec || vec.length === 0) continue;
+            if (store.dims > 0 && vec.length !== store.dims) continue;
+            store.v[item.hash] = { b: vecToBase64(vec), t: Date.now() };
+            store.dims = vec.length;
             changed = true;
         }
         if (changed) saveStore(store);
@@ -202,7 +223,12 @@
             let added = 0;
             if (missing.length > 0) {
                 notifyStatus({ running: true, error: null, message: `补齐 ${missing.length} 条向量…` });
-                const vecs = await embedder.encodeBatch(missing.map(m => m[1]));
+                // 逐批上报进度（大批量 CPU 推理可达数分钟，无进度时状态行看似卡死）
+                const vecs = await embedder.encodeBatch(missing.map(m => m[1]), {
+                    onProgress: (done, total) => {
+                        notifyStatus({ running: true, error: null, message: `补齐向量 ${done}/${total}…` });
+                    },
+                });
                 const items = missing.map(([hash], i) => ({ hash, vec: vecs[i] }));
                 persistVectors(store, items);
                 added = items.length;
@@ -219,7 +245,7 @@
             if (reset || added > 0 || removed > 0) saveStore(store);
 
             const persisted = Object.keys(store.v).length;
-            console.log(`[Chat History Optimization] embedding 持久化同步完成：共 ${persisted} 条（新增 ${added}，清理失效 ${removed}）`);
+            console.log(`[Chat History Optimization] embedding 持久化同步完成：向量库现有 ${persisted} 条（本次新增 ${added}，清理失效 ${removed}）`);
             notifyStatus({
                 running: false,
                 persisted,
@@ -227,8 +253,8 @@
                 removed,
                 error: null,
                 message: (added > 0 || removed > 0)
-                    ? `已持久化 ${persisted} 条（新增 ${added}，清理 ${removed}）`
-                    : `已持久化 ${persisted} 条，无需变更`,
+                    ? `向量库现有 ${persisted} 条（本次新增 ${added}，清理失效 ${removed}）`
+                    : `向量库现有 ${persisted} 条，无需变更`,
             });
         } catch (e) {
             console.error('[Chat History Optimization] embedding 持久化同步失败:', e);
@@ -279,7 +305,10 @@
 
         if (pending.length > 0) {
             const vecs = await embedder.encodeBatch(pending);
-            pending.forEach((t, i) => out.set(t, vecs[i]));
+            pending.forEach((t, i) => {
+                const vec = vecs[i];
+                if (vec && vec.length > 0) out.set(t, vec);
+            });
             if (store) {
                 try {
                     persistVectors(store, pending.map((t, i) => ({ hash: SubSummary.textHash(t), vec: vecs[i] })));
