@@ -341,8 +341,8 @@ function validSummaryFor(entry) {
     // 场景 H（Mode A + 非空窗口）：tokenLimit 放大 → bestK>0，窗口片段参与打分，bestFrag 标记为 user 或 f+楼层号
     const { rag: ragH } = await quiet(runCase(true, '陈九提到了码头仓库的货物', { allSummaries: true, settings: Object.assign({}, modeAConfig(), { tokenLimit: 1300 }) }));
     console.log('H rag:', JSON.stringify({ active: ragH.active, windowCount: ragH.windowCount, farCount: ragH.farCount, farScores: ragH.farScores }, null, 1));
-    check('H: RAG 激活且窗口/远端非空（对齐后窗口=楼层3+5 共4条，远端=楼层1 共2条）', ragH && ragH.active === true && ragH.windowCount === 4 && ragH.farCount === 2, ragH && { active: ragH.active, windowCount: ragH.windowCount, farCount: ragH.farCount });
-    check('H: 窗口对齐楼层边界 → 楼层 1 整体在远端，bestFrag 只能是 user/f3/f5（不得出现 f1 或 wN 回退）', ragH && ragH.farScores.length > 0 && ragH.farScores.every(r => r.score === null || (/^(user|f3|f5)$/.test(r.parts && r.parts.bestFrag))), ragH.farScores);
+    check('H: RAG 激活且窗口/远端非空（对齐后窗口=楼层5 共2条，远端=楼层1+3 共4条）', ragH && ragH.active === true && ragH.windowCount === 2 && ragH.farCount === 4, ragH && { active: ragH.active, windowCount: ragH.windowCount, farCount: ragH.farCount });
+    check('H: 窗口对齐楼层边界 → 楼层 1/3 整体在远端，bestFrag 只能是 user/f5（不得出现 f1/f3 或 wN 回退）', ragH && ragH.farScores.length > 0 && ragH.farScores.every(r => r.score === null || (/^(user|f5)$/.test(r.parts && r.parts.bestFrag))), ragH.farScores);
 
     // 场景 G（解析失败气泡总线，v2.11.1 事件驱动）：楼层 3（第 2 个 assistant 楼层）的 NEW_HISTORY JSON 损坏
     // → MESSAGE_RECEIVED 到达事件触发引擎检查，onParseFail 广播该楼层与原因；同内容再次到达不重复广播（历史失败楼层不触发）

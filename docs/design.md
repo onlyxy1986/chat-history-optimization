@@ -1,6 +1,6 @@
 # Chat History Optimization (chat-optimization-v2) — 完整流程交接文档
 
-> 版本：v2.12.0（2026-08-30）
+> 版本：v2.17.0（2026-08-31）
 > 仓库：本目录是独立 git 仓库（嵌套在 SillyTavern 安装目录内），在此提交，不要提交到父仓库。
 > 无 package.json、无构建、无 lint。功能模块为浏览器端普通脚本。
 
@@ -220,7 +220,7 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
     - **Mode A（`useModeA`）**：发送前先补齐缺失二级摘要——`SubSummary.getRecallMissingCount(1, lastFloor) > 0` 且 `isConfigured()` 则 `await withTimeout(SubSummary.ensureRecallSummaries(1, lastFloor), SUBSUMMARY_WAIT_TIMEOUT_MS)`（超时 30s，见 §10.6）；未配置连接则 warning 并跳过缺失条目（**绝不 BM25 回退**）。打分走 `scoreFarEntriesModeA`（见 §7.4）。
     - **Mode B（`!useModeA`）**：`queryText = query + 窗口各条目 docText`（`entryToDocText`），打分走 `scoreFarEntries`（见 §7.1-7.3）。
     - **贪心装箱**：按分数降序遍历，单条**估算**成本 = 该条目**详细格式** markdown 长度 / `EST_CHARS_PER_TOKEN`(1.5)（即最大成本估计）；重复文本去重（`packedSet`）；停止条件：预算满 / 全部唯一条目装完 / 已见最小条目也装不下。装入的按**原始时间顺序**重排。
-    - **精确计数剪枝**：`ragMarkdown` 渲染后做 `getTokenCountAsync` 精确计数；若精确 token 超预算，从**最低分**逐条剔除后再渲染，**直至 ≤ ragBudget（v2.9.2 起无次数上限**——估算 1 token≈1.5 汉字对中文偏乐观，旧版 3+1 次上限会漏剔，召回段可超预算数千 token）。
+    - **精确计数剪枝**：`ragMarkdown` 渲染后做 `getTokenCountAsync` 精确计数；若精确 token 超预算，从**最低分**逐条剔除后再渲染，**直至 ≤ ragBudget（v2.9.2 起无次数上限**——估算 1 token≈1.5 汉字对中文偏乐观，旧版 3+1 次上限会漏剔，召回段可超预算数千 token）；剔除条目同步移出 `packedSet`（v2.17.0），`farScores` 的 `hit` 标记与最终 `ragMarkdown`/`rag.hits` 严格一致（旧版被剪枝剔除的条目仍标 hit=true，UI 误标 RAG命中）。
     - `ragMarkdown = renderJourneyMarkdown(装入条目, midMaxDay)`；`rag.hits` 记录每条命中的 text/score/parts；`rag.farScores`（v2.12.0）记录**全部**远端条目的打分明细 `{text, score, parts, hit}`（无摘要被排除者 score/parts 为 null），UI 用 `entryToDocText` 反查，在每个 far 卡片上标记 RAG命中/未命中。
     - 检索抛错 → 保留二分窗口中段（有上限），仅放弃召回，`rag.active = false`（v2.9.2 起不再回退无上限全量）。
 8. **装配前文**：`historyData.前文 = joinNonEmpty([ragMarkdown, midMarkdown, tailText])`。
@@ -255,7 +255,7 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
 
 - 按 `第X天` 分组升序。
 - `maxDay`（当前天）与无法解析天数的条目 → 每条详细格式：`# 天数|时间段|地点\n## 历程`。
-- 更早的天 → 聚合格式：`# 第X天\n## 当日所有历程拼接`（省 token）。
+- 更早的天 → 聚合格式：按「天数+时间段+地点」合并连续条目（同组内字段全等才拼接，任意一项变化即新起一块）：`# 天数|时间段|地点\n## 组内历程拼接`（省 token）。
 - 回退：`maxDay==0`（无天数可解析）全部详细格式。
 - `extractItemProcess`：历程可能是数组或字符串；每条补中文句号。
 
@@ -580,6 +580,7 @@ node test/smoke-hybrid-recall.cjs
 
 | 版本 | 内容 |
 |---|---|
+| 2.17.0 | **历程聚合渲染改按「天数+时间段+地点」合并连续条目**：`renderJourneyMarkdown` 早于 maxDay 的天不再整天聚合成 `# 第X天\n## 当日全部历程`，改为同一天内「天数+时间段+地点」三项全等的连续条目合并为一块 `# 天数|时间段|地点\n## 组内历程拼接`，任意一项变化即新起一块（更细粒度保留时间/地点结构，token 成本与整天聚合基本持平）；maxDay/无法解析天仍逐条详细格式，不变；连带修复：精确计数剪枝剔除的条目同步移出 `packedSet`，`farScores.hit` 与最终 `ragMarkdown`/`rag.hits` 严格一致（旧版被剔除条目仍标 RAG命中）；冒烟测试场景 H 窗口/远端数量断言按新格式重校准（聚合头变长 → 窗口 4 条 → 2 条），9 场景全过 |
 | 2.16.0 | **Mode A 窗口片段权重改指数衰减**：`FRAG_WEIGHT_WIN_NEW/WIN_NEXT/WIN_OTHER` 三级固定权重删除，改 `FRAG_WEIGHT_WIN_BASE(1.0) × FRAG_WEIGHT_WIN_DECAY(0.95)^i`（i=0 为最新窗口条目）+ 下限 `FRAG_WEIGHT_WIN_MIN(0.50)`：权重低于下限的条目跳过且后续更旧条目一并停止参与 farEntries 打分（权重单调递减，0.95^i < 0.5 约在 i=14）；行为变化：最新/次新条目权重 0.90/0.85 → 1.0/0.95（窗口信号略增强），旧条目 0.80 平权 → 逐条衰减并截断；冒烟测试全过 |
 | 2.15.0 | **语义打分两分量合并为单 max 分量**：Mode B `scoreFarEntries` 与 Mode A `scoreFarEntriesModeA` 不再分别计 `0.20·S_event + 0.40·S_recall`，改为 `S_semantic = max(S_event, S_recall)` 单分量、权重 `SUMMARY_W_SEMANTIC(0.60)` 入总分（总权重仍 ≈1：0.25/0.15/0.60）；`SUMMARY_W_EVENT`/`SUMMARY_W_RECALL` 删除；`parts` 的 `event`/`recall` 字段合并为 `semantic`，UI RAG 徽章 `事 忆 → 总分` 改 `语义 → 总分`；行为变化：S_event 与 S_recall 相等时结果与旧版一致，不等时新值不低于旧值（取高者 ×0.6）；冒烟测试场景 A 新增 semantic 断言，全场景过 |
 | 2.14.0 | **S_actor 移除主角排除**：删除「far 池 df（出现的摘要条目数）最高的前 N 名人物在 `Q`、`F` 两侧剔除」逻辑（Mode B `scoreFarEntries` 与 Mode A `scoreFarEntriesModeA` 的 user 片段 Q / window 片段 actor 集 / 远端 actor 均不再过滤），Dice 系数 `2\|Q∩F\|/(|Q|+|F|)` 直接对全量摘要 actor 计算；`Constants.ACTOR_EXCLUDE_TOP` 删除；行为变化：纯主角查询有人物分（纯主角条目 actorScore = 1 满分、与稀有角色同条目 = 0.67，v2.13.0 为全池 0）、非主角查询含主角 actor 的条目人物分下降（如场景 A 陈九条目 1 → 0.67）；冒烟测试场景 A/C 断言同步更新，9 场景全过 |

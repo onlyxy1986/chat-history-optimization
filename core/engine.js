@@ -382,7 +382,8 @@
     /**
      * 将一组故事历程条目渲染为 markdown。
      * maxDay 必须从完整历程（含被窗口排除的部分）计算，以正确识别"当前天"。
-     * 早于 maxDay 的天聚合格式；maxDay 与无法解析的天使用详细格式。
+     * 早于 maxDay 的天聚合格式（按 天数+时间段+地点 合并连续历程）；
+     * maxDay 与无法解析的天使用详细格式。
      */
     function renderJourneyMarkdown(entries, maxDay) {
         if (!Array.isArray(entries) || entries.length === 0) return '';
@@ -420,9 +421,28 @@
                     result.push(`${header.trim()}\n## ${process.trim()}`);
                 }
             } else {
-                // 之前的天：聚合格式 [第X天]\n所有历程
-                const allProcess = items.map(item => extractItemProcess(item)).join('');
-                result.push(`# ${items[0].天数}\n## ${allProcess.trim()}`);
+                // 之前的天：聚合格式，按「天数+时间段+地点」合并连续历程
+                let groupKey = null;
+                let groupItems = [];
+                const flushGroup = () => {
+                    if (groupItems.length === 0) return;
+                    const first = groupItems[0];
+                    const header = `${first.天数}|${first.时间段}|${first.地点}`;
+                    const allProcess = groupItems.map(item => extractItemProcess(item)).join('');
+                    result.push(`# ${header.trim()}\n## ${allProcess.trim()}`);
+                };
+                for (const item of items) {
+                    const key = [dayNum, item.时间段, item.地点]
+                        .map(s => (s == null ? '' : String(s).trim())).join('\u0000');
+                    if (key !== groupKey) {
+                        flushGroup();
+                        groupKey = key;
+                        groupItems = [item];
+                    } else {
+                        groupItems.push(item);
+                    }
+                }
+                flushGroup();
             }
         }
 
@@ -1318,6 +1338,7 @@ ${newCharacterCardTemplate}
                         let tok = await getTokenCountAsync(ragMarkdown);
                         while (tok > ragBudget && packed.length > 0) {
                             packed.sort((a, b) => a.score - b.score);
+                            packedSet.delete(packed[0].text);
                             packed.shift();
                             finalize();
                             tok = await getTokenCountAsync(ragMarkdown);
