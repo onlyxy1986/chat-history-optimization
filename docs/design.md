@@ -281,7 +281,7 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
 ### 7.1 摘要通道（条目有召回特化摘要 且 `NS.Embedder.isReady()`；Mode B 路径之一）
 
 ```
-score = 0.25·S_actor + 0.15·S_location + 0.20·S_event + 0.40·S_recall
+score = 0.25·S_actor + 0.15·S_location + 0.60·S_semantic
 ```
 
 （权重常量为 `core/constant.js` 的 `Constants.SUMMARY_W_*`，各项附调整指导）
@@ -290,11 +290,12 @@ score = 0.25·S_actor + 0.15·S_location + 0.20·S_event + 0.40·S_recall
   - `Q` = 从消歧名单 `nameList`（全部摘要人物 ∪ 已知角色名）中 `nameMatches(n, queryText, nameList)` 命中的已知人物集；`F` = 摘要 `actor` 去重集（主角不排除）。同一查询对池内所有条目共用同一个 `Q`，分数跨条目可比。
   - **设计决策**：放弃 IDF 稀有度加权（全部人物等权），换得查询侧/远端侧人数比的可比性——旧版 IDF 之和只反映 far 侧稀有度，查询提到一堆人时无法体现「对不上」；v2.13.0 曾引入主角排除（df 最高的前 `ACTOR_EXCLUDE_TOP` 名人物两侧剔除），v2.14.0 移除，纯主角查询同样有人物分。
 - **S_location**：`location` 数组中 `queryText.includes(loc)` 的命中比例。
-- **S_event**：`cosine(queryVec, eventVec)`，clamp 到 [0,1]。
-- **S_recall**：`max(cosine(queryVec, recall_when[i]))`。
+- **S_semantic**（v2.15.0 起，原为 0.20·S_event + 0.40·S_recall 两分量）：`max(S_event, S_recall)`，只取一份最大值入总分。
+  - `S_event`：`cosine(queryVec, eventVec)`，clamp 到 [0,1]。
+  - `S_recall`：`max(cosine(queryVec, recall_when[i]))`。
 - 查询向量：`NS.Embedder.withQueryInstruction(queryText)`（BGE 官方指令前缀「为这个句子生成表示以用于检索相关文章：」，**文档侧不加**）。
 - 文档侧向量：优先 `NS.EmbedStore.resolve(jobTexts)`（读持久化 store，缺失现场编码并回写）；store 模块缺失时直接 `encodeBatch`。
-- `parts` 记录各分量明细（source/actor/location/actorScore/locationScore/event/recall），UI 展示。
+- `parts` 记录各分量明细（source/actor/location/actorScore/locationScore/semantic），UI 展示。
 
 ### 7.2 BM25 回退通道（无摘要条目 / Embedder 未就绪时全池）
 
@@ -315,10 +316,10 @@ score = 0.25·S_actor + 0.15·S_location + 0.20·S_event + 0.40·S_recall
   - `winNext` 片段：窗口倒数第 2 条（权重 `FRAG_WEIGHT_WIN_NEXT=0.85`）。
   - `winOther` 片段：窗口其余条目（权重 `FRAG_WEIGHT_WIN_OTHER=0.80`）。
   - 窗口为空时只保留 `user` 片段。
-- **每片段对远端条目 computes 一个 fragScore**（与 §7.1 同公式）：`0.25·S_actor + 0.15·S_location + 0.20·S_event + 0.40·S_recall`。其中：
+- **每片段对远端条目 computes 一个 fragScore**（与 §7.1 同公式）：`0.25·S_actor + 0.15·S_location + 0.60·S_semantic`。其中：
   - `S_actor`（与 §7.1 同 Dice 公式，主角不排除）：`user` 片段的 `Q` = 从全角色名单提取消息提及的人物集；`window` 片段的 `Q` = 窗口条目 actor 集；`F` = 远端条目 actor 集。匹配：`user` 片段按集合成员判定，`window` 片段**成对匹配**（任一 `(winActor, farActor)` 对 `nameMatches(winActor, farActor, nameList)` 命中即计 1）。
   - `S_location`：`user` 片段 `query.includes(loc)`；`window` 片段 **层级匹配** `isHierMatch`（如 `酒馆.二楼` ⊂ `酒馆.二楼.卡座`，按 `.` 分段前缀匹配）。
-  - `S_event` / `S_recall` = `clamp01(cosine(fragVec, docVec))`，`fragVec` 由 `Embedder.encodeBatch([withQueryInstruction(片段文本)])[0]` 得到。
+  - `S_semantic` = `max(S_event, S_recall)`，其中 `S_event` / `S_recall` = `clamp01(cosine(fragVec, docVec))`，`fragVec` 由 `Embedder.encodeBatch([withQueryInstruction(片段文本)])[0]` 得到。
 - **最终分数**：`score = max_f(w_f · fragScore_f)`，并标注命中贡献最大的 `bestFrag`（`'user'` 或 `'fN'`，N=该窗口条目所在楼层号，楼层由首现归属映射得到；归属缺失时回退 `'wN'`=片段序号；UI 展示为「用户 / 楼层N / 窗口·第N」）。因窗口起点对齐楼层边界，`fN` 必对应整层在窗口内的楼层。
 - **绝不 BM25**：Mode A 下缺失摘要的条目直接排除，不回退词法检索（设计决策：二级摘要开启即信任语义通道）。
 
@@ -581,6 +582,7 @@ node test/smoke-hybrid-recall.cjs
 
 | 版本 | 内容 |
 |---|---|
+| 2.15.0 | **语义打分两分量合并为单 max 分量**：Mode B `scoreFarEntries` 与 Mode A `scoreFarEntriesModeA` 不再分别计 `0.20·S_event + 0.40·S_recall`，改为 `S_semantic = max(S_event, S_recall)` 单分量、权重 `SUMMARY_W_SEMANTIC(0.60)` 入总分（总权重仍 ≈1：0.25/0.15/0.60）；`SUMMARY_W_EVENT`/`SUMMARY_W_RECALL` 删除；`parts` 的 `event`/`recall` 字段合并为 `semantic`，UI RAG 徽章 `事 忆 → 总分` 改 `语义 → 总分`；行为变化：S_event 与 S_recall 相等时结果与旧版一致，不等时新值不低于旧值（取高者 ×0.6）；冒烟测试场景 A 新增 semantic 断言，全场景过 |
 | 2.14.0 | **S_actor 移除主角排除**：删除「far 池 df（出现的摘要条目数）最高的前 N 名人物在 `Q`、`F` 两侧剔除」逻辑（Mode B `scoreFarEntries` 与 Mode A `scoreFarEntriesModeA` 的 user 片段 Q / window 片段 actor 集 / 远端 actor 均不再过滤），Dice 系数 `2\|Q∩F\|/(|Q|+|F|)` 直接对全量摘要 actor 计算；`Constants.ACTOR_EXCLUDE_TOP` 删除；行为变化：纯主角查询有人物分（纯主角条目 actorScore = 1 满分、与稀有角色同条目 = 0.67，v2.13.0 为全池 0）、非主角查询含主角 actor 的条目人物分下降（如场景 A 陈九条目 1 → 0.67）；冒烟测试场景 A/C 断言同步更新，9 场景全过 |
 | 2.13.0 | **S_actor 计算方式改为 Dice + 主角排除**：原「命中人物 IDF 之和 / `ACTOR_IDF_SATURATION` 饱和」改为 Dice 系数 `2\|Q∩F\|/(|Q|+|F|)`（Q=查询侧人物集，F=远端摘要 actor，两侧去重），并剔除 far 池出场最多（df 最高）的前 `Constants.ACTOR_EXCLUDE_TOP(1)` 名人物——Mode B 的 Q 为查询中 nameMatches 命中的已知人物集（同一查询对全池共用，跨条目可比），Mode A 的 Q 为 user 片段全名单提取 / window 片段条目 actor 集（成对匹配语义不变）；行为变化：纯主角查询人物分全池为 0（旧版约 0.1）、非主角人物不再按稀有度加权；`ACTOR_IDF_SATURATION` 删除；冒烟测试场景 A/C 断言同步更新，9 场景全过 |
 | 2.12.0 | **远端条目 RAG 全量命中/未命中标记**：`rag.farScores` 记录全部远端条目打分明细（text/score/parts/hit，无摘要被排除者为 null）；故事历程 tab 每个 far 卡片显示 `RAG命中/未命中（bestFrag 片段来源：用户/楼层N） 人x/y(人物分) 地x/y(地点分) 事 忆 → 总分`（BM25 通道显示 `BM25 0.xx`，无摘要显示 `（无二级摘要）`），未命中用弱化徽章（`.coo-rag-miss-score`），命中卡片高亮不变；「仅显示选中楼层」仍只过滤命中条目；bestFrag 标记为真实楼层号 `fN`（首现楼层归属映射，UI 显示「用户 / 楼层N」，归属缺失回退 `wN`「窗口·第N」）；**窗口起点对齐楼层边界**（楼层不可拆，被引用的楼层必整层在窗口内，不会与 farEntries 矛盾）；冒烟测试 A/A' 新增 farScores 断言、新增 H 场景（非空窗口对齐 + bestFrag 楼层号）全过 |

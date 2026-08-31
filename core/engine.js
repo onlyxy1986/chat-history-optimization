@@ -728,7 +728,9 @@ ${newCharacterCardTemplate}
      * 远端条目混合打分（与 farEntries 同序返回）：
      * - 有召回特化摘要且 Embedder 就绪：
      *   score = W_ACTOR·S_actor + W_LOCATION·(命中地点/总数)
-     *         + W_EVENT·cos(query,event) + W_RECALL·max(cos(query,recall_when))
+     *         + W_SEMANTIC·S_semantic
+     *   S_semantic = max(S_event, S_recall)（只取一份最大值入总分），
+     *   S_event = clamp01(cos(query,event))，S_recall = max(clamp01(cos(query,recall_when[i])))
       *   S_actor = 2|Q∩F|/(|Q|+|F|)（Dice），Q=查询提及的已知人物集，F=摘要 actor（去重，不排除主角）
      * - 否则：BM25 回退，score = bm25/(bm25+Constants.BM25_NORM_K)
      * Embedder 未就绪时全池走 BM25 归一化（等价于纯 BM25 排序）。
@@ -821,10 +823,10 @@ ${newCharacterCardTemplate}
                 for (const p of job.recallPos) {
                     if (queryVec && vecs[p]) sRecall = Math.max(sRecall, clamp01(NS.Embedder.cosine(queryVec, vecs[p])));
                 }
+                const sSemantic = Math.max(sEvent, sRecall);
                 const score = Constants.SUMMARY_W_ACTOR * actorScore
                     + Constants.SUMMARY_W_LOCATION * locationScore
-                    + Constants.SUMMARY_W_EVENT * sEvent
-                    + Constants.SUMMARY_W_RECALL * sRecall;
+                    + Constants.SUMMARY_W_SEMANTIC * sSemantic;
                 results[i] = {
                     index: i,
                     score,
@@ -834,8 +836,7 @@ ${newCharacterCardTemplate}
                         location: locHit + '/' + locations.length,
                         actorScore: Number(actorScore.toFixed(2)),
                         locationScore: Number(locationScore.toFixed(2)),
-                        event: Number(sEvent.toFixed(2)),
-                        recall: Number(sRecall.toFixed(2)),
+                        semantic: Number(sSemantic.toFixed(2)),
                     },
                 };
             } else {
@@ -1049,22 +1050,21 @@ ${newCharacterCardTemplate}
                         for (const loc of locations) { if (loc && f.text.includes(loc)) locHit++; }
                     }
                     const locationScore = locations.length > 0 ? locHit / locations.length : 0;
-                    // S_event / S_recall
+                    // S_semantic = max(S_event, S_recall)，只取一份最大值入总分
                     const sEvent = (doc.eventVec && qv) ? clamp01(NS.Embedder.cosine(qv, doc.eventVec)) : 0;
                     let sRecall = 0;
                     if (qv) for (const rv of doc.recallVecs) sRecall = Math.max(sRecall, clamp01(NS.Embedder.cosine(qv, rv)));
+                    const sSemantic = Math.max(sEvent, sRecall);
                     fragScore = Constants.SUMMARY_W_ACTOR * actorScore
                         + Constants.SUMMARY_W_LOCATION * locationScore
-                        + Constants.SUMMARY_W_EVENT * sEvent
-                        + Constants.SUMMARY_W_RECALL * sRecall;
+                        + Constants.SUMMARY_W_SEMANTIC * sSemantic;
                     parts = {
                         source: 'summary',
                         actor: actorHit + '/' + actors.length,
                         location: locHit + '/' + locations.length,
                         actorScore: Number(actorScore.toFixed(2)),
                         locationScore: Number(locationScore.toFixed(2)),
-                        event: Number(sEvent.toFixed(2)),
-                        recall: Number(sRecall.toFixed(2)),
+                        semantic: Number(sSemantic.toFixed(2)),
                     };
                     if (RecallCache && RecallCache.setPair) {
                         RecallCache.setPair(f.text, f.summary, entryKey, s, fragScore, parts);

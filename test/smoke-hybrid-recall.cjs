@@ -231,6 +231,7 @@ function validSummaryFor(entry) {
     check('A: 走 summary 通道', topA && topA.parts && topA.parts.source === 'summary', topA);
     check('A: 人物 1/2 且 actorScore=0.67（Dice 2·1/(1+2)，主角不排除）', topA && topA.parts.actor === '1/2' && Math.abs(topA.parts.actorScore - 0.67) < 0.001, topA && topA.parts);
     check('A: 地点 2/2 命中', topA && topA.parts.location === '2/2', topA && topA.parts);
+    check('A: 语义分量为单 max 值（parts.semantic ∈ [0,1]，无 event/recall 字段）', topA && typeof topA.parts.semantic === 'number' && topA.parts.semantic >= 0 && topA.parts.semantic <= 1 && !('event' in topA.parts) && !('recall' in topA.parts), topA && topA.parts);
     check('A: 分数在 [0,1]', ragA.hits.every(h => h.score >= 0 && h.score <= 1));
     check('A: farScores 覆盖全部远端条目且命中数与 hits 一致', ragA && Array.isArray(ragA.farScores) && ragA.farScores.length === ragA.farCount && ragA.farScores.filter(r => r.hit).length === ragA.hits.length, ragA && ragA.farScores);
     check('A: 每条 farScores 均有打分明细（无摘要被排除者 score 为 null）', ragA && ragA.farScores.every(r => r.score === null || (r.parts && r.parts.source)), ragA.farScores);

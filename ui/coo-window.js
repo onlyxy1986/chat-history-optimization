@@ -531,7 +531,7 @@
         const frag = parts.bestFrag ? `（${fragSourceLabel(parts.bestFrag)}）` : '';
         let label;
         if (parts.source === 'summary') {
-            label = `${prefix}${frag} 人${parts.actor || '0/0'}(${Number(parts.actorScore || 0).toFixed(2)}) 地${parts.location || '0/0'}(${Number(parts.locationScore || 0).toFixed(2)}) 事${Number(parts.event || 0).toFixed(2)} 忆${Number(parts.recall || 0).toFixed(2)} → ${Number(record.score || 0).toFixed(2)}`;
+            label = `${prefix}${frag} 人${parts.actor || '0/0'}(${Number(parts.actorScore || 0).toFixed(2)}) 地${parts.location || '0/0'}(${Number(parts.locationScore || 0).toFixed(2)}) 语义${Number(parts.semantic || 0).toFixed(2)} → ${Number(record.score || 0).toFixed(2)}`;
         } else if (parts.source === 'bm25') {
             label = `${prefix}${frag} BM25 ${Number(record.score || 0).toFixed(2)}`;
         } else {
