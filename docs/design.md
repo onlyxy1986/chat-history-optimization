@@ -312,9 +312,7 @@ score = 0.25·S_actor + 0.15·S_location + 0.60·S_semantic
 
 - **片段（fragments）**：
   - `user` 片段：最新用户消息 `query`（权重 `FRAG_WEIGHT_USER=1.0`）。
-  - `winNew` 片段：窗口中最新的 1 条（权重 `FRAG_WEIGHT_WIN_NEW=0.90`）。
-  - `winNext` 片段：窗口倒数第 2 条（权重 `FRAG_WEIGHT_WIN_NEXT=0.85`）。
-  - `winOther` 片段：窗口其余条目（权重 `FRAG_WEIGHT_WIN_OTHER=0.80`）。
+  - `window` 片段：窗口各条目（最新→更旧），第 i 条（最新 i=0）权重 = `FRAG_WEIGHT_WIN_BASE(1.0) × FRAG_WEIGHT_WIN_DECAY(0.95)^i`；权重低于 `FRAG_WEIGHT_WIN_MIN(0.50)` 时停止，后续更旧条目不再参与打分（权重单调递减）。
   - 窗口为空时只保留 `user` 片段。
 - **每片段对远端条目 computes 一个 fragScore**（与 §7.1 同公式）：`0.25·S_actor + 0.15·S_location + 0.60·S_semantic`。其中：
   - `S_actor`（与 §7.1 同 Dice 公式，主角不排除）：`user` 片段的 `Q` = 从全角色名单提取消息提及的人物集；`window` 片段的 `Q` = 窗口条目 actor 集；`F` = 远端条目 actor 集。匹配：`user` 片段按集合成员判定，`window` 片段**成对匹配**（任一 `(winActor, farActor)` 对 `nameMatches(winActor, farActor, nameList)` 命中即计 1）。
@@ -582,6 +580,7 @@ node test/smoke-hybrid-recall.cjs
 
 | 版本 | 内容 |
 |---|---|
+| 2.16.0 | **Mode A 窗口片段权重改指数衰减**：`FRAG_WEIGHT_WIN_NEW/WIN_NEXT/WIN_OTHER` 三级固定权重删除，改 `FRAG_WEIGHT_WIN_BASE(1.0) × FRAG_WEIGHT_WIN_DECAY(0.95)^i`（i=0 为最新窗口条目）+ 下限 `FRAG_WEIGHT_WIN_MIN(0.50)`：权重低于下限的条目跳过且后续更旧条目一并停止参与 farEntries 打分（权重单调递减，0.95^i < 0.5 约在 i=14）；行为变化：最新/次新条目权重 0.90/0.85 → 1.0/0.95（窗口信号略增强），旧条目 0.80 平权 → 逐条衰减并截断；冒烟测试全过 |
 | 2.15.0 | **语义打分两分量合并为单 max 分量**：Mode B `scoreFarEntries` 与 Mode A `scoreFarEntriesModeA` 不再分别计 `0.20·S_event + 0.40·S_recall`，改为 `S_semantic = max(S_event, S_recall)` 单分量、权重 `SUMMARY_W_SEMANTIC(0.60)` 入总分（总权重仍 ≈1：0.25/0.15/0.60）；`SUMMARY_W_EVENT`/`SUMMARY_W_RECALL` 删除；`parts` 的 `event`/`recall` 字段合并为 `semantic`，UI RAG 徽章 `事 忆 → 总分` 改 `语义 → 总分`；行为变化：S_event 与 S_recall 相等时结果与旧版一致，不等时新值不低于旧值（取高者 ×0.6）；冒烟测试场景 A 新增 semantic 断言，全场景过 |
 | 2.14.0 | **S_actor 移除主角排除**：删除「far 池 df（出现的摘要条目数）最高的前 N 名人物在 `Q`、`F` 两侧剔除」逻辑（Mode B `scoreFarEntries` 与 Mode A `scoreFarEntriesModeA` 的 user 片段 Q / window 片段 actor 集 / 远端 actor 均不再过滤），Dice 系数 `2\|Q∩F\|/(|Q|+|F|)` 直接对全量摘要 actor 计算；`Constants.ACTOR_EXCLUDE_TOP` 删除；行为变化：纯主角查询有人物分（纯主角条目 actorScore = 1 满分、与稀有角色同条目 = 0.67，v2.13.0 为全池 0）、非主角查询含主角 actor 的条目人物分下降（如场景 A 陈九条目 1 → 0.67）；冒烟测试场景 A/C 断言同步更新，9 场景全过 |
 | 2.13.0 | **S_actor 计算方式改为 Dice + 主角排除**：原「命中人物 IDF 之和 / `ACTOR_IDF_SATURATION` 饱和」改为 Dice 系数 `2\|Q∩F\|/(|Q|+|F|)`（Q=查询侧人物集，F=远端摘要 actor，两侧去重），并剔除 far 池出场最多（df 最高）的前 `Constants.ACTOR_EXCLUDE_TOP(1)` 名人物——Mode B 的 Q 为查询中 nameMatches 命中的已知人物集（同一查询对全池共用，跨条目可比），Mode A 的 Q 为 user 片段全名单提取 / window 片段条目 actor 集（成对匹配语义不变）；行为变化：纯主角查询人物分全池为 0（旧版约 0.1）、非主角人物不再按稀有度加权；`ACTOR_IDF_SATURATION` 删除；冒烟测试场景 A/C 断言同步更新，9 场景全过 |

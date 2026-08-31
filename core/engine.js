@@ -875,7 +875,7 @@ ${newCharacterCardTemplate}
 
     // ------------------------------------------------------------------
     // Mode A 召回打分（subSummaryToggle 开启）：逐片段 fragScore → 加权 max
-    // 片段 = 最新用户消息（f0）+ 窗口各条目二级摘要（最新→次新→其余）。
+    // 片段 = 最新用户消息（f0）+ 窗口各条目二级摘要（最新→更旧，权重指数衰减至下限）。
     // 每个片段对 farEntry 的打分为纯内容函数，缓存于 RecallCache（跨发送精确复用）。
     // 无摘要 farEntry 直接排除（不占预算，绝不 BM25 回退）。
     // ------------------------------------------------------------------
@@ -897,14 +897,14 @@ ${newCharacterCardTemplate}
             if (nameMatches(n, queryUserText, nameList)) userActorSet.add(n);
         }
 
-        // 窗口片段（最新→最旧）
+        // 窗口片段（最新→最旧），权重按指数衰减，低于下限后停止（权重单调递减）
         const windowFrags = [];
-        for (let k = windowEntries.length - 1; k >= 0; k--) {
+        for (let k = windowEntries.length - 1, i = 0; k >= 0; k--, i++) {
+            const weight = Constants.FRAG_WEIGHT_WIN_BASE * Math.pow(Constants.FRAG_WEIGHT_WIN_DECAY, i);
+            if (weight < Constants.FRAG_WEIGHT_WIN_MIN) break;
             const entry = windowEntries[k];
             const s = entry ? summaryMap.get(JSON.stringify(entry)) : null;
             if (!s) continue; // 无摘要窗口条目：跳过该片段
-            const weight = k === windowEntries.length - 1 ? Constants.FRAG_WEIGHT_WIN_NEW
-                : (k === windowEntries.length - 2 ? Constants.FRAG_WEIGHT_WIN_NEXT : Constants.FRAG_WEIGHT_WIN_OTHER);
             const winActorSet = new Set();
             if (Array.isArray(s.actor)) for (const a of s.actor) winActorSet.add(a);
             windowFrags.push({
