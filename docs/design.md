@@ -286,10 +286,9 @@ score = 0.25·S_actor + 0.15·S_location + 0.20·S_event + 0.40·S_recall
 
 （权重常量为 `core/constant.js` 的 `Constants.SUMMARY_W_*`，各项附调整指导）
 
-- **S_actor**（v2.13.0 起，原为 IDF 之和绝对饱和）：**Dice 系数** `2|Q∩F|/(|Q|+|F|)`，天然 [0,1]。
-  - `Q` = 从消歧名单 `nameList`（全部摘要人物 ∪ 已知角色名）中 `nameMatches(n, queryText, nameList)` 命中的已知人物集；`F` = 摘要 `actor` 去重集。同一查询对池内所有条目共用同一个 `Q`，分数跨条目可比。
-  - **主角排除**：far 池中 df（出现的摘要条目数）最高的前 `Constants.ACTOR_EXCLUDE_TOP(1)` 名人物在 `Q`、`F` 两侧均剔除 → 纯主角查询的人物分全池为 0（已接受的取舍，由 event/recall 分量兜底）；测试 `smoke-hybrid-recall.cjs` 场景 C 专门验证此点。
-  - **设计决策**：放弃 IDF 稀有度加权（非主角人物等权），换得查询侧/远端侧人数比的可比性——旧版 IDF 之和只反映 far 侧稀有度，查询提到一堆人时无法体现「对不上」。
+- **S_actor**（v2.13.0 起，原为 IDF 之和绝对饱和；v2.14.0 起移除主角排除）：**Dice 系数** `2|Q∩F|/(|Q|+|F|)`，天然 [0,1]。
+  - `Q` = 从消歧名单 `nameList`（全部摘要人物 ∪ 已知角色名）中 `nameMatches(n, queryText, nameList)` 命中的已知人物集；`F` = 摘要 `actor` 去重集（主角不排除）。同一查询对池内所有条目共用同一个 `Q`，分数跨条目可比。
+  - **设计决策**：放弃 IDF 稀有度加权（全部人物等权），换得查询侧/远端侧人数比的可比性——旧版 IDF 之和只反映 far 侧稀有度，查询提到一堆人时无法体现「对不上」；v2.13.0 曾引入主角排除（df 最高的前 `ACTOR_EXCLUDE_TOP` 名人物两侧剔除），v2.14.0 移除，纯主角查询同样有人物分。
 - **S_location**：`location` 数组中 `queryText.includes(loc)` 的命中比例。
 - **S_event**：`cosine(queryVec, eventVec)`，clamp 到 [0,1]。
 - **S_recall**：`max(cosine(queryVec, recall_when[i]))`。
@@ -317,7 +316,7 @@ score = 0.25·S_actor + 0.15·S_location + 0.20·S_event + 0.40·S_recall
   - `winOther` 片段：窗口其余条目（权重 `FRAG_WEIGHT_WIN_OTHER=0.80`）。
   - 窗口为空时只保留 `user` 片段。
 - **每片段对远端条目 computes 一个 fragScore**（与 §7.1 同公式）：`0.25·S_actor + 0.15·S_location + 0.20·S_event + 0.40·S_recall`。其中：
-  - `S_actor`（与 §7.1 同 Dice 公式 + 主角排除）：`user` 片段的 `Q` = 从全角色名单提取消息提及的人物集；`window` 片段的 `Q` = 窗口条目 actor 集；`F` = 远端条目 actor 集。匹配：`user` 片段按集合成员判定，`window` 片段**成对匹配**（任一 `(winActor, farActor)` 对 `nameMatches(winActor, farActor, nameList)` 命中即计 1）。
+  - `S_actor`（与 §7.1 同 Dice 公式，主角不排除）：`user` 片段的 `Q` = 从全角色名单提取消息提及的人物集；`window` 片段的 `Q` = 窗口条目 actor 集；`F` = 远端条目 actor 集。匹配：`user` 片段按集合成员判定，`window` 片段**成对匹配**（任一 `(winActor, farActor)` 对 `nameMatches(winActor, farActor, nameList)` 命中即计 1）。
   - `S_location`：`user` 片段 `query.includes(loc)`；`window` 片段 **层级匹配** `isHierMatch`（如 `酒馆.二楼` ⊂ `酒馆.二楼.卡座`，按 `.` 分段前缀匹配）。
   - `S_event` / `S_recall` = `clamp01(cosine(fragVec, docVec))`，`fragVec` 由 `Embedder.encodeBatch([withQueryInstruction(片段文本)])[0]` 得到。
 - **最终分数**：`score = max_f(w_f · fragScore_f)`，并标注命中贡献最大的 `bestFrag`（`'user'` 或 `'fN'`，N=该窗口条目所在楼层号，楼层由首现归属映射得到；归属缺失时回退 `'wN'`=片段序号；UI 展示为「用户 / 楼层N / 窗口·第N」）。因窗口起点对齐楼层边界，`fN` 必对应整层在窗口内的楼层。
@@ -497,7 +496,7 @@ score = 0.25·S_actor + 0.15·S_location + 0.20·S_event + 0.40·S_recall
 | 单条装箱按「详细格式」计费 | 最坏成本估计，避免混入聚合天分组后超预算 |
 | BM25 中文 unigram+bigram 无词典分词 | 无词典依赖；bigram 保短语重叠；停用词只滤单字保 bigram |
 | 召回分数双通道归一到 [0,1)（Mode B） | 摘要语义分与 BM25 回退分可比，可混排；Mode A 仅语义通道，无 BM25 |
-| actor 分用 Dice + 出场最多者排除（v2.13.0） | 主角几乎每条在场无判别力，直接两侧剔除；Dice = 查询侧/远端侧命中人数比，同一查询对所有条目用同一个 Q，跨条目可比（v2.13.0 前为 IDF 绝对饱和） |
+| actor 分用 Dice（v2.13.0，v2.14.0 移除主角排除） | Dice = 查询侧/远端侧命中人数比，同一查询对所有条目用同一个 Q，跨条目可比（v2.13.0 前为 IDF 绝对饱和）；v2.13.0 曾两侧剔除 df 最高者（主角），v2.14.0 移除，主角正常参与人物打分 |
 | 楼层级 FNV 哈希失效（非逐条） | 楼层 story block 是整体重写的（重新生成/编辑/swipe），逐条哈希无意义；整层清空最简单正确 |
 | 摘要存 `extra`、向量存 `chat_metadata` | extra per-消息随 chat 走；metadata per-chat 存跨消息的派生物（向量按文本哈希跨楼层去重） |
 | 向量库基准维度 = `raw.dims` 优先 / 多数派（v2.11.0） | 旧批量 bug 曾把整批 flatten 的 7680 维长向量写入库（15×512）；「首条定基准」+ 数字哈希键升序迭代 → 单条污染条目令整库丢弃、每次刷新全量重算；多数派 + `raw.dims` 使污染库自愈（污染条目按缺失重编码），`persistVectors` 维度守卫防再发 |
@@ -551,7 +550,7 @@ node test/smoke-hybrid-recall.cjs
 - 额外 mock：`NS.RecallCache`（内存、内容寻址忠实实现，验证 LRU 跨发送复用）、`Retriever.retrieve` 间谍（验证 Mode A 不调用 BM25）、`encodeBatch` 计数（验证缓存命中后不再编码）、`Engine.onParseFail` 订阅间谍（验证解析失败气泡广播）。
 - 构造 4 楼层 × 2 条目假聊天（含 6 条新 schema 摘要、1 条旧 schema、1 条无摘要），跑 9 个场景：
   - **A**（Mode B，Embedder 就绪，稀有角色查询）：chat 压成 1 条、RAG 激活、最优命中是目标条目、走 summary 通道、actor 1/2 且 actorScore=1（Dice 满分）、地点 2/2、分数 ∈ [0,1]、`farScores` 覆盖全部远端条目（条数=farCount、命中数=hits 数、每条有明细、存在未命中条目）。
-  - **C**（Mode B，主角排除）：只提高频主角时主角两侧剔除 → 纯主角条目 actorScore = 0 且人物 0/1，全部 summary 通道条目人物分均为 0。
+  - **C**（Mode B，主角不排除）：只提高频主角时主角正常参与打分 → 纯主角条目 actorScore = 1 且人物 1/1，actor 不含主角的条目人物分 = 0，与稀有角色同条目的主角贡献人物分 > 0（Dice 2·1/(1+2)）。
   - **B**（Mode B，Embedder 未就绪）：全池走 bm25 通道、分数 ∈ [0,1)。
   - **A'**（Mode A，全部有摘要）：RAG 激活、全部 summary 通道、**绝不调用 `Retriever.retrieve`**、有 `bestFrag` 标记、最优命中是陈九仓库条目、`farScores` 全部条目有 `bestFrag` 且未命中条目同样有明细。
   - **H**（Mode A + 非空窗口，tokenLimit 放大）：RAG 激活、窗口/远端非空、**窗口起点对齐楼层边界**（测试数据对齐后窗口=楼层3+5 共 4 条、远端=楼层1 共 2 条）、全部 `farScores` 的 `bestFrag` ∈ `user/f3/f5`（楼层 1 整体在远端，不得出现 `f1` 或 `wN` 回退）。
@@ -582,6 +581,7 @@ node test/smoke-hybrid-recall.cjs
 
 | 版本 | 内容 |
 |---|---|
+| 2.14.0 | **S_actor 移除主角排除**：删除「far 池 df（出现的摘要条目数）最高的前 N 名人物在 `Q`、`F` 两侧剔除」逻辑（Mode B `scoreFarEntries` 与 Mode A `scoreFarEntriesModeA` 的 user 片段 Q / window 片段 actor 集 / 远端 actor 均不再过滤），Dice 系数 `2\|Q∩F\|/(|Q|+|F|)` 直接对全量摘要 actor 计算；`Constants.ACTOR_EXCLUDE_TOP` 删除；行为变化：纯主角查询有人物分（纯主角条目 actorScore = 1 满分、与稀有角色同条目 = 0.67，v2.13.0 为全池 0）、非主角查询含主角 actor 的条目人物分下降（如场景 A 陈九条目 1 → 0.67）；冒烟测试场景 A/C 断言同步更新，9 场景全过 |
 | 2.13.0 | **S_actor 计算方式改为 Dice + 主角排除**：原「命中人物 IDF 之和 / `ACTOR_IDF_SATURATION` 饱和」改为 Dice 系数 `2\|Q∩F\|/(|Q|+|F|)`（Q=查询侧人物集，F=远端摘要 actor，两侧去重），并剔除 far 池出场最多（df 最高）的前 `Constants.ACTOR_EXCLUDE_TOP(1)` 名人物——Mode B 的 Q 为查询中 nameMatches 命中的已知人物集（同一查询对全池共用，跨条目可比），Mode A 的 Q 为 user 片段全名单提取 / window 片段条目 actor 集（成对匹配语义不变）；行为变化：纯主角查询人物分全池为 0（旧版约 0.1）、非主角人物不再按稀有度加权；`ACTOR_IDF_SATURATION` 删除；冒烟测试场景 A/C 断言同步更新，9 场景全过 |
 | 2.12.0 | **远端条目 RAG 全量命中/未命中标记**：`rag.farScores` 记录全部远端条目打分明细（text/score/parts/hit，无摘要被排除者为 null）；故事历程 tab 每个 far 卡片显示 `RAG命中/未命中（bestFrag 片段来源：用户/楼层N） 人x/y(人物分) 地x/y(地点分) 事 忆 → 总分`（BM25 通道显示 `BM25 0.xx`，无摘要显示 `（无二级摘要）`），未命中用弱化徽章（`.coo-rag-miss-score`），命中卡片高亮不变；「仅显示选中楼层」仍只过滤命中条目；bestFrag 标记为真实楼层号 `fN`（首现楼层归属映射，UI 显示「用户 / 楼层N」，归属缺失回退 `wN`「窗口·第N」）；**窗口起点对齐楼层边界**（楼层不可拆，被引用的楼层必整层在窗口内，不会与 farEntries 矛盾）；冒烟测试 A/A' 新增 farScores 断言、新增 H 场景（非空窗口对齐 + bestFrag 楼层号）全过 |
 | 2.11.1 | **NEW_STORY_DATA 解析失败检查时机改为消息事件驱动**：原在生成拦截器（发送时）检查，导致某次回复损坏要到下一条消息发送时才提示（滞后一轮）；新增 `Engine.checkParseFailures()`，订阅 `MESSAGE_RECEIVED`（回复到达）/`MESSAGE_EDITED`/`MESSAGE_UPDATED`（修改）/`MESSAGE_SWIPED`（切 swipe）即时检查当前聊天并对新出现失败楼层经 `onParseFail` 广播，基线变化同步 `notifyStats` 刷新失败楼层显示；`MESSAGE_DELETED`/`CHAT_CHANGED`/`CHAT_LOADED` 静默重建基线（楼层下标错位防护）；拦截器内检查移除；修复后重新损坏可再次提示；冒烟测试新增 G2 场景（编辑修复/再损坏），9 场景全过 |

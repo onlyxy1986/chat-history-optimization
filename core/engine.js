@@ -729,8 +729,7 @@ ${newCharacterCardTemplate}
      * - 有召回特化摘要且 Embedder 就绪：
      *   score = W_ACTOR·S_actor + W_LOCATION·(命中地点/总数)
      *         + W_EVENT·cos(query,event) + W_RECALL·max(cos(query,recall_when))
-     *   S_actor = 2|Q∩F|/(|Q|+|F|)（Dice），Q=查询提及的已知人物集，F=摘要 actor，
-     *   两侧均排除 far 池 df 最高的前 ACTOR_EXCLUDE_TOP 名人物（主角排除）
+      *   S_actor = 2|Q∩F|/(|Q|+|F|)（Dice），Q=查询提及的已知人物集，F=摘要 actor（去重，不排除主角）
      * - 否则：BM25 回退，score = bm25/(bm25+Constants.BM25_NORM_K)
      * Embedder 未就绪时全池走 BM25 归一化（等价于纯 BM25 排序）。
      */
@@ -761,20 +760,10 @@ ${newCharacterCardTemplate}
         }
         const nameList = [...allNames];
 
-        // actor 打分：df 最高的前 N 名人物（主角，几乎每条都在场）两侧排除，
-        // S_actor = 2|Q∩F|/(|Q|+|F|)（Dice 系数，天然 [0,1]）；
+        // actor 打分：S_actor = 2|Q∩F|/(|Q|+|F|)（Dice 系数，天然 [0,1]）；
         // Q = 查询中 nameMatches 命中的已知人物集（nameList 消歧），同一查询对所有条目共用
-        const actorDf = new Map();
-        for (const s of summaries) {
-            if (!s || !Array.isArray(s.actor)) continue;
-            for (const a of new Set(s.actor)) actorDf.set(a, (actorDf.get(a) || 0) + 1);
-        }
-        const excludedActors = new Set(
-            [...actorDf.entries()].sort((a, b) => b[1] - a[1]).slice(0, Constants.ACTOR_EXCLUDE_TOP).map((e) => e[0])
-        );
         const queryActorSet = new Set();
         for (const n of nameList) {
-            if (excludedActors.has(n)) continue;
             if (nameMatches(n, queryText, nameList)) queryActorSet.add(n);
         }
 
@@ -814,7 +803,7 @@ ${newCharacterCardTemplate}
             const s = summaries[i];
             if (s) {
                 const actors = Array.isArray(s.actor) ? s.actor : [];
-                const farActors = [...new Set(actors)].filter((a) => !excludedActors.has(a));
+                const farActors = [...new Set(actors)];
                 let actorHit = 0;
                 for (const a of farActors) if (queryActorSet.has(a)) actorHit++;
                 const actorScore = (queryActorSet.size + farActors.length) > 0
@@ -893,26 +882,17 @@ ${newCharacterCardTemplate}
         const embedderReady = !!(NS.Embedder && NS.Embedder.isReady());
         const RecallCache = NS.RecallCache;
 
-        // far 池摘要集合：actor df 统计 + 主角排除集 + 消歧名单
+        // far 池摘要集合：消歧名单
         const farSummaries = farEntries
             .map((e) => summaryMap.get(JSON.stringify(e)) || null)
             .filter(Boolean);
-        const actorDf = new Map();
-        for (const s of farSummaries) {
-            if (!Array.isArray(s.actor)) continue;
-            for (const a of new Set(s.actor)) actorDf.set(a, (actorDf.get(a) || 0) + 1);
-        }
-        const excludedActors = new Set(
-            [...actorDf.entries()].sort((a, b) => b[1] - a[1]).slice(0, Constants.ACTOR_EXCLUDE_TOP).map((e) => e[0])
-        );
         const allNames = new Set(allRoleNames || []);
         for (const s of farSummaries) if (Array.isArray(s.actor)) for (const a of s.actor) allNames.add(a);
         const nameList = [...allNames];
 
-        // user 片段人物集：从全角色名单提取消息中提及的人物（排除主角）
+        // user 片段人物集：从全角色名单提取消息中提及的人物
         const userActorSet = new Set();
         for (const n of nameList) {
-            if (excludedActors.has(n)) continue;
             if (nameMatches(n, queryUserText, nameList)) userActorSet.add(n);
         }
 
@@ -925,7 +905,7 @@ ${newCharacterCardTemplate}
             const weight = k === windowEntries.length - 1 ? Constants.FRAG_WEIGHT_WIN_NEW
                 : (k === windowEntries.length - 2 ? Constants.FRAG_WEIGHT_WIN_NEXT : Constants.FRAG_WEIGHT_WIN_OTHER);
             const winActorSet = new Set();
-            if (Array.isArray(s.actor)) for (const a of s.actor) if (!excludedActors.has(a)) winActorSet.add(a);
+            if (Array.isArray(s.actor)) for (const a of s.actor) winActorSet.add(a);
             windowFrags.push({
                 kind: 'window',
                 weight,
@@ -1045,8 +1025,8 @@ ${newCharacterCardTemplate}
                     fragScore = cached.fragScore;
                     parts = cached.parts;
                 } else {
-                    // S_actor：Dice = 2|Q∩F|/(|Q|+|F|)，Q=片段人物集，F=远端 actor，两侧均排除主角
-                    const farActors = [...new Set(actors)].filter((a) => !excludedActors.has(a));
+                    // S_actor：Dice = 2|Q∩F|/(|Q|+|F|)，Q=片段人物集，F=远端 actor（去重，不排除主角）
+                    const farActors = [...new Set(actors)];
                     let actorHit = 0;
                     if (f.kind === 'window') {
                         for (const aFar of farActors) {

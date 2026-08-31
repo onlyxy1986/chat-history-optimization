@@ -229,21 +229,23 @@ function validSummaryFor(entry) {
     const topA = ragA.hits.reduce((m, h) => (h.score > m.score ? h : m), ragA.hits[0]);
     check('A: 最优命中是陈九仓库条目', topA && topA.text.includes('陈九交付货物'), topA);
     check('A: 走 summary 通道', topA && topA.parts && topA.parts.source === 'summary', topA);
-    check('A: 人物 1/2 且 actorScore=1（Dice 2·1/(1+1) 满分）', topA && topA.parts.actor === '1/2' && topA.parts.actorScore >= 0.99, topA && topA.parts);
+    check('A: 人物 1/2 且 actorScore=0.67（Dice 2·1/(1+2)，主角不排除）', topA && topA.parts.actor === '1/2' && Math.abs(topA.parts.actorScore - 0.67) < 0.001, topA && topA.parts);
     check('A: 地点 2/2 命中', topA && topA.parts.location === '2/2', topA && topA.parts);
     check('A: 分数在 [0,1]', ragA.hits.every(h => h.score >= 0 && h.score <= 1));
     check('A: farScores 覆盖全部远端条目且命中数与 hits 一致', ragA && Array.isArray(ragA.farScores) && ragA.farScores.length === ragA.farCount && ragA.farScores.filter(r => r.hit).length === ragA.hits.length, ragA && ragA.farScores);
     check('A: 每条 farScores 均有打分明细（无摘要被排除者 score 为 null）', ragA && ragA.farScores.every(r => r.score === null || (r.parts && r.parts.source)), ragA.farScores);
     check('A: 存在未命中远端条目（全量标记而非仅 hits）', ragA && ragA.farScores.some(r => !r.hit), ragA.farScores && ragA.farScores.length);
 
-    // 场景 C（Mode B）：主角排除 —— 查询只提高频主角（沈梦瑶），主角两侧排除 → 全池人物分为 0
+    // 场景 C（Mode B）：主角不排除 —— 查询只提高频主角（沈梦瑶），主角正常参与 S_actor 打分
     const { rag: ragC } = await quiet(runCase(true, '沈梦瑶又出现了'));
     console.log('C rag:', JSON.stringify(ragC, null, 1));
     const e5Score = ragC.farScores.find(r => r.text && r.text.includes('买药'));
+    const e2Score = ragC.farScores.find(r => r.text && r.text.includes('保护费'));
+    const e4Score = ragC.farScores.find(r => r.text && r.text.includes('陈九交付货物'));
     check('C: 纯主角条目有打分明细', !!e5Score, ragC.farScores);
-    check('C: 纯主角条目 actorScore = 0 且人物 0/1（主角两侧排除）', e5Score && e5Score.score !== null && e5Score.parts.actorScore === 0 && e5Score.parts.actor === '0/1', e5Score && e5Score.parts);
-    check('C: 全部 summary 通道条目人物分均为 0（查询侧 Q 为空）', ragC.farScores.every(r => r.score === null || r.parts.source !== 'summary' || r.parts.actorScore === 0), ragC.farScores);
-    check('C: 主角条目人物分低于稀有角色满分条目', e5Score && topA && e5Score.parts.actorScore < topA.parts.actorScore, e5Score && e5Score.parts);
+    check('C: 纯主角条目 actorScore = 1 且人物 1/1（主角不排除，Dice 2·1/(1+1) 满分）', e5Score && e5Score.score !== null && e5Score.parts.actorScore >= 0.99 && e5Score.parts.actor === '1/1', e5Score && e5Score.parts);
+    check('C: actor 不含主角的条目人物分 = 0', e2Score && e2Score.parts.source === 'summary' && e2Score.parts.actorScore === 0 && e2Score.parts.actor === '0/2', e2Score && e2Score.parts);
+    check('C: 与稀有角色同条目的主角贡献人物分 > 0（Dice 2·1/(1+2)）', e4Score && e4Score.parts.source === 'summary' && Math.abs(e4Score.parts.actorScore - 0.67) < 0.001, e4Score && e4Score.parts);
 
     // 场景 B（Mode B）：Embedder 未就绪，全池 BM25 归一化降级
     const { rag: ragB } = await quiet(runCase(false, '陈九提到了码头仓库的货物'));
