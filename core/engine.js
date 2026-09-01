@@ -393,7 +393,7 @@
             return entries.map(item => {
                 const header = `# ${item.天数}|${item.时间段}|${item.地点}`;
                 const process = extractItemProcess(item);
-                return `${header.trim()}\n## ${process.trim()}`;
+                return `${header.trim()}\n ${process.trim()}`;
             }).join('\n');
         }
 
@@ -418,7 +418,7 @@
                 for (const item of items) {
                     const header = `# ${item.天数}|${item.时间段}|${item.地点}`;
                     const process = extractItemProcess(item);
-                    result.push(`${header.trim()}\n## ${process.trim()}`);
+                    result.push(`${header.trim()}\n ${process.trim()}`);
                 }
             } else {
                 // 之前的天：聚合格式，按「天数+时间段+地点」合并连续历程
@@ -429,7 +429,7 @@
                     const first = groupItems[0];
                     const header = `${first.天数}|${first.时间段}|${first.地点}`;
                     const allProcess = groupItems.map(item => extractItemProcess(item)).join('');
-                    result.push(`# ${header.trim()}\n## ${allProcess.trim()}`);
+                    result.push(`# ${header.trim()}\n ${allProcess.trim()}`);
                 };
                 for (const item of items) {
                     const key = [dayNum, item.时间段, item.地点]

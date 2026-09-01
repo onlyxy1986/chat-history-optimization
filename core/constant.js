@@ -89,7 +89,7 @@
         // 建议全部 ≤ 1.0，避免上下文片段盖过用户提问信号。
 
         // 最新用户消息片段权重（锚点，原则上不动，改它等价于整体缩放）。
-        FRAG_WEIGHT_USER: 1.0,
+        FRAG_WEIGHT_USER: 1.35,
         // 最新窗口条目片段权重（窗口权重的基准值）。
         FRAG_WEIGHT_WIN_BASE: 1.0,
         // 窗口权重衰减因子：第 i 条（最新 i=0）权重 = FRAG_WEIGHT_WIN_BASE × FRAG_WEIGHT_WIN_DECAY^i。
