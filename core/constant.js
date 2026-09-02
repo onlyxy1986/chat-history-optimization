@@ -53,28 +53,17 @@
         SUBSUMMARY_STATUS_NOTIFY_INTERVAL_MS: 300,
 
         // ------------------------------------------------------------------
-        // 二级摘要 · 召回打分三分量权重（engine.js scoreFarEntries / scoreFarEntriesModeA）
+        // 二级摘要 · 召回打分（engine.js scoreFarEntries / scoreFarEntriesModeA）
         // ------------------------------------------------------------------
 
-        // 召回特化摘要三分量权重（各分量先归一化到 [0,1] 再加权求和）。
-        // 三者之和不要求为 1，但建议保持总和 ≈1，
-        // 这样最终分数自然落在 [0,1] 区间、跨条目可比。
-        // 调整思路：召回"总拉错事件"时，降低偏宽泛的分量（SEMANTIC/LOCATION）、
-        // 提高判别性强的分量（ACTOR）。
-
-        // 人物分量权重：查询提及了摘要 actor 中的人物时贡献该分。
-        // 调高 → 更偏"用户提到某人 → 召回该人旧事"；调低 → 弱化人物驱动。
-        SUMMARY_W_ACTOR: 0.25,
-
-        // 地点分量权重：查询提及摘要 location 中的地点时贡献该分。
-        // 故事地点多且用户经常切换地点时可调高。
-        SUMMARY_W_LOCATION: 0.15,
-
-        // 语义分量权重：S_semantic = max(S_event, S_recall)，只取一份最大值入总分。
-        // S_event = clamp01(cos(query, event))；S_recall = max(clamp01(cos(query, recall_when[i])))。
-        // 故意取最大权重：语义通道对"现在该不该想起这件事"判别力最强。
-        // 若召回过于激进（拉入大量无关旧事），优先调低它。
-        SUMMARY_W_SEMANTIC: 0.60,
+        // v2.18.0 起分数不再有可调权重：
+        // 命中门槛——(片段, 条目) 的 S_actor=0 且 S_location=0 → 该片段对该条目记 0 分（未命中）；
+        // 命中则 fragScore = S_semantic = max(S_event, S_recall)（纯语义排序）。
+        // S_actor（Dice）与 S_location（命中比例）仅作为门槛信号，不再进入总分。
+        // user 信息片段不受门槛限制（总是按 S_semantic 计分）；
+        // 窗口片段与 Mode B 查询视为非 user 信息，受门槛限制。
+        // 门槛命中过严（大量条目 0 分）时，检查摘要 actor/location 是否与当前查询习惯脱节
+        // （如地点命名过细导致 queryText.includes(loc) 难命中）。
 
 
         // ------------------------------------------------------------------
@@ -89,7 +78,7 @@
         // 建议全部 ≤ 1.0，避免上下文片段盖过用户提问信号。
 
         // 最新用户消息片段权重（锚点，原则上不动，改它等价于整体缩放）。
-        FRAG_WEIGHT_USER: 1.35,
+        FRAG_WEIGHT_USER: 1.1,
         // 最新窗口条目片段权重（窗口权重的基准值）。
         FRAG_WEIGHT_WIN_BASE: 1.0,
         // 窗口权重衰减因子：第 i 条（最新 i=0）权重 = FRAG_WEIGHT_WIN_BASE × FRAG_WEIGHT_WIN_DECAY^i。

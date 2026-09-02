@@ -83,15 +83,18 @@ if (NS.Retriever) {
     NS.Retriever.retrieve = async (...a) => { retrieveCount++; return _orig ? _orig(...a) : []; };
 }
 
-// ---------------- 假 Embedder（确定性向量：字符 5-bit 散布，真实余弦） ----------------
-const DIM = 64;
+// ---------------- 假 Embedder（确定性向量：字符 bigram 词袋哈希，真实余弦） ----------------
+// bigram 重叠 → 同维累加 → 余弦与文本重叠度正相关（近似真实语义模型的排序行为）
+const DIM = 128;
 function fakeVec(text) {
     const v = new Float32Array(DIM);
     const s = String(text || '');
     for (let i = 0; i < s.length; i++) {
-        const c = s.charCodeAt(i);
-        v[(c * 31 + i) % DIM] += 1;
-        v[(c * 17 + i * 7) % DIM] += 0.5;
+        const gram = i + 1 < s.length ? s[i] + s[i + 1] : s[i];
+        let h = 0;
+        for (let j = 0; j < gram.length; j++) h = (h * 131 + gram.charCodeAt(j)) >>> 0;
+        v[h % DIM] += 1;
+        v[(h >>> 7) % DIM] += 0.5;
     }
     return v;
 }
@@ -236,6 +239,11 @@ function validSummaryFor(entry) {
     check('A: farScores 覆盖全部远端条目且命中数与 hits 一致', ragA && Array.isArray(ragA.farScores) && ragA.farScores.length === ragA.farCount && ragA.farScores.filter(r => r.hit).length === ragA.hits.length, ragA && ragA.farScores);
     check('A: 每条 farScores 均有打分明细（无摘要被排除者 score 为 null）', ragA && ragA.farScores.every(r => r.score === null || (r.parts && r.parts.source)), ragA.farScores);
     check('A: 存在未命中远端条目（全量标记而非仅 hits）', ragA && ragA.farScores.some(r => !r.hit), ragA.farScores && ragA.farScores.length);
+    // v2.18.0 命中门槛：S_actor=0 且 S_location=0 → score=0；命中 → 纯 S_semantic
+    const e2Far = ragA.farScores.find(r => r.text && r.text.includes('王虎拦路'));
+    const e3Far = ragA.farScores.find(r => r.text && r.text.includes('沈梦瑶在码头等人'));
+    check('A: 门槛——人物/地点均未命中条目 score = 0（parts 仍保留明细）', e2Far && e2Far.parts.source === 'summary' && e2Far.parts.actorScore === 0 && e2Far.parts.locationScore === 0 && e2Far.score === 0, e2Far);
+    check('A: 门槛——人物命中条目 score = parts.semantic（纯语义，非加权和）', e3Far && e3Far.parts.source === 'summary' && e3Far.parts.actorScore > 0 && Math.abs(e3Far.score - e3Far.parts.semantic) < 0.005, e3Far);
 
     // 场景 C（Mode B）：主角不排除 —— 查询只提高频主角（沈梦瑶），主角正常参与 S_actor 打分
     const { rag: ragC } = await quiet(runCase(true, '沈梦瑶又出现了'));
@@ -370,4 +378,24 @@ function validSummaryFor(entry) {
     chat[3].mes = brokenMes;
     fireEvent('message_edited', 3);
     check('G2: 重新损坏后再次广播', parseFailEvents.length === 2, parseFailEvents.length);
+
+    // 场景 I（语义打分 UI tab，v2.18.0）：输入信息 → 全部历程条目 S_semantic（user 信息流程，无命中门槛）
+    buildChat('陈九提到了码头仓库的货物', true);
+    installFakeEmbedder(true);
+    NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings();
+    const sem = await quiet(NS.Engine.scoreJourneySemantics('陈九提到了码头仓库的货物'));
+    console.log('I semantic:', JSON.stringify({ embedderReady: sem.embedderReady, entries: sem.entries.map(e => ({ floor: e.floor, text: e.历程, semantic: e.semantic, event: e.event, recall: e.recall })) }, null, 1));
+    check('I: embedderReady', sem.embedderReady === true, sem);
+    check('I: 覆盖全部 8 条历程（按 JSON 去重）', sem.entries.length === 8, sem.entries.length);
+    check('I: 每条含 floor/index/历程 字段且按楼层时序', sem.entries.every(e => typeof e.floor === 'number' && typeof e.index === 'number' && typeof e.历程 === 'string' && e.历程.length > 0) && sem.entries.every((e, i) => i === 0 || e.floor >= sem.entries[i - 1].floor), sem.entries);
+    check('I: 全部条目有二级摘要，S_semantic ∈ [0,1]', sem.entries.every(e => typeof e.semantic === 'number' && e.semantic >= 0 && e.semantic <= 1), sem.entries);
+    check('I: 无内部字段泄漏（summary/key/_texts/_eventText/_recallTexts/_cached）', !sem.entries.some(e => ['summary', 'key', '_texts', '_eventText', '_recallTexts', '_cached'].some(k => k in e)));
+    check('I: 每条含 event（text+score）与 recall 数组（text+score ∈ [0,1]）', sem.entries.every(e => e.event && typeof e.event.text === 'string' && e.event.text.length > 0 && typeof e.event.score === 'number' && e.event.score >= 0 && e.event.score <= 1 && Array.isArray(e.recall) && e.recall.length > 0 && e.recall.every(r => typeof r.text === 'string' && r.text.length > 0 && typeof r.score === 'number' && r.score >= 0 && r.score <= 1)), sem.entries);
+    const e4Sem = sem.entries.find(e => e.历程.includes('陈九交付货物'));
+    const e1Sem = sem.entries.find(e => e.历程.includes('喝醉'));
+    const e2Sem = sem.entries.find(e => e.历程.includes('王虎拦路'));
+    check('I: 陈九仓库条目语义分最高', !!e4Sem && sem.entries.every(e => e.semantic === null || e4Sem.semantic >= e.semantic), sem.entries);
+    check('I: 无门槛——王虎条目（人物/地点均未命中查询）仍有语义分', !!e2Sem && e2Sem.semantic !== null && e2Sem.semantic > 0, e2Sem);
+    check('I: S_semantic = max(事件, 各触发)（两位小数内一致）', !!e4Sem && e4Sem.recall.length === 1 && Math.abs(e4Sem.semantic - Math.max(e4Sem.event.score, ...e4Sem.recall.map(r => r.score))) <= 0.01, e4Sem);
+    check('I: 触发得分条数与 recall_when 一致（卡座条目 2 条触发）', !!e1Sem && e1Sem.recall.length === 2, e1Sem);
 })().catch(e => { console.error('TEST ERROR', e); process.exit(1); });

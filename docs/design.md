@@ -1,6 +1,6 @@
 # Chat History Optimization (chat-optimization-v2) — 完整流程交接文档
 
-> 版本：v2.17.0（2026-08-31）
+> 版本：v2.18.0（2026-09-02）
 > 仓库：本目录是独立 git 仓库（嵌套在 SillyTavern 安装目录内），在此提交，不要提交到父仓库。
 > 无 package.json、无构建、无 lint。功能模块为浏览器端普通脚本。
 
@@ -281,10 +281,11 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
 ### 7.1 摘要通道（条目有召回特化摘要 且 `NS.Embedder.isReady()`；Mode B 路径之一）
 
 ```
-score = 0.25·S_actor + 0.15·S_location + 0.60·S_semantic
+门槛：S_actor = 0 且 S_location = 0 → score = 0（未命中，parts 仍保留明细）
+命中 → score = S_semantic（纯语义排序，无权重和）
 ```
 
-（权重常量为 `core/constant.js` 的 `Constants.SUMMARY_W_*`，各项附调整指导）
+（v2.18.0 起无可调权重：`S_actor` / `S_location` 仅作命中门槛信号，不入总分；旧权重常量 `SUMMARY_W_*` 已移除。设计决策：人物/地点精确匹配是「是否该召回」的资格判定，语义相似度才是「谁更相关」的排序依据——加权和会让稀有角色条目靠 actor 分挤掉语义更贴合的条目）
 
 - **S_actor**（v2.13.0 起，原为 IDF 之和绝对饱和；v2.14.0 起移除主角排除）：**Dice 系数** `2|Q∩F|/(|Q|+|F|)`，天然 [0,1]。
   - `Q` = 从消歧名单 `nameList`（全部摘要人物 ∪ 已知角色名）中 `nameMatches(n, queryText, nameList)` 命中的已知人物集；`F` = 摘要 `actor` 去重集（主角不排除）。同一查询对池内所有条目共用同一个 `Q`，分数跨条目可比。
@@ -314,7 +315,7 @@ score = 0.25·S_actor + 0.15·S_location + 0.60·S_semantic
   - `user` 片段：最新用户消息 `query`（权重 `FRAG_WEIGHT_USER=1.0`）。
   - `window` 片段：窗口各条目（最新→更旧），第 i 条（最新 i=0）权重 = `FRAG_WEIGHT_WIN_BASE(1.0) × FRAG_WEIGHT_WIN_DECAY(0.95)^i`；权重低于 `FRAG_WEIGHT_WIN_MIN(0.50)` 时停止，后续更旧条目不再参与打分（权重单调递减）。
   - 窗口为空时只保留 `user` 片段。
-- **每片段对远端条目 computes 一个 fragScore**（与 §7.1 同公式）：`0.25·S_actor + 0.15·S_location + 0.60·S_semantic`。其中：
+- **每片段对远端条目 computes 一个 fragScore**（与 §7.1 同门槛公式，v2.18.0 起）：`user` 片段无门槛（恒为 `S_semantic`）；`window` 片段需 `S_actor` / `S_location` 至少一项 > 0 否则 0 分，命中则为 `S_semantic`。其中：
   - `S_actor`（与 §7.1 同 Dice 公式，主角不排除）：`user` 片段的 `Q` = 从全角色名单提取消息提及的人物集；`window` 片段的 `Q` = 窗口条目 actor 集；`F` = 远端条目 actor 集。匹配：`user` 片段按集合成员判定，`window` 片段**成对匹配**（任一 `(winActor, farActor)` 对 `nameMatches(winActor, farActor, nameList)` 命中即计 1）。
   - `S_location`：`user` 片段 `query.includes(loc)`；`window` 片段 **层级匹配** `isHierMatch`（如 `酒馆.二楼` ⊂ `酒馆.二楼.卡座`，按 `.` 分段前缀匹配）。
   - `S_semantic` = `max(S_event, S_recall)`，其中 `S_event` / `S_recall` = `clamp01(cosine(fragVec, docVec))`，`fragVec` 由 `Embedder.encodeBatch([withQueryInstruction(片段文本)])[0]` 得到。
@@ -422,7 +423,7 @@ score = 0.25·S_actor + 0.15·S_location + 0.60·S_semantic
 
 - 入口：wand 扩展菜单（`#extensionsMenu`）顶部插入菜单项「剧情角色档案」；`#extensionsMenu` 不存在时回退插入 `#top-settings-holder` 顶部；DOM 未就绪时 500ms 间隔重试最多 30 次，并监听 `#extensionsMenuButton` 点击后重挂。
 - 浮动窗口（`#coo-root > .coo-shell`）：顶栏（标题+版本+关闭）+ 左侧栏（tab 导航 + 底部运行状态：失败楼层/Token 数）+ 工作区。侧边栏可折叠（localStorage `coo_sidebar_collapsed`）。
-- **6 个 tab**（`TABS`）：`settings` 基础设置 / `subsummary` 二级摘要 / `templates` 模板 / `roles` 角色查看 / `story` 故事历程 / `preview` 发送预览。激活 tab 记 localStorage `coo_active_tab`。
+- **7 个 tab**（`TABS`）：`settings` 基础设置 / `subsummary` 二级摘要 / `templates` 模板 / `roles` 角色查看 / `story` 故事历程 / `semantic` 语义打分 / `preview` 发送预览。激活 tab 记 localStorage `coo_active_tab`。
 - **DOM 全部 `createElement` 构建，无 HTML 字符串、无 jQuery**（硬约束）。
 - 事件全委托到 workspace：`input`（按 `data-coo-field` switch 分发到 `Settings.set`）、`change`（roleSelect）、`click`（按 `data-coo-action` / `data-coo-reset` 分发）。Esc 关窗。
 - **布局与响应式**：workspace `overflow-y: auto`（内容高于窗口即滚动）；`.coo-tab-panel > .coo-section` 为 `flex: 1 0 auto`（永不压缩低于内容高）；模板 textarea 块 `.coo-template-block` 为 `flex: 1 1 auto`——**basis 必须是内容高**（v2.11.0 修复：旧值 `flex: 1 1 0` + `min-height: 0` 在窗口矮、section 无剩余空间时把块塌缩到 0px，内部 textarea（min-height 96px）溢出绘制到下方状态行/按钮上；二级摘要/模板 tab 均受影响）；高窗口时块按 `createTemplateBlock` 的 `flexGrow` 内联参数分配剩余空间撑满。`.coo-subsummary-actions` `flex-wrap: wrap`（窄窗换行）；`@media (max-width: 760px)` 侧栏缩为 56px 纯图标栏、窗口全屏、行内输入框缩窄。
@@ -434,7 +435,8 @@ score = 0.25·S_actor + 0.15·S_location + 0.60·S_semantic
   - profile 下拉监听 `CONNECTION_PROFILE_LOADED/CREATED/UPDATED/DELETED` 事件刷新；已保存 id 失效时自动清空设置。
 - **模板**：historyPrompt / characterPrompt textarea + JSON 有效性徽章 + 重置按钮（回 `Settings.defaultSettings`）。
 - **角色查看**：角色下拉（活跃角色标 `<活跃角色>`）+ `buildRoleTree` 递归树渲染。
-- **故事历程**：楼层范围查询（起始/结束，空=全部）；单列表渲染每条历程：楼层号 + 天数|时间段|地点 + 历程正文 + 二级摘要块（有效→结构化展示 人物/地点/事件/触发 +「重新生成」；无效→「生成摘要」按钮）；**RAG 命中/未命中标记内联**在所有远端（far）条目上（v2.12.0：`farMap` 以 `Engine.entryToDocText(entry)` 为键反查 `stats.rag.farScores`，未命中/被排除条目同样显示；旧格式 stats 降级为仅标记 `rag.hits`）+ 分数明细徽章（`RAG命中/未命中（片段来源） 人x/y(分) 地x/y(分) 事0.xx 忆0.xx → 总分` 或 `BM25 0.xx` 或 `（无二级摘要）`，Mode A 的片段来源即 bestFrag：「用户 / 楼层N / 窗口·第N」（楼层N 必为整层在窗口内的楼层）；命中条目卡片高亮（`.coo-story-item-hit`）；「仅显示选中楼层」复选框过滤到命中条目；「生成全部摘要」按钮（当前范围）。
+- **故事历程**：楼层范围查询（起始/结束，空=全部）；单列表渲染每条历程：楼层号 + 天数|时间段|地点 + 历程正文 + 二级摘要块（有效→结构化展示 人物/地点/事件/触发 +「重新生成」；无效→「生成摘要」按钮）；**RAG 命中/未命中标记内联**在所有远端（far）条目上（v2.12.0：`farMap` 以 `Engine.entryToDocText(entry)` 为键反查 `stats.rag.farScores`，未命中/被排除条目同样显示；旧格式 stats 降级为仅标记 `rag.hits`）+ 分数明细徽章（`RAG命中/未命中（片段来源） 人x/y 地x/y 语义0.xx → 总分`——v2.18.0 起 人/地 仅作命中门槛信号不入总分，徽章不再显示其算分，只保留命中比例；`parts` 数据仍含 actorScore/locationScore 供调试；或 `BM25 0.xx` 或 `（无二级摘要）`，Mode A 的片段来源即 bestFrag：「用户 / 楼层N / 窗口·第N」（楼层N 必为整层在窗口内的楼层）；命中条目卡片高亮（`.coo-story-item-hit`）；「仅显示选中楼层」复选框过滤到命中条目；「生成全部摘要」按钮（当前范围）。
+- **语义打分**（v2.18.0）：输入一段信息（textarea）+「计算」按钮 → `Engine.scoreJourneySemantics(queryText)`：user 信息流程（`withQueryInstruction` + `RecallCache.fragVec`）对全部楼层全部历程条目（`JSON.stringify(entry)` 去重）计算 `S_semantic = max(S_event, S_recall)`，**无命中门槛**（人物/地点不匹配也有分，纯看语义贴合度）；故事卡片格式展示（楼层 + 天数|时间段|地点 + 历程 + `S_semantic 0.xx` 徽章），**结果按 S_semantic 从高到低排列**（无摘要条目排最后，同分保持楼层时序），每条卡片内逐行给出事件与各触发的实际语义得分（`事件/触发 + 文本 + 分数徽章`，二级摘要块上方），条目缺有效二级摘要时语义分显示为 `（无二级摘要）`；Embedder 未就绪时显示 `embedderReady=false` 提示；订阅 `onSubSummaryStatusChanged`——批量生成完成时若有查询文本自动重算。
 - **发送预览**：`Engine.getStats().lastMessage` 原文 `<pre>` 展示。
 
 ### 11.2.1 补漏气泡（v2.9.0）
@@ -564,7 +566,7 @@ node test/smoke-hybrid-recall.cjs
 
 1. wand 菜单出现「剧情角色档案」，打开窗口 6 个 tab 正常，控制台无红错。
 2. 开 `extensionToggle`，正常聊天 → 控制台看 `全量 X tokens…RAG 将启用/不启用`、`Final last message`；发送预览与之一致。
-3. 超预算 → RAG 激活，故事历程 tab **全部远端条目**出现 RAG命中/未命中徽章 + 分数明细（`人x/y(分) 地x/y(分) 事 忆 → 总分`，Mode A 附 bestFrag 片段来源）；命中条目卡片高亮；「仅显示选中楼层」过滤正确。
+3. 超预算 → RAG 激活，故事历程 tab **全部远端条目**出现 RAG命中/未命中徽章 + 分数明细（`人x/y 地x/y 语义0.xx → 总分`，Mode A 附 bestFrag 片段来源）；命中条目卡片高亮；「仅显示选中楼层」过滤正确。
 4. 配置二级摘要（fetch 或 profile），发消息 → 最后楼层自动生成摘要并落盘（刷新仍在）；手动 生成所有缺失/强制生成/擦除（口令）行为正确。
 5. 重新生成某楼层 → 该层摘要清空并自动重新生成；向量 store 对应清理（二级摘要 tab 持久化状态行）。
 6. Embedder 加载失败（断网/模型损坏）→ 召回降级纯 BM25，功能不中断，状态行报错。
@@ -580,6 +582,7 @@ node test/smoke-hybrid-recall.cjs
 
 | 版本 | 内容 |
 |---|---|
+| 2.18.0 | **RAG 打分改纯语义 + 命中门槛，新增「语义打分」tab**：Mode B `scoreFarEntries` 与 Mode A `scoreFarEntriesModeA`（window 片段）的 `score = 0.25·S_actor + 0.15·S_location + 0.60·S_semantic` 改为门槛公式——`S_actor=0` 且 `S_location=0` → 0 分（未命中，parts 仍保留明细），命中 → 纯 `S_semantic` 排序；Mode A `user` 片段无门槛（恒为 `S_semantic`）；`SUMMARY_W_ACTOR/LOCATION/SEMANTIC` 删除（S_actor/S_location 仅作门槛信号不入总分；故事历程 RAG 徽章同步不再显示人/地算分，只保留命中比例）；新增 `Engine.scoreJourneySemantics(queryText)`（user 信息流程，全部楼层条目按 JSON 去重，无门槛，返回 floor/index/天数/时间段/地点/历程/semantic + event{text,score} + recall[{text,score}] 组件得分明细）与「语义打分」tab（输入信息→全部历程条目 S_semantic 故事卡片展示，按得分降序 + 事件/各触发实际语义得分明细，批量生成完成后自动重算）；冒烟测试假 Embedder 改 bigram 词袋向量（余弦与文本重叠正相关），场景 A 新增门槛断言、新增 I 场景，10 场景全过 |
 | 2.17.0 | **历程聚合渲染改按「天数+时间段+地点」合并连续条目**：`renderJourneyMarkdown` 早于 maxDay 的天不再整天聚合成 `# 第X天\n## 当日全部历程`，改为同一天内「天数+时间段+地点」三项全等的连续条目合并为一块 `# 天数|时间段|地点\n## 组内历程拼接`，任意一项变化即新起一块（更细粒度保留时间/地点结构，token 成本与整天聚合基本持平）；maxDay/无法解析天仍逐条详细格式，不变；连带修复：精确计数剪枝剔除的条目同步移出 `packedSet`，`farScores.hit` 与最终 `ragMarkdown`/`rag.hits` 严格一致（旧版被剔除条目仍标 RAG命中）；冒烟测试场景 H 窗口/远端数量断言按新格式重校准（聚合头变长 → 窗口 4 条 → 2 条），9 场景全过 |
 | 2.16.0 | **Mode A 窗口片段权重改指数衰减**：`FRAG_WEIGHT_WIN_NEW/WIN_NEXT/WIN_OTHER` 三级固定权重删除，改 `FRAG_WEIGHT_WIN_BASE(1.0) × FRAG_WEIGHT_WIN_DECAY(0.95)^i`（i=0 为最新窗口条目）+ 下限 `FRAG_WEIGHT_WIN_MIN(0.50)`：权重低于下限的条目跳过且后续更旧条目一并停止参与 farEntries 打分（权重单调递减，0.95^i < 0.5 约在 i=14）；行为变化：最新/次新条目权重 0.90/0.85 → 1.0/0.95（窗口信号略增强），旧条目 0.80 平权 → 逐条衰减并截断；冒烟测试全过 |
 | 2.15.0 | **语义打分两分量合并为单 max 分量**：Mode B `scoreFarEntries` 与 Mode A `scoreFarEntriesModeA` 不再分别计 `0.20·S_event + 0.40·S_recall`，改为 `S_semantic = max(S_event, S_recall)` 单分量、权重 `SUMMARY_W_SEMANTIC(0.60)` 入总分（总权重仍 ≈1：0.25/0.15/0.60）；`SUMMARY_W_EVENT`/`SUMMARY_W_RECALL` 删除；`parts` 的 `event`/`recall` 字段合并为 `semantic`，UI RAG 徽章 `事 忆 → 总分` 改 `语义 → 总分`；行为变化：S_event 与 S_recall 相等时结果与旧版一致，不等时新值不低于旧值（取高者 ×0.6）；冒烟测试场景 A 新增 semantic 断言，全场景过 |

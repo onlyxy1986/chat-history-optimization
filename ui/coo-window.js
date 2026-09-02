@@ -29,6 +29,7 @@
         { id: 'templates', label: '模板', icon: 'fa-solid fa-file-code' },
         { id: 'roles', label: '角色查看', icon: 'fa-solid fa-id-card' },
         { id: 'story', label: '故事历程', icon: 'fa-solid fa-route' },
+        { id: 'semantic', label: '语义打分', icon: 'fa-solid fa-magnifying-glass-chart' },
         { id: 'preview', label: '发送预览', icon: 'fa-solid fa-paper-plane' },
     ];
 
@@ -38,6 +39,9 @@
     // 故事历程 tab 当前查询的楼层范围（供复选框/统计刷新时重绘）
     let storyQuery = { start: '1', end: '' };
     let storySelectedOnly = false;
+    // 语义打分 tab 当前输入文本与最近一次计算结果（切 tab / 摘要批次结束后保留）
+    let semanticQuery = '';
+    let semanticResult = null;
 
     // ------------------------------------------------------------------
     // Storage helpers
@@ -531,7 +535,7 @@
         const frag = parts.bestFrag ? `（${fragSourceLabel(parts.bestFrag)}）` : '';
         let label;
         if (parts.source === 'summary') {
-            label = `${prefix}${frag} 人${parts.actor || '0/0'}(${Number(parts.actorScore || 0).toFixed(2)}) 地${parts.location || '0/0'}(${Number(parts.locationScore || 0).toFixed(2)}) 语义${Number(parts.semantic || 0).toFixed(2)} → ${Number(record.score || 0).toFixed(2)}`;
+            label = `${prefix}${frag} 人${parts.actor || '0/0'} 地${parts.location || '0/0'} 语义${Number(parts.semantic || 0).toFixed(2)} → ${Number(record.score || 0).toFixed(2)}`;
         } else if (parts.source === 'bm25') {
             label = `${prefix}${frag} BM25 ${Number(record.score || 0).toFixed(2)}`;
         } else {
@@ -764,6 +768,155 @@
         queryStoryRange(section, 1, '');
     }
 
+    // ------------------------------------------------------------------
+    // 语义打分 tab：输入任意信息 → 全部历程条目的 S_semantic
+    // ------------------------------------------------------------------
+
+    // 语义分徽章：S_semantic 分数或"无二级摘要"
+    function buildSemanticScoreLabel(semantic) {
+        if (semantic === null || semantic === undefined) {
+            return createText('span', 'coo-rag-miss-score', '（无二级摘要）');
+        }
+        return createText('span', 'coo-rag-hit-score', `S_semantic ${Number(semantic).toFixed(2)}`);
+    }
+
+    // 语义分组成分行：事件 / 各触发的实际语义得分（与二级摘要块同款行样式，末尾附分数徽章）
+    function buildSemanticScoreLine(label, value, score) {
+        const line = document.createElement('div');
+        line.className = 'coo-story-summary-line';
+        line.appendChild(createText('span', 'coo-story-summary-key', label));
+        line.appendChild(createText('span', 'coo-story-summary-val', value));
+        line.appendChild(createText('span', 'coo-rag-hit-score', Number(score).toFixed(2)));
+        return line;
+    }
+
+    // 单条历程（与故事历程卡片同构：楼层 + 元信息 + 历程 + 二级摘要块）+ 语义分徽章 + 事件/触发得分明细
+    function buildSemanticEntry(entry) {
+        const item = document.createElement('div');
+        item.className = 'coo-story-item';
+        const head = document.createElement('div');
+        head.className = 'coo-story-item-head';
+        head.appendChild(createText('span', 'coo-story-floor', `楼层 ${entry.floor}`));
+        const meta = [entry.天数, entry.时间段, entry.地点].filter(Boolean).join(' · ');
+        head.appendChild(createText('span', 'coo-story-item-meta', meta));
+        head.appendChild(buildSemanticScoreLabel(entry.semantic));
+        item.appendChild(head);
+        if (entry.历程) {
+            item.appendChild(createText('div', 'coo-story-item-body', entry.历程));
+        }
+        if (entry.semantic !== null && entry.semantic !== undefined) {
+            if (entry.event && entry.event.text) {
+                item.appendChild(buildSemanticScoreLine('事件', entry.event.text, entry.event.score));
+            }
+            if (Array.isArray(entry.recall)) {
+                for (const r of entry.recall) {
+                    if (r && r.text) item.appendChild(buildSemanticScoreLine('触发', r.text, r.score));
+                }
+            }
+        }
+        item.appendChild(buildStorySummary(entry.floor, entry.index));
+        return item;
+    }
+
+    function renderSemanticList(scope) {
+        const status = scope.querySelector('[data-coo-field="semanticStatus"]');
+        const info = scope.querySelector('[data-coo-field="semanticInfo"]');
+        const list = scope.querySelector('[data-coo-field="semanticList"]');
+        if (!info || !list) return;
+        if (!semanticResult) {
+            if (status) { status.textContent = '空闲（请输入信息后点击"计算"）'; status.className = 'coo-subsummary-status'; }
+            info.textContent = '—';
+            list.textContent = '';
+            list.appendChild(createText('span', 'coo-role-empty', '请输入信息并点击"计算"'));
+            return;
+        }
+        if (!semanticResult.embedderReady) {
+            if (status) {
+                status.textContent = '召回嵌入模型未就绪：无法计算 S_semantic（见"二级摘要"选项卡模型状态）';
+                status.className = 'coo-subsummary-status coo-subsummary-status-error';
+            }
+            info.textContent = '—';
+            list.textContent = '';
+            list.appendChild(createText('span', 'coo-role-empty', '嵌入模型就绪后重新点击"计算"'));
+            return;
+        }
+        if (status) { status.textContent = '已完成'; status.className = 'coo-subsummary-status'; }
+        const scored = semanticResult.entries.filter((e) => e.semantic !== null).length;
+        info.textContent = `共 ${semanticResult.entries.length} 条历程，${scored} 条有二级摘要参与语义打分（按 S_semantic 从高到低）`;
+        // 按最终得分降序（无二级摘要者排最后；稳定排序，同分保持楼层时序）
+        const sorted = semanticResult.entries.slice().sort((a, b) => {
+            const av = typeof a.semantic === 'number' ? a.semantic : -1;
+            const bv = typeof b.semantic === 'number' ? b.semantic : -1;
+            return bv - av;
+        });
+        list.textContent = '';
+        for (const entry of sorted) {
+            list.appendChild(buildSemanticEntry(entry));
+        }
+        if (semanticResult.entries.length === 0) {
+            list.appendChild(createText('span', 'coo-role-empty', '当前聊天没有故事历程'));
+        }
+    }
+
+    async function handleSemanticCalc(scope) {
+        const input = scope.querySelector('[data-coo-field="semanticQuery"]');
+        const status = scope.querySelector('[data-coo-field="semanticStatus"]');
+        const button = scope.querySelector('[data-coo-action="semanticCalc"]');
+        const text = input ? input.value.trim() : '';
+        if (!text) {
+            if (status) { status.textContent = '请先输入信息'; status.className = 'coo-subsummary-status coo-subsummary-status-error'; }
+            return;
+        }
+        semanticQuery = text;
+        if (status) { status.textContent = '计算中…'; status.className = 'coo-subsummary-status coo-subsummary-status-running'; }
+        if (button) button.disabled = true;
+        try {
+            semanticResult = await Engine.scoreJourneySemantics(text);
+            renderSemanticList(scope);
+        } catch (e) {
+            console.error('[Chat History Optimization] 语义打分失败:', e);
+            semanticResult = null;
+            if (status) {
+                status.textContent = '计算失败：' + (e && e.message ? e.message : String(e));
+                status.className = 'coo-subsummary-status coo-subsummary-status-error';
+            }
+        } finally {
+            if (button) button.disabled = false;
+        }
+    }
+
+    function renderSemanticTab(panel) {
+        const section = createSection('fa-solid fa-magnifying-glass-chart', '语义打分');
+        section.appendChild(createText('div', 'coo-preview-hint',
+            '输入任意信息（按 user 信息流程编码），与全部楼层故事历程条目的二级摘要计算 S_semantic（事件与各触发文本余弦相似度的最大值）。不受人物/地点命中门槛限制，所有有二级摘要的条目均参与打分。结果按 S_semantic 从高到低排列，并逐条给出事件和各触发的实际语义得分。'));
+        const toolbar = document.createElement('div');
+        toolbar.className = 'coo-story-toolbar';
+        const input = document.createElement('textarea');
+        input.className = 'coo-textarea';
+        input.dataset.cooField = 'semanticQuery';
+        input.rows = 3;
+        input.placeholder = '输入信息（如：陈九提到了码头仓库的货物）';
+        input.value = semanticQuery;
+        const calcButton = createButton('计算', 'coo-button coo-button-sm', 'fa-solid fa-bolt');
+        calcButton.dataset.cooAction = 'semanticCalc';
+        calcButton.title = '计算所有故事历程条目对输入信息的 S_semantic';
+        toolbar.append(input, calcButton);
+        section.appendChild(toolbar);
+        const status = createText('div', 'coo-subsummary-status', '空闲（请输入信息后点击"计算"）');
+        status.dataset.cooField = 'semanticStatus';
+        const embedderStatus = createText('div', 'coo-subsummary-status', '召回嵌入模型：未启动');
+        embedderStatus.dataset.cooField = 'embedderStatus';
+        const info = createText('div', 'coo-story-info', '—');
+        info.dataset.cooField = 'semanticInfo';
+        const list = document.createElement('div');
+        list.className = 'coo-story-list';
+        list.dataset.cooField = 'semanticList';
+        section.append(status, embedderStatus, info, list);
+        updateEmbedderStatus(section);
+        panel.appendChild(section);
+        renderSemanticList(section);
+    }
+
     function updateSubSummaryBadge(scope) {
         const field = 'subSummaryPrompt';
         const badge = scope.querySelector(`[data-coo-validity="${field}"]`);
@@ -971,6 +1124,7 @@
         templates: renderTemplatesTab,
         roles: renderRolesTab,
         story: renderStoryTab,
+        semantic: renderSemanticTab,
         subsummary: renderSubSummaryTab,
         preview: renderPreviewTab,
     };
@@ -1263,6 +1417,8 @@
                     handleSubEraseAll(workspace);
                 } else if (action === 'entryGenerate' || action === 'entryRegenerate') {
                     handleEntrySummaryAction(actionButton, action === 'entryRegenerate');
+                } else if (action === 'semanticCalc') {
+                    handleSemanticCalc(workspace);
                 }
                 return;
             }
@@ -1296,17 +1452,18 @@
         refreshActiveTabData(shell);
     }
 
-    // 二级摘要状态变化：状态行文本始终原地更新；故事历程 tab 下，
+    // 二级摘要状态变化：状态行文本始终原地更新；故事历程 / 语义打分 tab 下，
     // 单条完成（lastDone 非空）只原地替换该条目的摘要块，
     // 批次结束（running=false）全量重绘一次，覆盖增量期间未刷新的条目
-    // （如窗口隐藏 / 切换 tab 期间完成的条目）。
+    // （如窗口隐藏 / 切换 tab 期间完成的条目）；
+    // 语义打分 tab 下批次结束后用同一输入自动重算，保持分数与新摘要一致。
     // 不再走 refreshActiveTabData 全量重绘，避免批量生成时逐条重绘导致界面卡死。
     function onSubSummaryStatusChanged(snapshot) {
         const root = document.getElementById(ROOT_ID);
         const shell = root ? root.querySelector('.coo-shell') : null;
         if (!shell || shell.hidden) return;
         updateSubSummaryStatus(shell);
-        if (activeTabId !== 'story') return;
+        if (activeTabId !== 'story' && activeTabId !== 'semantic') return;
         const workspace = shell.querySelector('.coo-workspace');
         if (!workspace) return;
         const lastDone = snapshot && snapshot.lastDone;
@@ -1314,7 +1471,12 @@
             updateStoryEntrySummary(workspace, lastDone.floor, lastDone.index);
         }
         if (snapshot && snapshot.running === false) {
-            renderStoryList(workspace);
+            if (activeTabId === 'semantic') {
+                if (semanticQuery) handleSemanticCalc(workspace);
+                else renderSemanticList(workspace);
+            } else {
+                renderStoryList(workspace);
+            }
         }
     }
 

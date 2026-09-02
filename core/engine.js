@@ -747,9 +747,9 @@ ${newCharacterCardTemplate}
     /**
      * 远端条目混合打分（与 farEntries 同序返回）：
      * - 有召回特化摘要且 Embedder 就绪：
-     *   score = W_ACTOR·S_actor + W_LOCATION·(命中地点/总数)
-     *         + W_SEMANTIC·S_semantic
-     *   S_semantic = max(S_event, S_recall)（只取一份最大值入总分），
+     *   命中门槛：S_actor=0 且 S_location=0 → score = 0（未命中，不参与召回）；
+     *   否则 score = S_semantic（纯语义排序）
+     *   S_semantic = max(S_event, S_recall)，
      *   S_event = clamp01(cos(query,event))，S_recall = max(clamp01(cos(query,recall_when[i])))
       *   S_actor = 2|Q∩F|/(|Q|+|F|)（Dice），Q=查询提及的已知人物集，F=摘要 actor（去重，不排除主角）
      * - 否则：BM25 回退，score = bm25/(bm25+Constants.BM25_NORM_K)
@@ -844,9 +844,8 @@ ${newCharacterCardTemplate}
                     if (queryVec && vecs[p]) sRecall = Math.max(sRecall, clamp01(NS.Embedder.cosine(queryVec, vecs[p])));
                 }
                 const sSemantic = Math.max(sEvent, sRecall);
-                const score = Constants.SUMMARY_W_ACTOR * actorScore
-                    + Constants.SUMMARY_W_LOCATION * locationScore
-                    + Constants.SUMMARY_W_SEMANTIC * sSemantic;
+                // 命中门槛：人物与地点均未命中 → 不召回；命中则纯 S_semantic 排序
+                const score = (actorScore > 0 || locationScore > 0) ? sSemantic : 0;
                 results[i] = {
                     index: i,
                     score,
@@ -1075,9 +1074,8 @@ ${newCharacterCardTemplate}
                     let sRecall = 0;
                     if (qv) for (const rv of doc.recallVecs) sRecall = Math.max(sRecall, clamp01(NS.Embedder.cosine(qv, rv)));
                     const sSemantic = Math.max(sEvent, sRecall);
-                    fragScore = Constants.SUMMARY_W_ACTOR * actorScore
-                        + Constants.SUMMARY_W_LOCATION * locationScore
-                        + Constants.SUMMARY_W_SEMANTIC * sSemantic;
+                    // user 信息不受命中门槛限制；窗口片段要求 S_actor / S_location 至少一项命中
+                    fragScore = (f.kind === 'user' || actorScore > 0 || locationScore > 0) ? sSemantic : 0;
                     parts = {
                         source: 'summary',
                         actor: actorHit + '/' + actors.length,
@@ -1104,6 +1102,142 @@ ${newCharacterCardTemplate}
             };
         }
         return results;
+    }
+
+    /**
+     * 语义打分（只读，UI 专用）：对输入文本计算全部楼层故事历程条目的 S_semantic。
+     * 输入文本按 user 信息流程编码（withQueryInstruction + RecallCache.fragVec 复用），
+     * 不受 S_actor / S_location 命中门槛限制——所有有有效召回摘要的条目均参与打分；
+     * 无有效摘要的条目 semantic 为 null。不修改 ST 的 chat 数组。
+     * @param {string} queryText - 用户输入的信息
+     * @returns {{query: string, embedderReady: boolean, entries: Array<{floor: number, index: number, 天数: string, 时间段: string, 地点: string, 历程: string, semantic: number|null}>}}
+     */
+    async function scoreJourneySemantics(queryText) {
+        const qText = String(queryText == null ? '' : queryText).trim();
+        const sourceChat = NS.bridge && NS.bridge.getCurrentChat ? NS.bridge.getCurrentChat() : null;
+        const embedderReady = !!(NS.Embedder && NS.Embedder.isReady());
+        const entries = [];
+        if (sourceChat && Array.isArray(sourceChat)) {
+            const summaryMap = buildSummaryMap(sourceChat);
+            const seen = new Set();
+            for (let floor = 1; floor < sourceChat.length; floor++) {
+                const item = sourceChat[floor];
+                if (!item || (!((("is_user" in item && !item.is_user) || (item.role && item.role === 'assistant'))))) continue;
+                const historyObj = getFloorStoryBlock(item);
+                if (!historyObj || !Array.isArray(historyObj.故事历程)) continue;
+                const journey = historyObj.故事历程;
+                for (let i = 0; i < journey.length; i++) {
+                    const entry = journey[i];
+                    if (!entry || typeof entry !== 'object') continue;
+                    const key = JSON.stringify(entry);
+                    if (seen.has(key)) continue;
+                    seen.add(key);
+                    entries.push({
+                        key: key,
+                        floor: floor,
+                        index: i,
+                        天数: entry.天数 || '',
+                        时间段: entry.时间段 || '',
+                        地点: entry.地点 || '',
+                        历程: extractItemProcess(entry),
+                        summary: summaryMap.get(key) || null,
+                    });
+                }
+            }
+        }
+        if (!embedderReady || qText === '') {
+            for (const e of entries) {
+                e.semantic = null;
+                e.event = null;
+                e.recall = [];
+                delete e.summary;
+                delete e.key;
+            }
+            return { query: qText, embedderReady: embedderReady, entries: entries };
+        }
+
+        // 查询向量：user 信息流程（查询指令 + RecallCache.fragVec 复用）
+        const RecallCache = NS.RecallCache;
+        let qv = (RecallCache && RecallCache.getFragVec) ? RecallCache.getFragVec(qText) : null;
+        if (!qv) {
+            const vecs = await NS.Embedder.encodeBatch([NS.Embedder.withQueryInstruction(qText)]);
+            qv = vecs && vecs[0] ? vecs[0] : null;
+            if (RecallCache && RecallCache.setFragVec) RecallCache.setFragVec(qText, qv);
+        }
+
+        // 文档侧向量：优先命中 RecallCache.docVec，缺失经 EmbedStore 解析并回写
+        // 第一遍：逐条建文本清单（事件 + 各触发，保持文本与向量一一对应），收集需补编码的文本
+        const needTexts = [];
+        for (const e of entries) {
+            const s = e.summary;
+            if (!s) continue;
+            e._eventText = (s.event && String(s.event).trim()) ? String(s.event).trim() : null;
+            e._recallTexts = [];
+            if (Array.isArray(s.recall_when)) {
+                for (const r of s.recall_when) {
+                    const t = String(r == null ? '' : r).trim();
+                    if (t) e._recallTexts.push(t);
+                }
+            }
+            e._cached = (RecallCache && RecallCache.getDocVecs) ? (RecallCache.getDocVecs(e.key, s) || null) : null;
+            const cachedRecallOk = e._cached && Array.isArray(e._cached.recallVecs) && e._cached.recallVecs.length === e._recallTexts.length;
+            if (!cachedRecallOk) {
+                e._recallTexts.forEach((t) => { if (!needTexts.includes(t)) needTexts.push(t); });
+            }
+            if (e._eventText && !(e._cached && e._cached.eventVec)) {
+                if (!needTexts.includes(e._eventText)) needTexts.push(e._eventText);
+            }
+        }
+        const vecMap = new Map();
+        if (needTexts.length > 0) {
+            if (NS.EmbedStore && typeof NS.EmbedStore.resolve === 'function') {
+                const rm = await NS.EmbedStore.resolve(needTexts);
+                for (const [t, v] of rm) vecMap.set(t, v);
+            } else {
+                const vs = await NS.Embedder.encodeBatch(needTexts);
+                needTexts.forEach((t, idx) => vecMap.set(t, vs[idx]));
+            }
+        }
+
+        const clamp01 = (v) => Math.min(1, Math.max(0, v));
+        for (const e of entries) {
+            const s = e.summary;
+            let semantic = null;
+            let eventPart = null;
+            const recallParts = [];
+            if (s) {
+                const cached = e._cached;
+                const cachedRecallOk = cached && Array.isArray(cached.recallVecs) && cached.recallVecs.length === e._recallTexts.length;
+                const eventVec = (cached && cached.eventVec) ? cached.eventVec : (e._eventText ? (vecMap.get(e._eventText) || null) : null);
+                const recallPairs = e._recallTexts
+                    .map((t, i) => ({ text: t, vec: cachedRecallOk ? cached.recallVecs[i] : (vecMap.get(t) || null) }))
+                    .filter((p) => p.vec);
+                if (!cached && (eventVec || recallPairs.length > 0) && RecallCache && RecallCache.setDocVecs) {
+                    RecallCache.setDocVecs(e.key, s, eventVec, recallPairs.map((p) => p.vec));
+                }
+                let sEvent = null;
+                let sRecall = 0;
+                if (qv) {
+                    if (eventVec) sEvent = clamp01(NS.Embedder.cosine(qv, eventVec));
+                    for (const p of recallPairs) {
+                        const sc = clamp01(NS.Embedder.cosine(qv, p.vec));
+                        recallParts.push({ text: p.text, score: Number(sc.toFixed(2)) });
+                        if (sc > sRecall) sRecall = sc;
+                    }
+                }
+                if (e._eventText !== null) eventPart = { text: e._eventText, score: Number((sEvent === null ? 0 : sEvent).toFixed(2)) };
+                semantic = Number(Math.max(sEvent === null ? 0 : sEvent, sRecall).toFixed(2));
+            }
+            e.semantic = semantic;
+            e.event = eventPart;
+            e.recall = recallParts;
+            delete e.summary;
+            delete e._eventText;
+            delete e._recallTexts;
+            delete e._cached;
+            delete e.key;
+        }
+        return { query: qText, embedderReady: embedderReady, entries: entries };
     }
 
     async function buildPromptData(chatCopy, options) {
@@ -1517,6 +1651,7 @@ ${newCharacterCardTemplate}
         refreshStats,
         getFloorStoryBlock,
         getStoryProgressRange,
+        scoreJourneySemantics,
         entryToDocText,
         getNameSearchTerms,
         nameMatches,
