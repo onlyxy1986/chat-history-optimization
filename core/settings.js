@@ -64,6 +64,7 @@
         subSummaryTemperature: 0.3,
         subSummaryMaxTokens: 512,
         subSummaryConcurrency: 4, // 二级摘要批量生成的并行数（1 = 串行；上限见 Constants.SUBSUMMARY_CONCURRENCY_MAX）
+        subSummaryTimeoutSec: 120, // 单次 LLM 请求超时（秒），钳制范围见 Constants.SUBSUMMARY_TIMEOUT_MIN/MAX_MS
         subSummaryPrompt: `你是故事摘要助手。请将以下"故事历程"条目压缩为一条召回特化摘要，只输出一个 JSON 对象，不要输出任何其他内容。
 要求：
 1. actor: 条目中出现的所有人物（必须用角色名，不要用代词）

@@ -187,6 +187,30 @@
         return Math.min(n, max);
     }
 
+    // 单次 LLM 请求超时（毫秒）：设置项 subSummaryTimeoutSec（秒）钳制到
+    // SUBSUMMARY_TIMEOUT_MIN/MAX_MS；不合法回退 SUBSUMMARY_REQUEST_TIMEOUT_MS。
+    function getRequestTimeoutMs() {
+        const min = (typeof Constants.SUBSUMMARY_TIMEOUT_MIN_MS === 'number' && Constants.SUBSUMMARY_TIMEOUT_MIN_MS > 0)
+            ? Math.floor(Constants.SUBSUMMARY_TIMEOUT_MIN_MS) : 10000;
+        const max = (typeof Constants.SUBSUMMARY_TIMEOUT_MAX_MS === 'number' && Constants.SUBSUMMARY_TIMEOUT_MAX_MS > 0)
+            ? Math.floor(Constants.SUBSUMMARY_TIMEOUT_MAX_MS) : 600000;
+        const fallback = (typeof Constants.SUBSUMMARY_REQUEST_TIMEOUT_MS === 'number' && Constants.SUBSUMMARY_REQUEST_TIMEOUT_MS > 0)
+            ? Math.floor(Constants.SUBSUMMARY_REQUEST_TIMEOUT_MS) : 120000;
+        const raw = Settings.get('subSummaryTimeoutSec');
+        const ms = (typeof raw === 'number' && !isNaN(raw)) ? Math.round(raw * 1000) : fallback;
+        if (ms < min) return min;
+        if (ms > max) return max;
+        return ms;
+    }
+
+    function timeoutMessage(prefix, ms) {
+        return `${prefix}请求超时（${Math.max(1, Math.round(ms / 1000))}秒）`;
+    }
+
+    function isAbortError(e) {
+        return !!e && (e.name === 'AbortError' || (typeof DOMException !== 'undefined' && e instanceof DOMException && e.name === 'AbortError'));
+    }
+
     // ------------------------------------------------------------------
     // extra 读写（含楼层级哈希失效清空）
     // ------------------------------------------------------------------
@@ -270,23 +294,48 @@
         return obj;
     }
 
-    // 通过 SillyTavern connection profile 调用（API Key 由服务端按 secret_id 解密，不经过浏览器）
+    // 通过 SillyTavern connection profile 调用（API Key 由服务端按 secret_id 解密，不经过浏览器）。
+    // 超时双保险：传 AbortSignal 给 sendRequest，并与超时 promise 竞态——
+    // 即使服务端实现忽略 signal，本次调用也必定在 timeoutMs 内结算（成功/失败/超时三选一，
+    // 永不 hang 住堵死批次）；超时的孤儿请求结果会被丢弃，不会写回。
     async function callLlmViaProfile(content, profileId) {
         const service = NS.bridge.connectionManagerRequest;
         if (!service || typeof service.sendRequest !== 'function') throw new Error('Connection Manager 服务不可用');
+        const timeoutMs = getRequestTimeoutMs();
+        const controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+        let timer = null;
+        const timeoutP = new Promise((_, reject) => {
+            timer = setTimeout(() => {
+                try { if (controller) controller.abort(); } catch (_) { /* ignore */ }
+                reject(new Error(timeoutMessage('Connection profile ', timeoutMs)));
+            }, timeoutMs);
+        });
         let result;
         try {
-            result = await service.sendRequest(
-                profileId,
-                [{ role: 'user', content }],
-                getMaxTokens(),
-                { stream: false, signal: null, extractData: true, includePreset: false, includeInstruct: false, instructSettings: {} },
-                { temperature: getTemperature() },
-            );
+            result = await Promise.race([
+                service.sendRequest(
+                    profileId,
+                    [{ role: 'user', content }],
+                    getMaxTokens(),
+                    { stream: false, signal: controller ? controller.signal : null, extractData: true, includePreset: false, includeInstruct: false, instructSettings: {} },
+                    { temperature: getTemperature() },
+                ),
+                timeoutP,
+            ]);
         } catch (e) {
+            if (e && typeof e.message === 'string' && e.message.indexOf('请求超时') !== -1) {
+                console.error('[Chat History Optimization] 二级摘要 connection profile 请求超时:', e);
+                throw e;
+            }
+            if (isAbortError(e) || (controller && controller.signal.aborted)) {
+                console.error('[Chat History Optimization] 二级摘要 connection profile 请求超时（abort）:', e);
+                throw new Error(timeoutMessage('Connection profile ', timeoutMs));
+            }
             console.error('[Chat History Optimization] 二级摘要 connection profile 请求失败:', e);
             const cause = e && e.cause ? e.cause : null;
             throw new Error(`Connection profile 请求失败${cause && cause.message ? `：${cause.message}` : ''}`);
+        } finally {
+            if (timer !== null) clearTimeout(timer);
         }
         // extractData=true 时 sendRequest 返回 ExtractedData { content, reasoning }
         const raw = result && typeof result === 'object'
@@ -310,47 +359,87 @@
         const apiKey = String(Settings.get('subSummaryApiKey') || '').trim();
         const model = String(Settings.get('subSummaryModel') || '').trim();
 
-        let response;
+        // 超时覆盖"建连 + 等首包 + 读 body"全程：timer 在 body 读完（raw 提取）前一直有效，
+        // abort 会中断进行中的 body 读取；无 AbortController 的老环境退化为竞态（不断连但保证结算）。
+        const timeoutMs = getRequestTimeoutMs();
+        const controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+        const fetchOptions = {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${apiKey}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                model,
+                messages: [{ role: 'user', content }],
+                temperature: getTemperature(),
+                max_tokens: getMaxTokens(),
+            }),
+        };
+        if (controller) fetchOptions.signal = controller.signal;
+        let timer = null;
+        let timedOut = false;
+        const timeoutP = new Promise((_, reject) => {
+            timer = setTimeout(() => {
+                timedOut = true;
+                try { if (controller) controller.abort(); } catch (_) { /* ignore */ }
+                reject(new Error(timeoutMessage('API ', timeoutMs)));
+            }, timeoutMs);
+        });
+        // controller 路径不 race timeoutP（靠 abort 中断），挂一个空 catch 避免其 reject 时报 unhandled rejection；
+        // 无 controller 的老环境才 race（不断连但保证结算）。
+        timeoutP.catch(() => {});
+        // 注意：必须始终 race——若底层 fetch 实现忽略 signal（如某些后端/代理），
+        // abort 中断不了请求，只能靠竞态保证本次调用必定结算（孤儿请求结果被丢弃）。
+        // race 已订阅双方，后续结算不会报 unhandled rejection。
+        const doFetch = async () => {
+            let response;
+            try {
+                response = await fetch(url, fetchOptions);
+            } catch (e) {
+                if (timedOut || isAbortError(e) || (controller && controller.signal.aborted)) {
+                    throw new Error(timeoutMessage('API ', timeoutMs));
+                }
+                console.error('[Chat History Optimization] 二级摘要 API 请求失败（网络/CORS 错误）:', e);
+                throw new Error('API 请求失败（网络/CORS 错误）');
+            }
+
+            if (!response.ok) {
+                const text = await response.text().catch(() => '');
+                console.error(`[Chat History Optimization] 二级摘要 API 返回 ${response.status}:`, text);
+                throw new Error(`API 返回 ${response.status}`);
+            }
+
+            let data;
+            try {
+                data = await response.json();
+            } catch (e) {
+                if (timedOut || isAbortError(e) || (controller && controller.signal.aborted)) {
+                    throw new Error(timeoutMessage('API ', timeoutMs));
+                }
+                console.error('[Chat History Optimization] 二级摘要 API 响应不是 JSON:', e);
+                throw new Error('API 响应不是 JSON');
+            }
+
+            const raw = data && data.choices && data.choices[0] && data.choices[0].message
+                ? data.choices[0].message.content
+                : null;
+            if (raw === null) {
+                console.error('[Chat History Optimization] 二级摘要 API 响应中未提取到 message.content，当前 LLM 完整回复:', data);
+            }
+            return extractJson(raw);
+        };
+
         try {
-            response = await fetch(url, {
-                method: 'POST',
-                headers: {
-                    'Authorization': `Bearer ${apiKey}`,
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    model,
-                    messages: [{ role: 'user', content }],
-                    temperature: getTemperature(),
-                    max_tokens: getMaxTokens(),
-                }),
-            });
+            return await Promise.race([doFetch(), timeoutP]);
         } catch (e) {
-            console.error('[Chat History Optimization] 二级摘要 API 请求失败（网络/CORS 错误）:', e);
-            throw new Error('API 请求失败（网络/CORS 错误）');
+            if (e && typeof e.message === 'string' && e.message.indexOf('请求超时') !== -1) {
+                console.error('[Chat History Optimization] 二级摘要 API 请求超时:', e);
+            }
+            throw e;
+        } finally {
+            if (timer !== null) clearTimeout(timer);
         }
-
-        if (!response.ok) {
-            const text = await response.text().catch(() => '');
-            console.error(`[Chat History Optimization] 二级摘要 API 返回 ${response.status}:`, text);
-            throw new Error(`API 返回 ${response.status}`);
-        }
-
-        let data;
-        try {
-            data = await response.json();
-        } catch (e) {
-            console.error('[Chat History Optimization] 二级摘要 API 响应不是 JSON:', e);
-            throw new Error('API 响应不是 JSON');
-        }
-
-        const raw = data && data.choices && data.choices[0] && data.choices[0].message
-            ? data.choices[0].message.content
-            : null;
-        if (raw === null) {
-            console.error('[Chat History Optimization] 二级摘要 API 响应中未提取到 message.content，当前 LLM 完整回复:', data);
-        }
-        return extractJson(raw);
     }
 
     // ------------------------------------------------------------------
@@ -404,8 +493,9 @@
         return 'ok';
     }
 
-    // 带重试的 runOne：失败等待 Constants.RETRY_DELAY_MS 后重试，
-    // 最多 Constants.MAX_RETRIES 次，全部失败则抛出最后错误
+    // 带重试的 runOne：失败（含单次请求超时）等待 Constants.RETRY_DELAY_MS 后重试，
+    // 最多 Constants.MAX_RETRIES 次，全部失败则抛出最后错误。
+    // 超时计为普通失败：瞬时 hang 重试可能恢复；持续 hang 则最终记 failed，不会卡死批次。
     async function runOneWithRetry(floor, index, force) {
         let lastErr = null;
         for (let attempt = 0; attempt <= Constants.MAX_RETRIES; attempt++) {

@@ -1010,6 +1010,7 @@
         section.appendChild(createNumberRow('temperature', '（采样温度）', 'subSummaryTemperature', { min: 0, max: 2, step: 0.1 }));
         section.appendChild(createNumberRow('maxTokens', '（单次生成最大 token 数）', 'subSummaryMaxTokens', { min: 1, step: 1 }));
         section.appendChild(createNumberRow('并行数', '（批量生成同时进行的请求数，1 为串行；API 限流时调小）', 'subSummaryConcurrency', { min: 1, max: 8, step: 1 }));
+        section.appendChild(createNumberRow('超时（秒）', '（单次请求超时，超时按失败重试；本地慢模型调大）', 'subSummaryTimeoutSec', { min: 10, max: 600, step: 10 }));
         section.appendChild(createTemplateBlock('二级摘要模板（{{故事历程}} 为单条目完整 JSON 占位符）', 'subSummaryPrompt', 8, 10));
 
         const status = createText('div', 'coo-subsummary-status', '空闲');
@@ -1051,6 +1052,7 @@
         section.querySelector('[data-coo-field="subSummaryTemperature"]').value = settings.subSummaryTemperature;
         section.querySelector('[data-coo-field="subSummaryMaxTokens"]').value = settings.subSummaryMaxTokens;
         section.querySelector('[data-coo-field="subSummaryConcurrency"]').value = settings.subSummaryConcurrency;
+        section.querySelector('[data-coo-field="subSummaryTimeoutSec"]').value = settings.subSummaryTimeoutSec;
         section.querySelector('[data-coo-field="subSummaryPrompt"]').value = settings.subSummaryPrompt;
         applySubSummarySourceState(section);
         updateSubSummaryBadge(section);
@@ -1386,6 +1388,14 @@
                     const max = (NS.Constants && NS.Constants.SUBSUMMARY_CONCURRENCY_MAX) || 8;
                     const fallback = Settings.defaultSettings.subSummaryConcurrency;
                     Settings.set('subSummaryConcurrency', isNaN(value) ? fallback : Math.min(Math.max(1, value), max));
+                    break;
+                }
+                case 'subSummaryTimeoutSec': {
+                    const value = parseInt(event.target.value, 10);
+                    const minMs = (NS.Constants && NS.Constants.SUBSUMMARY_TIMEOUT_MIN_MS) || 10000;
+                    const maxMs = (NS.Constants && NS.Constants.SUBSUMMARY_TIMEOUT_MAX_MS) || 600000;
+                    const fallback = Settings.defaultSettings.subSummaryTimeoutSec;
+                    Settings.set('subSummaryTimeoutSec', isNaN(value) ? fallback : Math.min(Math.max(Math.round(minMs / 1000), value), Math.round(maxMs / 1000)));
                     break;
                 }
                 case 'subSummaryPrompt':

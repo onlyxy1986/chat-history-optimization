@@ -1,6 +1,6 @@
 # Chat History Optimization (chat-optimization-v2) — 完整流程交接文档
 
-> 版本：v2.20.0（2026-09-05）
+> 版本：v2.20.1（2026-09-05）
 > 仓库：本目录是独立 git 仓库（嵌套在 SillyTavern 安装目录内），在此提交，不要提交到父仓库。
 > 无 package.json、无构建、无 lint。功能模块为浏览器端普通脚本。
 
@@ -384,12 +384,12 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
 3. 非 force 且该楼层 extra 有效且该下标已有 `s` → 返回 `'skip'`。
 4. 模板校验：`subSummaryPrompt` 非空且含占位符 `{{故事历程}}`（**纯文本模板，不是 JSON**，不复用 `Engine.validateTemplate`）。
 5. 占位符替换 = 条目**完整 JSON**（`split(PLACEHOLDER).join(...)` 防 `$` 模式）。
-6. 调 LLM → `extractJson`（取第一个 `{...}`，兼容 code fence）→ `normalizeSummary` 规范化为 `{actor, location, event, recall_when}`（字符串自动包数组、去空去重；**全字段空视为失败**）。
+6. 调 LLM → `extractJson`（取第一个 `{...}`，兼容 code fence）→ `normalizeSummary` 规范化为 `{actor, location, event, recall_when}`（字符串自动包数组、去空去重；**全字段空视为失败**）。单次请求超时（v2.20.1，设置项 `subSummaryTimeoutSec` 默认 120 秒，钳制 10~600 秒）：fetch 通道 Abort 中断建连/等包/读 body 全程，无 AbortController 的老环境退化为竞态；profile 通道传 AbortSignal + 超时竞态双保险（服务端忽略 signal 也不 hang）。超时按普通失败走重试。
 7. 写 `item.extra["chat-optimization-v2"] = {storyHash, summaries}`（summaries 全量写回保持下标对齐）→ `saveChatDebounced()`。
 
 ### 10.3 重试与批量（v2.20.0 起批次内并行）
 
-- `runOneWithRetry`：失败等 1s 重试，最多 3 次（`RETRY_DELAY_MS`/`MAX_RETRIES`），全失败抛最后错误。
+- `runOneWithRetry`：失败（含单次请求超时）等 1s 重试，最多 3 次（`RETRY_DELAY_MS`/`MAX_RETRIES`），全失败抛最后错误。持续 hang 的条目最终记 failed，批次必定结束（v2.20.1 之前无请求超时，hang 住的条目会卡死整个批次且 `running` 永不复位）。
 - `executeBatch`：批次内 worker 池并行（并发数 = 设置项 `subSummaryConcurrency`，clamp 到 1..`SUBSUMMARY_CONCURRENCY_MAX=8`，1 即退化为串行），统一维护状态总线；模块级 `running` + `batchChain` 保证批次之间串行（自动/手动/发送前补生成互斥），批次内多条目并行。写回并行安全：`runOne` 以写回时刻的最新 extra 为基合并（同步段原子），同楼层多条目并行不丢摘要。
 - 状态总线 `onStatus/getStatus`：`{running, current:"第k/N条·楼层x 条目y", done, failed, error, message, lastDone}`，快照广播（模式同 Engine.onStats）。
 - **状态通知节流（v2.11.0）**：`executeBatch` 内广播走 trailing throttle（`SUBSUMMARY_STATUS_NOTIFY_INTERVAL_MS=300ms`），合并期间最后一次进度；批次结束（`finally`）立即广播终态。成功条目附 `lastDone: {floor, index}`，供 UI 单条目增量更新；`generateForEntry`/`generateForRange`/`eraseForRange` 的即时通知同样带 `lastDone`。
@@ -476,6 +476,7 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
 | `subSummaryTemperature` | 0.3 | 非法值回退默认 |
 | `subSummaryMaxTokens` | 512 | 非法值回退默认 |
 | `subSummaryConcurrency` | 4 | 批量生成并行数（v2.20.0，1 为串行，上限 `SUBSUMMARY_CONCURRENCY_MAX=8`；限流时调小） |
+| `subSummaryTimeoutSec` | 120 | 单次请求超时秒数（v2.20.1，钳制 10~600 秒；超时按失败重试，本地慢模型调大） |
 | `subSummaryPrompt` | （召回特化模板） | 纯文本模板，占位符 `{{故事历程}}` |
 
 数值设置读取处均有 `isNaN` 回退（模式统一）。

@@ -44,6 +44,19 @@
         // 连接慢且能接受更长的发送延迟 → 调大；希望快速发出 → 调小。
         SUBSUMMARY_WAIT_TIMEOUT_MS: 30000,
 
+        // 单次 LLM 请求超时（毫秒），fetch / profile 双通道共用。
+        // 无超时的 await 是卡死主因：服务端 hang 住（连接接受但永不返回）时
+        // runOneWithRetry 永远等不到成功或失败，批次卡在某一条、running 永不复位，
+        // 后续批次经 batchChain 排在其后也被堵住。超时后按失败走 MAX_RETRIES 重试。
+        // 实际生效值读设置项 subSummaryTimeoutSec（秒），非法时回退到本值；
+        // 本地慢模型（CPU 推理 512 token 可能数分钟）→ 把设置项调大。
+        SUBSUMMARY_REQUEST_TIMEOUT_MS: 120000,
+
+        // subSummaryTimeoutSec 的钳制下限/上限（毫秒）。
+        // 下限太小会把慢模型正常推理误判为超时；上限太大则卡住时等太久。
+        SUBSUMMARY_TIMEOUT_MIN_MS: 10000,
+        SUBSUMMARY_TIMEOUT_MAX_MS: 600000,
+
         // 批量生成期间状态进度通知的最小间隔（毫秒，trailing 节流）：
         // 每条完成后都会尝试通知，但两次实际通知间隔不足本值时合并到下一次，
         // 保证批量结束时最后一条进度不丢失；批次终态（成功/失败汇总）不受节流、
