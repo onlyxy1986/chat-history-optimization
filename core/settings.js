@@ -63,6 +63,7 @@
         subSummaryProfileId: '', // 选中的 SillyTavern connection profile id（source 为 profile 时生效）
         subSummaryTemperature: 0.3,
         subSummaryMaxTokens: 512,
+        subSummaryConcurrency: 4, // 二级摘要批量生成的并行数（1 = 串行；上限见 Constants.SUBSUMMARY_CONCURRENCY_MAX）
         subSummaryPrompt: `你是故事摘要助手。请将以下"故事历程"条目压缩为一条召回特化摘要，只输出一个 JSON 对象，不要输出任何其他内容。
 要求：
 1. actor: 条目中出现的所有人物（必须用角色名，不要用代词）

@@ -1009,6 +1009,7 @@
         section.appendChild(createTextRow('模型名', '', 'subSummaryModel'));
         section.appendChild(createNumberRow('temperature', '（采样温度）', 'subSummaryTemperature', { min: 0, max: 2, step: 0.1 }));
         section.appendChild(createNumberRow('maxTokens', '（单次生成最大 token 数）', 'subSummaryMaxTokens', { min: 1, step: 1 }));
+        section.appendChild(createNumberRow('并行数', '（批量生成同时进行的请求数，1 为串行；API 限流时调小）', 'subSummaryConcurrency', { min: 1, max: 8, step: 1 }));
         section.appendChild(createTemplateBlock('二级摘要模板（{{故事历程}} 为单条目完整 JSON 占位符）', 'subSummaryPrompt', 8, 10));
 
         const status = createText('div', 'coo-subsummary-status', '空闲');
@@ -1049,6 +1050,7 @@
         section.querySelector('[data-coo-field="subSummaryModel"]').value = settings.subSummaryModel || '';
         section.querySelector('[data-coo-field="subSummaryTemperature"]').value = settings.subSummaryTemperature;
         section.querySelector('[data-coo-field="subSummaryMaxTokens"]').value = settings.subSummaryMaxTokens;
+        section.querySelector('[data-coo-field="subSummaryConcurrency"]').value = settings.subSummaryConcurrency;
         section.querySelector('[data-coo-field="subSummaryPrompt"]').value = settings.subSummaryPrompt;
         applySubSummarySourceState(section);
         updateSubSummaryBadge(section);
@@ -1377,6 +1379,13 @@
                 case 'subSummaryMaxTokens': {
                     const value = parseInt(event.target.value, 10);
                     Settings.set('subSummaryMaxTokens', isNaN(value) || value <= 0 ? Settings.defaultSettings.subSummaryMaxTokens : value);
+                    break;
+                }
+                case 'subSummaryConcurrency': {
+                    const value = parseInt(event.target.value, 10);
+                    const max = (NS.Constants && NS.Constants.SUBSUMMARY_CONCURRENCY_MAX) || 8;
+                    const fallback = Settings.defaultSettings.subSummaryConcurrency;
+                    Settings.set('subSummaryConcurrency', isNaN(value) ? fallback : Math.min(Math.max(1, value), max));
                     break;
                 }
                 case 'subSummaryPrompt':

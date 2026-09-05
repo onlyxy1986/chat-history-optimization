@@ -893,19 +893,31 @@ ${newCharacterCardTemplate}
     }
 
     // ------------------------------------------------------------------
-    // Mode A 召回打分（subSummaryToggle 开启）：逐片段 fragScore → 加权 max
-    // 片段 = 最新用户消息（f0）+ 窗口各条目二级摘要（最新→更旧，权重指数衰减至下限）。
-    // 每个片段对 farEntry 的打分为纯内容函数，缓存于 RecallCache（跨发送精确复用）。
+    // Mode A 召回打分（subSummaryToggle 开启）：流式配额选中
+    // Stage U 先对全池按 user fragScore 降序选满 userQuota 并移出池；
+    // 再按窗口最新→最旧逐片段，只对剩余池按该片段 fragScore 降序选满 winQuota；
+    // estTotal >= ragBudget 即停（后续窗口不编码、不打分）。
+    // 单分公式与三级缓存复用（doc/frag/pair）沿用旧逻辑；选中来源唯一。
     // 无摘要 farEntry 直接排除（不占预算，绝不 BM25 回退）。
+    // 返回 { scored, packed, packedSet }：scored 与旧形状一致供 farScores；
+    // packed 为估算口径的选中结果（精确裁剪由调用方统一做）。
     // ------------------------------------------------------------------
-    async function scoreFarEntriesModeA(queryUserText, farEntries, summaryMap, allRoleNames, windowEntries, windowFloors) {
+    async function scoreFarEntriesModeA(queryUserText, farEntries, summaryMap, allRoleNames, windowEntries, windowFloors, ragBudget) {
         const embedderReady = !!(NS.Embedder && NS.Embedder.isReady());
         const RecallCache = NS.RecallCache;
+        const clamp01 = (v) => Math.min(1, Math.max(0, v));
+
+        const entryKeys = farEntries.map((e) => JSON.stringify(e));
+        const entrySummary = entryKeys.map((k) => summaryMap.get(k) || null);
+        const docs = farEntries.map(entryToDocText);
+        // 时间序位（与旧 docOrder 一致：同文本取首现下标）
+        const docOrder = new Map();
+        docs.forEach((text, i) => {
+            if (text && !docOrder.has(text)) docOrder.set(text, i);
+        });
 
         // far 池摘要集合：消歧名单
-        const farSummaries = farEntries
-            .map((e) => summaryMap.get(JSON.stringify(e)) || null)
-            .filter(Boolean);
+        const farSummaries = entrySummary.filter(Boolean);
         const allNames = new Set(allRoleNames || []);
         for (const s of farSummaries) if (Array.isArray(s.actor)) for (const a of s.actor) allNames.add(a);
         const nameList = [...allNames];
@@ -915,12 +927,18 @@ ${newCharacterCardTemplate}
         for (const n of nameList) {
             if (nameMatches(n, queryUserText, nameList)) userActorSet.add(n);
         }
+        const userFrag = {
+            kind: 'user',
+            text: queryUserText || '',
+            actorSet: userActorSet,
+            location: [],
+            summary: null,
+            floor: null,
+        };
 
-        // 窗口片段（最新→最旧），权重按指数衰减，低于下限后停止（权重单调递减）
+        // 窗口片段（最新→最旧，无截断；无摘要窗口条目跳过该片段）
         const windowFrags = [];
-        for (let k = windowEntries.length - 1, i = 0; k >= 0; k--, i++) {
-            const weight = Constants.FRAG_WEIGHT_WIN_BASE * Math.pow(Constants.FRAG_WEIGHT_WIN_DECAY, i);
-            if (weight < Constants.FRAG_WEIGHT_WIN_MIN) break;
+        for (let k = windowEntries.length - 1, wi = 0; k >= 0; k--, wi++) {
             const entry = windowEntries[k];
             const s = entry ? summaryMap.get(JSON.stringify(entry)) : null;
             if (!s) continue; // 无摘要窗口条目：跳过该片段
@@ -928,7 +946,7 @@ ${newCharacterCardTemplate}
             if (Array.isArray(s.actor)) for (const a of s.actor) winActorSet.add(a);
             windowFrags.push({
                 kind: 'window',
-                weight,
+                wi,
                 floor: windowFloors ? (windowFloors[k] != null ? windowFloors[k] : null) : null,
                 text: (s.event && String(s.event).trim()) || '',
                 actorSet: winActorSet,
@@ -936,22 +954,14 @@ ${newCharacterCardTemplate}
                 summary: s,
             });
         }
-        const frags = [{
-            kind: 'user',
-            weight: Constants.FRAG_WEIGHT_USER,
-            text: queryUserText || '',
-            actorSet: userActorSet,
-            location: [],
-            summary: null,
-        }].concat(windowFrags);
 
-        // 文档侧向量：优先命中 RecallCache.docVec，缺失经 EmbedStore 解析并回写
+        // 文档侧向量：优先命中 RecallCache.docVec，缺失经 EmbedStore 解析并回写（全池一次备好）
         const entryDocs = new Array(farEntries.length);
         const needTexts = [];
         for (let i = 0; i < farEntries.length; i++) {
-            const s = summaryMap.get(JSON.stringify(farEntries[i])) || null;
+            const s = entrySummary[i];
             if (!s) { entryDocs[i] = null; continue; }
-            const entryKey = JSON.stringify(farEntries[i]);
+            const entryKey = entryKeys[i];
             if (embedderReady && RecallCache && RecallCache.getDocVecs) {
                 const c = RecallCache.getDocVecs(entryKey, s);
                 if (c) { entryDocs[i] = c; continue; }
@@ -978,8 +988,8 @@ ${newCharacterCardTemplate}
             if (RecallCache && RecallCache.setDocVecs) {
                 for (let i = 0; i < farEntries.length; i++) {
                     if (!entryDocs[i] || !entryDocs[i]._texts) continue;
-                    const s = summaryMap.get(JSON.stringify(farEntries[i]));
-                    const entryKey = JSON.stringify(farEntries[i]);
+                    const s = entrySummary[i];
+                    const entryKey = entryKeys[i];
                     const eventVec = (s.event && String(s.event).trim())
                         ? vecMap.get(String(s.event).trim()) || null : null;
                     const recallVecs = entryDocs[i]._texts.map((t) => vecMap.get(t) || null).filter(Boolean);
@@ -990,7 +1000,7 @@ ${newCharacterCardTemplate}
             } else {
                 for (let i = 0; i < farEntries.length; i++) {
                     if (!entryDocs[i] || !entryDocs[i]._texts) continue;
-                    const s = summaryMap.get(JSON.stringify(farEntries[i]));
+                    const s = entrySummary[i];
                     const eventVec = (s.event && String(s.event).trim())
                         ? vecMap.get(String(s.event).trim()) || null : null;
                     const recallVecs = entryDocs[i]._texts.map((t) => vecMap.get(t) || null).filter(Boolean);
@@ -1003,105 +1013,160 @@ ${newCharacterCardTemplate}
             }
         }
 
-        // 片段 query 向量：优先命中 RecallCache.fragVec，缺失批量编码并回写
-        const toEncodeText = [];
-        const toEncode = [];
-        for (const f of frags) {
-            if (!f.text || !embedderReady) continue;
-            if (RecallCache && RecallCache.getFragVec && RecallCache.getFragVec(f.text)) continue;
-            if (toEncodeText.includes(f.text)) continue;
-            toEncodeText.push(f.text);
-            toEncode.push(NS.Embedder.withQueryInstruction(f.text));
-        }
-        if (toEncode.length > 0) {
-            const vecs = await NS.Embedder.encodeBatch(toEncode);
-            toEncodeText.forEach((t, i) => { if (RecallCache && RecallCache.setFragVec) RecallCache.setFragVec(t, vecs[i]); });
-        }
-        const finalFragVecs = frags.map((f) => {
+        // 片段 query 向量按需编码（命中 RecallCache.fragVec 则复用；总量满后尾部片段不编码）
+        async function fragVecOf(f) {
             if (!f.text || !embedderReady) return null;
-            return (RecallCache && RecallCache.getFragVec) ? RecallCache.getFragVec(f.text) : null;
-        });
+            if (RecallCache && RecallCache.getFragVec) {
+                const hit = RecallCache.getFragVec(f.text);
+                if (hit) return hit;
+            }
+            const vecs = await NS.Embedder.encodeBatch([NS.Embedder.withQueryInstruction(f.text)]);
+            const v = vecs && vecs[0] ? vecs[0] : null;
+            if (RecallCache && RecallCache.setFragVec) RecallCache.setFragVec(f.text, v);
+            return v;
+        }
 
-        const clamp01 = (v) => Math.min(1, Math.max(0, v));
-        const results = new Array(farEntries.length);
-        for (let i = 0; i < farEntries.length; i++) {
-            const entry = farEntries[i];
-            const s = summaryMap.get(JSON.stringify(entry)) || null;
-            if (!s) { results[i] = null; continue; } // 无摘要：排除
-            const entryKey = JSON.stringify(entry);
+        // 单片段对单条目的纯内容打分（公式沿用旧逻辑，经 pair 缓存）
+        function scoreOne(f, qv, i) {
+            const s = entrySummary[i];
+            const entryKey = entryKeys[i];
+            const cached = (RecallCache && RecallCache.getPair)
+                ? RecallCache.getPair(f.text, f.summary, entryKey, s) : null;
+            if (cached) return { fragScore: cached.fragScore, parts: cached.parts };
             const doc = entryDocs[i] || { eventVec: null, recallVecs: [] };
             const actors = Array.isArray(s.actor) ? s.actor : [];
             const locations = Array.isArray(s.location) ? s.location : [];
-            let bestScore = 0;
-            let bestLabel = 'user';
-            let bestParts = null;
-            for (let fi = 0; fi < frags.length; fi++) {
-                const f = frags[fi];
-                const qv = finalFragVecs[fi];
-                const cached = (RecallCache && RecallCache.getPair)
-                    ? RecallCache.getPair(f.text, f.summary, entryKey, s) : null;
-                let fragScore, parts;
-                if (cached) {
-                    fragScore = cached.fragScore;
-                    parts = cached.parts;
-                } else {
-                    // S_actor：Dice = 2|Q∩F|/(|Q|+|F|)，Q=片段人物集，F=远端 actor（去重，不排除主角）
-                    const farActors = [...new Set(actors)];
-                    let actorHit = 0;
-                    if (f.kind === 'window') {
-                        for (const aFar of farActors) {
-                            for (const aWin of f.actorSet) {
-                                if (nameMatches(aWin, aFar, nameList)) { actorHit++; break; }
-                            }
-                        }
-                    } else {
-                        for (const aFar of farActors) if (f.actorSet.has(aFar)) actorHit++;
-                    }
-                    const actorScore = (f.actorSet.size + farActors.length) > 0
-                        ? 2 * actorHit / (f.actorSet.size + farActors.length) : 0;
-                    // S_location
-                    let locHit = 0;
-                    if (f.kind === 'window') {
-                        for (const lFar of locations) {
-                            for (const lWin of f.location) { if (isHierMatch(lWin, lFar)) { locHit++; break; } }
-                        }
-                    } else {
-                        for (const loc of locations) { if (loc && f.text.includes(loc)) locHit++; }
-                    }
-                    const locationScore = locations.length > 0 ? locHit / locations.length : 0;
-                    // S_semantic = max(S_event, S_recall)，只取一份最大值入总分
-                    const sEvent = (doc.eventVec && qv) ? clamp01(NS.Embedder.cosine(qv, doc.eventVec)) : 0;
-                    let sRecall = 0;
-                    if (qv) for (const rv of doc.recallVecs) sRecall = Math.max(sRecall, clamp01(NS.Embedder.cosine(qv, rv)));
-                    const sSemantic = Math.max(sEvent, sRecall);
-                    // user 信息不受命中门槛限制；窗口片段要求 S_actor / S_location 至少一项命中
-                    fragScore = (f.kind === 'user' || actorScore > 0 || locationScore > 0) ? sSemantic : 0;
-                    parts = {
-                        source: 'summary',
-                        actor: actorHit + '/' + actors.length,
-                        location: locHit + '/' + locations.length,
-                        actorScore: Number(actorScore.toFixed(2)),
-                        locationScore: Number(locationScore.toFixed(2)),
-                        semantic: Number(sSemantic.toFixed(2)),
-                    };
-                    if (RecallCache && RecallCache.setPair) {
-                        RecallCache.setPair(f.text, f.summary, entryKey, s, fragScore, parts);
+            // S_actor：Dice = 2|Q∩F|/(|Q|+|F|)，Q=片段人物集，F=远端 actor（去重，不排除主角）
+            const farActors = [...new Set(actors)];
+            let actorHit = 0;
+            if (f.kind === 'window') {
+                for (const aFar of farActors) {
+                    for (const aWin of f.actorSet) {
+                        if (nameMatches(aWin, aFar, nameList)) { actorHit++; break; }
                     }
                 }
-                const weighted = f.weight * fragScore;
-                if (weighted > bestScore) {
-                    bestScore = weighted;
-                    bestLabel = (fi === 0) ? 'user' : (f.floor != null ? ('f' + f.floor) : ('w' + fi));
-                    bestParts = parts;
-                }
+            } else {
+                for (const aFar of farActors) if (f.actorSet.has(aFar)) actorHit++;
             }
-            results[i] = {
-                index: i,
-                score: bestScore,
-                parts: bestParts ? Object.assign({ bestFrag: bestLabel }, bestParts) : { bestFrag: bestLabel },
+            const actorScore = (f.actorSet.size + farActors.length) > 0
+                ? 2 * actorHit / (f.actorSet.size + farActors.length) : 0;
+            // S_location
+            let locHit = 0;
+            if (f.kind === 'window') {
+                for (const lFar of locations) {
+                    for (const lWin of f.location) { if (isHierMatch(lWin, lFar)) { locHit++; break; } }
+                }
+            } else {
+                for (const loc of locations) { if (loc && f.text.includes(loc)) locHit++; }
+            }
+            const locationScore = locations.length > 0 ? locHit / locations.length : 0;
+            // S_semantic = max(S_event, S_recall)
+            const sEvent = (doc.eventVec && qv) ? clamp01(NS.Embedder.cosine(qv, doc.eventVec)) : 0;
+            let sRecall = 0;
+            if (qv) for (const rv of doc.recallVecs) sRecall = Math.max(sRecall, clamp01(NS.Embedder.cosine(qv, rv)));
+            const sSemantic = Math.max(sEvent, sRecall);
+            // user 信息不受命中门槛限制；窗口片段要求 S_actor / S_location 至少一项命中
+            const fragScore = (f.kind === 'user' || actorScore > 0 || locationScore > 0) ? sSemantic : 0;
+            const parts = {
+                source: 'summary',
+                actor: actorHit + '/' + actors.length,
+                location: locHit + '/' + locations.length,
+                actorScore: Number(actorScore.toFixed(2)),
+                locationScore: Number(locationScore.toFixed(2)),
+                semantic: Number(sSemantic.toFixed(2)),
+            };
+            if (RecallCache && RecallCache.setPair) {
+                RecallCache.setPair(f.text, f.summary, entryKey, s, fragScore, parts);
+            }
+            return { fragScore, parts };
+        }
+
+        function fragLabel(f) {
+            if (f.kind === 'user') return 'user';
+            return f.floor != null ? ('f' + f.floor) : ('w' + f.wi);
+        }
+
+        const estOf = (entry) => Math.ceil(renderJourneyMarkdown([entry], 0).length / Constants.EST_CHARS_PER_TOKEN);
+        const userQuota = Math.max(0, ragBudget * Constants.MODEA_USER_BUDGET_RATIO);
+        const winQuota = Math.max(0, ragBudget * Constants.MODEA_WINDOW_BUDGET_RATIO);
+
+        const scored = new Array(farEntries.length).fill(null);
+        const picked = [];
+        const pickedSet = new Set(); // 文本键去重（与旧装箱一致）
+        let estTotal = 0;
+        // remaining：未被选走的候选下标（保持时间序）
+        const remaining = new Set();
+        for (let i = 0; i < farEntries.length; i++) {
+            if (entrySummary[i] && docs[i]) remaining.add(i);
+        }
+
+        function take(i, fragScore, parts, f, wPos) {
+            const text = docs[i];
+            if (!text || pickedSet.has(text)) return 0;
+            const entry = farEntries[i];
+            const est = estOf(entry);
+            const label = fragLabel(f);
+            pickedSet.add(text);
+            remaining.delete(i);
+            // evictRank：精确裁剪时的剔除优先级（越大越先剔；user 最后保）
+            const evictRank = f.kind === 'user' ? -1 : (windowFrags.length - wPos);
+            picked.push({
+                text, score: fragScore,
+                parts: Object.assign({ bestFrag: label }, parts),
+                order: docOrder.get(text) ?? Infinity,
+                entry, evictRank,
+            });
+            scored[i] = { index: i, score: fragScore, parts: picked[picked.length - 1].parts };
+            return est;
+        }
+
+        // Stage U：user 通道对全池打分，按降序选满 userQuota 并移出池
+        const qvUser = await fragVecOf(userFrag);
+        const userScores = new Map(); // i -> { fragScore, parts }
+        for (const i of remaining) {
+            userScores.set(i, scoreOne(userFrag, qvUser, i));
+        }
+        // 未命中者记 user 基线分（供 farScores 展示落选原因）
+        for (const [i, r] of userScores) {
+            scored[i] = {
+                index: i, score: r.fragScore,
+                parts: Object.assign({ bestFrag: 'user' }, r.parts),
             };
         }
-        return results;
+        const userRanked = [...userScores.entries()]
+            .sort((a, b) => b[1].fragScore - a[1].fragScore);
+        let usedUser = 0;
+        for (const [i, r] of userRanked) {
+            if (usedUser >= userQuota || estTotal >= ragBudget) break;
+            if (r.fragScore <= 0) continue;
+            if (!remaining.has(i)) continue;
+            const est = take(i, r.fragScore, r.parts, userFrag, 0);
+            if (est > 0) { usedUser += est; estTotal += est; }
+        }
+
+        // Stage W：按窗口最新→最旧逐片段，只对剩余池打分并选满 winQuota
+        for (let w = 0; w < windowFrags.length; w++) {
+            if (estTotal >= ragBudget) break; // 总量满：后续窗口不编码不打分
+            if (remaining.size === 0) break;
+            const f = windowFrags[w];
+            const qv = await fragVecOf(f);
+            const ranked = [];
+            for (const i of remaining) {
+                const r = scoreOne(f, qv, i);
+                ranked.push({ i, fragScore: r.fragScore, parts: r.parts });
+            }
+            ranked.sort((a, b) => b.fragScore - a.fragScore);
+            let usedWin = 0;
+            for (const r of ranked) {
+                if (usedWin >= winQuota || estTotal >= ragBudget) break;
+                if (r.fragScore <= 0) continue;
+                if (!remaining.has(r.i)) continue;
+                const est = take(r.i, r.fragScore, r.parts, f, w);
+                if (est > 0) { usedWin += est; estTotal += est; }
+            }
+        }
+
+        return { scored, packed: picked, packedSet: pickedSet };
     }
 
     /**
@@ -1389,7 +1454,17 @@ ${newCharacterCardTemplate}
             rag.windowCount = bestK;
             rag.farCount = farEntries.length;
 
-            const query = (chatCopy[chatCopy.length - 1] && chatCopy[chatCopy.length - 1].mes) || '';
+            // 查询信号：最后一条消息的 mes；为空（空发送/重生成等流程）时向前回退到
+            // 最近一条非空用户消息，保证 user 通道有提问信号可驱动
+            let query = (chatCopy[chatCopy.length - 1] && chatCopy[chatCopy.length - 1].mes) || '';
+            if (query.trim() === '') {
+                for (let i = chatCopy.length - 1; i >= 0; i--) {
+                    const item = chatCopy[i];
+                    const isUser = item && (item.is_user === true || item.role === 'user');
+                    const text = item && typeof item.mes === 'string' ? item.mes : '';
+                    if (isUser && text.trim() !== '') { query = text; break; }
+                }
+            }
             rag.query = query;
             // 组合查询文本：最新用户消息 + 窗口历程条目，供混合打分与 BM25 回退共用
             const queryText = joinNonEmpty([query, ...midEntries.slice(midEntries.length - bestK).map(entryToDocText)]);
@@ -1407,6 +1482,11 @@ ${newCharacterCardTemplate}
                     const allRoleNames = Object.keys(mergedDataInfo.characterData || {});
 
                     let scored;
+                    // Mode A 流式配额已在打分时完成选中（packed/packedSet 直接可用）；
+                    // Mode B 沿用分数降序贪心装入
+                    let packed = [];
+                    let packedSet = new Set();
+                    const modeAStreamed = useModeA;
                     if (useModeA) {
                         // Mode A：发送前补齐缺失二级摘要（带超时），绝不 BM25 回退
                         const lastFloor = chatCopy.length - 1;
@@ -1425,36 +1505,37 @@ ${newCharacterCardTemplate}
                         }
                         const windowEntries = bestK === 0 ? [] : midEntries.slice(midEntries.length - bestK);
                         const windowFloors = bestK === 0 ? [] : midFloors.slice(midEntries.length - bestK);
-                        scored = await scoreFarEntriesModeA(query, farEntries, summaryMap, allRoleNames, windowEntries, windowFloors);
+                        const streamRes = await scoreFarEntriesModeA(query, farEntries, summaryMap, allRoleNames, windowEntries, windowFloors, ragBudget);
+                        scored = streamRes.scored;
+                        packed = streamRes.packed;
+                        packedSet = streamRes.packedSet;
                     } else {
                         scored = await scoreFarEntries(queryText, farEntries, docs, summaryMap, allRoleNames);
-                    }
-
-                    // 按最终分数降序贪心装入（单条详细 markdown 估算成本，1 token ≈ 1.5 汉字）
-                    const ranked = scored
-                        .map((r, i) => (r && docs[i] ? r : null))
-                        .filter(Boolean)
-                        .sort((a, b) => b.score - a.score);
-                    let used = 0;
-                    let minEst = Infinity;
-                    const packed = [];
-                    const packedSet = new Set();
-                    for (const r of ranked) {
-                        // 预算装满 / 远端条目已全部装入 / 剩余预算装不下已见最小条目 时停止
-                        if (used >= ragBudget || packedSet.size >= uniqueDocCount
-                            || (minEst !== Infinity && used + minEst > ragBudget)) break;
-                        const text = docs[r.index];
-                        if (packedSet.has(text)) continue;
-                        const entry = farEntries[r.index];
-                        const est = Math.ceil(renderJourneyMarkdown([entry], 0).length / Constants.EST_CHARS_PER_TOKEN);
-                        if (est < minEst) minEst = est;
-                        if (used + est > ragBudget) continue;
-                        packedSet.add(text);
-                        packed.push({ text, score: r.score, parts: r.parts, order: docOrder.get(text) ?? Infinity, entry });
-                        used += est;
+                        // 按最终分数降序贪心装入（单条详细 markdown 估算成本，1 token ≈ 1.5 汉字）
+                        const ranked = scored
+                            .map((r, i) => (r && docs[i] ? r : null))
+                            .filter(Boolean)
+                            .sort((a, b) => b.score - a.score);
+                        let used = 0;
+                        let minEst = Infinity;
+                        for (const r of ranked) {
+                            // 预算装满 / 远端条目已全部装入 / 剩余预算装不下已见最小条目 时停止
+                            if (used >= ragBudget || packedSet.size >= uniqueDocCount
+                                || (minEst !== Infinity && used + minEst > ragBudget)) break;
+                            const text = docs[r.index];
+                            if (packedSet.has(text)) continue;
+                            const entry = farEntries[r.index];
+                            const est = Math.ceil(renderJourneyMarkdown([entry], 0).length / Constants.EST_CHARS_PER_TOKEN);
+                            if (est < minEst) minEst = est;
+                            if (used + est > ragBudget) continue;
+                            packedSet.add(text);
+                            packed.push({ text, score: r.score, parts: r.parts, order: docOrder.get(text) ?? Infinity, entry });
+                            used += est;
+                        }
                     }
                     // 按时间序渲染后精确计数：装箱估算(1.5 字符/token)对中文偏乐观，
-                    // 超预算则从最低分逐条剔除，直到 ≤ ragBudget（无次数上限，保证硬上限）
+                    // 超预算则逐条剔除，直到 ≤ ragBudget（无次数上限，保证硬上限）。
+                    // 剔除优先级：Mode B 从最低分剔；Mode A 从最旧窗口来源剔（同源内选中分低先剔），user 锚点最后保。
                     if (packed.length > 0) {
                         const finalize = () => {
                             if (packed.length === 0) {
@@ -1471,7 +1552,11 @@ ${newCharacterCardTemplate}
                         finalize();
                         let tok = await getTokenCountAsync(ragMarkdown);
                         while (tok > ragBudget && packed.length > 0) {
-                            packed.sort((a, b) => a.score - b.score);
+                            if (modeAStreamed) {
+                                packed.sort((a, b) => (b.evictRank - a.evictRank) || (a.score - b.score));
+                            } else {
+                                packed.sort((a, b) => a.score - b.score);
+                            }
                             packedSet.delete(packed[0].text);
                             packed.shift();
                             finalize();
@@ -1596,6 +1681,17 @@ ${newCharacterCardTemplate}
         }
 
         // 深拷贝：mergeDataInfo 会写入 item.messageCount，不能污染 ST 数据
+        // TEMP-DIAG（查 user query 为空问题用，定位后删除）
+        try {
+            const lastItem = chat[chat.length - 1];
+            console.log('[Chat History Optimization] 拦截器输入检查', JSON.stringify({
+                chatLen: chat.length,
+                lastIsUser: !!(lastItem && lastItem.is_user),
+                lastRole: lastItem && lastItem.role,
+                mesLen: String((lastItem && lastItem.mes) || '').length,
+                mesHead: String((lastItem && lastItem.mes) || '').slice(0, 80),
+            }));
+        } catch (diagE) { console.log('[Chat History Optimization] 拦截器输入检查失败', diagE); }
         const chatCopy = JSON.parse(JSON.stringify(chat));
         const result = await assembleFinalPrompt(chatCopy, { runRag: true });
         const historyData = result.historyData;

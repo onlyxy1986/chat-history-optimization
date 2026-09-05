@@ -21,7 +21,8 @@
     const statusListeners = new Set();
     let running = false;
     let initialized = false;
-    // 所有批次（自动触发 / 发送前补生成）经此链串行，保证不并发生成
+    // 所有批次（自动触发 / 发送前补生成）经此链串行，批次之间不并行；
+    // 批次内部多条目经 worker 池并行（并发数见 getConcurrency）
     let batchChain = Promise.resolve();
 
     // ------------------------------------------------------------------
@@ -172,6 +173,18 @@
     function getMaxTokens() {
         const value = Settings.get('subSummaryMaxTokens');
         return (typeof value === 'number' && !isNaN(value) && value > 0) ? value : Settings.defaultSettings.subSummaryMaxTokens;
+    }
+
+    function getConcurrency() {
+        const max = (typeof Constants.SUBSUMMARY_CONCURRENCY_MAX === 'number' && Constants.SUBSUMMARY_CONCURRENCY_MAX > 0)
+            ? Math.floor(Constants.SUBSUMMARY_CONCURRENCY_MAX) : 8;
+        const fallback = (typeof Settings.defaultSettings.subSummaryConcurrency === 'number'
+            && !isNaN(Settings.defaultSettings.subSummaryConcurrency))
+            ? Math.floor(Settings.defaultSettings.subSummaryConcurrency) : 4;
+        const value = Settings.get('subSummaryConcurrency');
+        const n = (typeof value === 'number' && !isNaN(value)) ? Math.floor(value) : fallback;
+        if (n < 1) return 1;
+        return Math.min(n, max);
     }
 
     // ------------------------------------------------------------------
@@ -377,7 +390,12 @@
             throw new Error('二级摘要返回内容全部字段为空');
         }
 
-        const summaries = (extra && Array.isArray(extra.summaries)) ? extra.summaries : new Array(journey.length).fill(null);
+        // 并行安全写回：LLM 等待期间同楼层其他 worker 可能已写入，
+        // 必须以写回时刻的最新 extra 为基合并，不能复用 await 前的 extra 快照，
+        // 否则同楼层多条目并行时后写者会覆盖先写者（丢摘要）。
+        // 同步合并段内无 await，单线程下是原子的。
+        const latest = readFloorExtra(item, storyHash);
+        const summaries = (latest && Array.isArray(latest.summaries)) ? latest.summaries : new Array(journey.length).fill(null);
         while (summaries.length < journey.length) summaries.push(null);
         summaries[entryIndex] = { s, t: Date.now() };
         item.extra = item.extra || {};
@@ -404,7 +422,9 @@
         throw lastErr;
     }
 
-    // 串行执行一批 {floor, index} 目标，统一维护状态总线。
+    // worker 池并行执行一批 {floor, index} 目标，统一维护状态总线。
+    // 并发数 = 设置项 subSummaryConcurrency（clamp 到 1..SUBSUMMARY_CONCURRENCY_MAX，
+    // 1 即退化为串行）。LLM 调用是 IO 等待，并行省的是等待时间。
     // 进度通知按 Constants.SUBSUMMARY_STATUS_NOTIFY_INTERVAL_MS 做 trailing 节流：
     // 每条完成都尝试通知，间隔不足时合并进下一次，保证批次最后一条进度不丢失；
     // 批次终态（成功/失败汇总）不受节流、始终立即通知。
@@ -443,23 +463,32 @@
             }
         };
         try {
-            for (let k = 0; k < total; k++) {
-                const floor = targets[k].floor;
-                const index = targets[k].index;
-                emitStatus({ running: true, current: `第${k + 1}/${total}条 · 楼层${floor} 条目${index + 1}`, done, failed, error: null, lastDone: null });
-                try {
-                    const result = await runOneWithRetry(floor, index, force);
-                    if (result === 'ok') {
-                        done++;
-                        emitStatus({ done, lastDone: { floor, index } });
+            const concurrency = Math.min(getConcurrency(), total);
+            let next = 0;
+            async function worker() {
+                while (true) {
+                    const k = next++;
+                    if (k >= total) return;
+                    const floor = targets[k].floor;
+                    const index = targets[k].index;
+                    emitStatus({ running: true, current: `第${k + 1}/${total}条 · 楼层${floor} 条目${index + 1}`, done, failed, error: null, lastDone: null });
+                    try {
+                        const result = await runOneWithRetry(floor, index, force);
+                        if (result === 'ok') {
+                            done++;
+                            emitStatus({ done, lastDone: { floor, index } });
+                        }
+                    } catch (e) {
+                        failed++;
+                        lastError = String((e && e.message) || e);
+                        emitStatus({ failed, lastDone: null });
+                        console.error(`[Chat History Optimization] 楼层 ${floor} 条目 ${index + 1} 二级摘要生成失败:`, e);
                     }
-                } catch (e) {
-                    failed++;
-                    lastError = String((e && e.message) || e);
-                    emitStatus({ failed, lastDone: null });
-                    console.error(`[Chat History Optimization] 楼层 ${floor} 条目 ${index + 1} 二级摘要生成失败:`, e);
                 }
             }
+            const workers = [];
+            for (let w = 0; w < concurrency; w++) workers.push(worker());
+            await Promise.all(workers);
             if (done > 0) saveChatDebounced();
         } finally {
             running = false;
@@ -545,7 +574,9 @@
         for (let floor = start; floor <= end; floor++) {
             const floorData = getFloorJourney(floor);
             if (!floorData) continue;
-            const { valid, summaries } = onlyMissing ? getFloorSummaries(floor) : null;
+            const cached = onlyMissing ? getFloorSummaries(floor) : null;
+            const valid = cached ? cached.valid : false;
+            const summaries = cached ? cached.summaries : [];
             for (let i = 0; i < floorData.journey.length; i++) {
                 if (onlyMissing) {
                     const existing = valid ? summaries[i] : null;

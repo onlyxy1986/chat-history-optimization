@@ -263,7 +263,7 @@ function validSummaryFor(entry) {
     check('B: 全部走 bm25 通道', ragB.hits.length > 0 && ragB.hits.every(h => h.parts.source === 'bm25'), ragB.hits);
     check('B: 分数在 [0,1)', ragB.hits.every(h => h.score >= 0 && h.score < 1));
 
-    // 场景 A'（Mode A）：开启二级摘要，全部条目已有有效摘要，逐片段加权 max
+    // 场景 A'（Mode A）：开启二级摘要，全部条目已有有效摘要，流式配额选中
     retrieveCount = 0;
     const { rag: ragA2 } = await quiet(runCase(true, '陈九提到了码头仓库的货物', { allSummaries: true, settings: modeAConfig() }));
     console.log('A2 rag:', JSON.stringify(ragA2, null, 1));
@@ -351,6 +351,72 @@ function validSummaryFor(entry) {
     console.log('H rag:', JSON.stringify({ active: ragH.active, windowCount: ragH.windowCount, farCount: ragH.farCount, farScores: ragH.farScores }, null, 1));
     check('H: RAG 激活且窗口/远端非空（对齐后窗口=楼层5 共2条，远端=楼层1+3 共4条）', ragH && ragH.active === true && ragH.windowCount === 2 && ragH.farCount === 4, ragH && { active: ragH.active, windowCount: ragH.windowCount, farCount: ragH.farCount });
     check('H: 窗口对齐楼层边界 → 楼层 1/3 整体在远端，bestFrag 只能是 user/f5（不得出现 f1/f3 或 wN 回退）', ragH && ragH.farScores.length > 0 && ragH.farScores.every(r => r.score === null || (/^(user|f5)$/.test(r.parts && r.parts.bestFrag))), ragH.farScores);
+
+    // 场景 J（Mode A 流式配额）：远端池超出 user 配额时窗口通道从剩余池拾取，命中双通道并存且来源唯一
+    chat.length = 0;
+    chat.push({ mes: '开场', is_user: true });
+    const jsum = (actor, location, event, recall) => ({ s: { actor, location, event, recall_when: [recall] }, t: 1 });
+    const je1 = makeEntry('第1天', '晚上', '酒馆.二楼', '李昂在酒馆与人争执。');
+    const je2 = makeEntry('第1天', '深夜', '酒馆.门口', '王虎拦路索要保护费。');
+    const je3 = makeEntry('第1天', '凌晨', '酒馆.后巷', '李昂在后巷包扎伤口。');
+    const je4 = makeEntry('第2天', '清晨', '码头', '沈梦瑶在码头见到陈九。');
+    const je5 = makeEntry('第2天', '中午', '码头.仓库', '陈九在仓库交付货物。');
+    const je6 = makeEntry('第2天', '傍晚', '码头.仓库', '陈九清点货物发现短缺。');
+    const je7 = makeEntry('第3天', '上午', '药铺', '沈梦瑶在药铺买药。');
+    const je8 = makeEntry('第3天', '下午', '药铺.后院', '赵雷在后院递来一封信。');
+    const je9 = makeEntry('第3天', '晚上', '药铺.门口', '老周送沈梦瑶出门。');
+    const jw1 = makeEntry('第4天', '上午', '码头', '沈梦瑶回到码头找陈九。');
+    const jw2 = makeEntry('第4天', '中午', '码头.仓库', '陈九在仓库等候沈梦瑶。');
+    const jt1 = makeEntry('第5天', '清晨', '渡口', '老孙撑船离开。');
+    chat.push(makeFloor([je1, je2, je3], [
+        jsum(['李昂'], ['酒馆', '二楼'], '李昂在酒馆与人争执', '有人提及旧伤时'),
+        jsum(['王虎'], ['酒馆', '门口'], '王虎拦路索要保护费', '有人提到保护费时'),
+        jsum(['李昂'], ['酒馆', '后巷'], '李昂在后巷包扎伤口', '有人提及旧伤时'),
+    ]));
+    chat.push({ mes: '好', is_user: true });
+    chat.push(makeFloor([je4, je5, je6], [
+        jsum(['沈梦瑶', '陈九'], ['码头'], '沈梦瑶在码头见到陈九', '再次提到码头会面时'),
+        jsum(['陈九'], ['码头', '仓库'], '陈九在仓库交付货物', '有人问起货物下落时'),
+        jsum(['陈九'], ['码头', '仓库'], '陈九清点货物发现短缺', '有人问起货物下落时'),
+    ]));
+    chat.push({ mes: '嗯', is_user: true });
+    chat.push(makeFloor([je7, je8, je9], [
+        jsum(['沈梦瑶'], ['药铺'], '沈梦瑶在药铺买药', '有人提到旧伤时'),
+        jsum(['沈梦瑶', '赵雷'], ['药铺', '后院'], '赵雷在后院递信', '有人提到那封信时'),
+        jsum(['老周', '沈梦瑶'], ['药铺', '门口'], '老周送沈梦瑶出门', '有人提到药铺时'),
+    ]));
+    chat.push({ mes: '好', is_user: true });
+    chat.push(makeFloor([jw1, jw2], [
+        jsum(['李昂', '陈九'], ['码头'], '李昂回到码头找陈九', '再次提到码头会面时'),
+        jsum(['陈九', '沈梦瑶'], ['码头', '仓库'], '陈九在仓库等候沈梦瑶', '有人问起货物下落时'),
+    ]));
+    chat.push({ mes: '好', is_user: true });
+    chat.push(makeFloor([jt1], [
+        jsum(['老孙'], ['渡口'], '老孙撑船离开', '有人提到船夫时'),
+    ]));
+    chat.push({ mes: '陈九提到了码头仓库的货物', is_user: true });
+    installFakeEmbedder(true);
+    NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings(Object.assign({}, modeAConfig(), { tokenLimit: 1100 }));
+    await quiet(globalThis.replaceChatHistoryWithDetailsV2(chat, 4096, null, 0));
+    const ragJ = NS.Engine.getStats().rag;
+    console.log('J rag:', JSON.stringify({ active: ragJ.active, windowCount: ragJ.windowCount, farCount: ragJ.farCount, hits: ragJ.hits.map(h => ({ text: h.text.slice(0, 12), score: Number(h.score.toFixed(2)), bestFrag: h.parts && h.parts.bestFrag })) }, null, 1));
+    check('J: RAG 激活且窗口=第4楼层2条、远端=第1-3楼层9条', ragJ && ragJ.active === true && ragJ.windowCount === 2 && ragJ.farCount === 9, ragJ && { active: ragJ.active, windowCount: ragJ.windowCount, farCount: ragJ.farCount });
+    const jFarSources = (ragJ.farScores || []).map(r => r.parts && r.parts.bestFrag);
+    check('J: 窗口通道从剩余池选中过条目（farScores 存在 f+楼层号来源，精确裁剪后hit可能为false）', jFarSources.some(s => /^f\d+$/.test(s || '')), jFarSources);
+    check('J: user 通道选中过条目', jFarSources.some(s => s === 'user'), jFarSources);
+    check('J: 每个命中来源唯一（user 或 f+楼层号）', ragJ.hits.length > 0 && ragJ.hits.every(h => /^(user|f\d+)$/.test(h.parts && h.parts.bestFrag)), ragJ.hits.map(h => h.parts && h.parts.bestFrag));
+    check('J: farScores 覆盖全部 9 条远端', ragJ && Array.isArray(ragJ.farScores) && ragJ.farScores.length === 9, ragJ && ragJ.farScores.length);
+
+    // 场景 K（Mode A 空查询回退）：最后一条消息 mes 为空时回退到最近非空用户消息驱动 user 通道
+    buildChat('陈九提到了码头仓库的货物', true);
+    chat[chat.length - 1].mes = '';
+    chat[chat.length - 3].mes = '陈九提到了码头仓库的货物';
+    installFakeEmbedder(true);
+    NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings(modeAConfig());
+    await quiet(globalThis.replaceChatHistoryWithDetailsV2(chat, 4096, null, 0));
+    const ragK = NS.Engine.getStats().rag;
+    check('K: 空消息时 query 回退到最近非空用户消息', ragK && ragK.query === '陈九提到了码头仓库的货物', ragK && ragK.query);
+    check('K: RAG 激活且存在 user 来源命中', ragK && ragK.active === true && ragK.hits.some(h => h.parts && h.parts.bestFrag === 'user'), ragK && ragK.hits.map(h => h.parts && h.parts.bestFrag));
 
     // 场景 G（解析失败气泡总线，v2.11.1 事件驱动）：楼层 3（第 2 个 assistant 楼层）的 NEW_HISTORY JSON 损坏
     // → MESSAGE_RECEIVED 到达事件触发引擎检查，onParseFail 广播该楼层与原因；同内容再次到达不重复广播（历史失败楼层不触发）
