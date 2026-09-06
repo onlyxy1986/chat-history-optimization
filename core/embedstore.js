@@ -321,6 +321,31 @@
     }
 
     // ------------------------------------------------------------------
+    // 清空：删除当前聊天的全部持久化向量（二级摘要“强制擦除全部”时调用，
+    // 与摘要 extra 一起清空，避免残留向量在摘要重建前被误用）。
+    // ------------------------------------------------------------------
+
+    function clear() {
+        const meta = getMetadata();
+        let removed = 0;
+        if (meta && meta[METADATA_KEY] && meta[METADATA_KEY].v
+            && typeof meta[METADATA_KEY].v === 'object') {
+            removed = Object.keys(meta[METADATA_KEY].v).length;
+            delete meta[METADATA_KEY];
+            if (typeof NS.bridge.saveMetadataDebounced === 'function') NS.bridge.saveMetadataDebounced();
+        }
+        notifyStatus({
+            running: false,
+            persisted: 0,
+            added: 0,
+            removed,
+            error: null,
+            message: removed > 0 ? `已清空向量库（清理 ${removed} 条）` : '向量库已为空',
+        });
+        return removed;
+    }
+
+    // ------------------------------------------------------------------
     // 触发器
     // ------------------------------------------------------------------
 
@@ -362,6 +387,7 @@
         METADATA_KEY,
         sync,
         resolve,
+        clear,
         getStatus,
         onStatus,
         init,

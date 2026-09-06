@@ -373,6 +373,12 @@
         return dot / (Math.sqrt(na) * Math.sqrt(nb));
     }
 
+    // 清空内存向量缓存（二级摘要“强制擦除全部”时调用，
+    // 摘要文本已不存在，缓存的向量不再有效）。
+    function clearCache() {
+        cache.clear();
+    }
+
     NS.Embedder = Object.freeze({
         model: MODEL_ID,
         init,
@@ -383,6 +389,7 @@
         encodeBatch,
         cosine,
         withQueryInstruction,
+        clearCache,
     });
 
     // 模块加载即开始预热模型，首次 RAG 触发时通常已就绪

@@ -670,7 +670,7 @@
         const overlay = createText('div', 'coo-erase-confirm-overlay');
         const dialog = createText('div', 'coo-erase-confirm-dialog');
         dialog.appendChild(createText('div', 'coo-erase-confirm-title', '强制擦除全部二级摘要'));
-        dialog.appendChild(createText('div', 'coo-erase-confirm-warn', '将擦除全部楼层的二级摘要数据（不影响故事历程原文），此操作不可撤销。'));
+        dialog.appendChild(createText('div', 'coo-erase-confirm-warn', '将清空全部楼层的二级摘要及相关元数据（摘要 extra、向量库、召回缓存），并关闭二级摘要开关（RAG 切为 off），不影响故事历程原文。此操作不可撤销。'));
         const input = document.createElement('input');
         input.type = 'text';
         input.className = 'coo-erase-confirm-input';
@@ -710,7 +710,11 @@
     function handleSubEraseAll(scope) {
         showEraseAllConfirm(() => {
             NS.SubSummary.eraseForRange(null, null);
+            // 全量擦除已将 subSummaryToggle 置 false，同步开关 UI 与向量持久化状态行
+            const toggle = scope.querySelector('[data-coo-field="subSummaryToggle"]');
+            if (toggle) toggle.checked = false;
             updateSubSummaryStatus(scope);
+            updateEmbedStoreStatus(scope);
         });
     }
 
@@ -1035,7 +1039,7 @@
         forceGenButton.title = '无视已有摘要，为全部楼层的所有条目重新生成二级摘要';
         const forceEraseButton = createButton('强制擦除全部', 'coo-button coo-button-ghost coo-button-sm', 'fa-solid fa-eraser');
         forceEraseButton.dataset.cooAction = 'subEraseAll';
-        forceEraseButton.title = '擦除全部楼层的二级摘要数据（不影响故事历程原文）';
+        forceEraseButton.title = '清空全部楼层的二级摘要及相关元数据（向量库、召回缓存），并关闭二级摘要开关（不影响故事历程原文）';
         actions.append(genMissingButton, forceGenButton, forceEraseButton);
         section.appendChild(actions);
 

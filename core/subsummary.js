@@ -753,7 +753,17 @@
         return true;
     }
 
-    // 强制擦除范围内全部楼层的二级摘要（无视哈希有效性），返回擦除的楼层数
+    // 强制擦除范围内全部楼层的二级摘要（无视哈希有效性），返回擦除的楼层数。
+    // 全量擦除（start/end 均为 null/空，即 UI“强制擦除全部”按钮）额外清空所有
+    // 二级摘要相关元数据并关闭二级摘要开关（RAG 切到 Mode B / off）：
+    //   - 各楼层 extra[EXTRA_KEY]
+    //   - 内存摘要哈希缓存 storyHashCache
+    //   - RecallCache 内存打分缓存（fragVec/docVec/pairScore）
+    //   - Embedder 内存向量缓存
+    //   - EmbedStore 持久化向量库（chat_metadata）
+    //   - Settings subSummaryToggle → false（停止自动生成与发送前补生成）
+    // 范围擦除（传了具体楼层）只清该范围 extra + 哈希缓存，不动开关与向量库
+    // （向量库失效条目由 EmbedStore.sync 下次同步时按期望集合自动清理）。
     function eraseForRange(startFloor, endFloor) {
         if (running) {
             notifyStatus({ running: false, current: '', done: 0, failed: 0, error: '生成进行中，请稍后再擦除', message: null, lastDone: null });
@@ -785,6 +795,32 @@
             }
         }
         if (erased > 0) saveChatDebounced();
+        // 摘要哈希缓存以楼层消息对象为键，extra 删除后缓存的 journey 引用即失效，直接全清
+        storyHashCache.clear();
+        // 全量擦除：清空其余二级摘要相关元数据并关闭开关（RAG off）
+        const isFullErase = toFloor(startFloor) === null && toFloor(endFloor) === null;
+        if (isFullErase) {
+            try {
+                if (NS.RecallCache && typeof NS.RecallCache.clear === 'function') NS.RecallCache.clear();
+            } catch (e) {
+                console.error('[Chat History Optimization] 清空召回缓存失败:', e);
+            }
+            try {
+                if (NS.Embedder && typeof NS.Embedder.clearCache === 'function') NS.Embedder.clearCache();
+            } catch (e) {
+                console.error('[Chat History Optimization] 清空嵌入缓存失败:', e);
+            }
+            try {
+                if (NS.EmbedStore && typeof NS.EmbedStore.clear === 'function') NS.EmbedStore.clear();
+            } catch (e) {
+                console.error('[Chat History Optimization] 清空向量库失败:', e);
+            }
+            try {
+                Settings.set('subSummaryToggle', false);
+            } catch (e) {
+                console.error('[Chat History Optimization] 关闭二级摘要开关失败:', e);
+            }
+        }
         // 擦除影响多个楼层，无法用单个 lastDone 表达，置 null 让 UI 全量重绘
         notifyStatus({
             running: false,
@@ -792,7 +828,9 @@
             done: 0,
             failed: 0,
             error: null,
-            message: erased > 0 ? `已擦除 ${erased} 个楼层的二级摘要` : '楼层范围内没有可擦除的二级摘要',
+            message: isFullErase
+                ? '已清空全部二级摘要及相关元数据，并关闭二级摘要开关'
+                : (erased > 0 ? `已擦除 ${erased} 个楼层的二级摘要` : '楼层范围内没有可擦除的二级摘要'),
             lastDone: null,
         });
         return erased;

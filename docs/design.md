@@ -401,7 +401,7 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
 - **手动**（不受 `subSummaryToggle` 限制，只受 `isConfigured()`）：
   - `generateForEntry(floor, index, {force})` — 单条/重新生成
   - `generateForRange(start, end, {force, onlyMissing})` — 范围生成（null 边界 = 全部楼层）
-  - `eraseForRange(start, end)` — 强制擦除 extra（UI 要求输入口令「确认全部擦除」）
+  - `eraseForRange(start, end)` — 范围擦除 extra；全量擦除（start/end 均为 null，即 UI「强制擦除全部」）额外清空所有二级摘要相关元数据（extra、storyHashCache、RecallCache、Embedder 内存缓存、EmbedStore 持久化向量库）并将 `subSummaryToggle` 置 false（RAG 切为 off，UI 要求输入口令「确认全部擦除」）
 
 ### 10.6 发送前补生成 API（v2.9.0，供 Mode A 调用）
 
@@ -429,7 +429,7 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
 ### 11.2 各 tab 要点
 
 - **基础设置**：extensionToggle / roleCardToggle / keepCount / tokenLimit / ragRatio（slider 0.1–0.9）。
-- **二级摘要**：开关、连接方式 select（fetch/profile 互斥禁用对应输入区）、profile 下拉（`getProfileOptions` 过滤 CC 类型）、baseUrl/apiKey/password/model/temperature/maxTokens、摘要模板 textarea（徽章校验 = 含 `{{故事历程}}`）、状态行 ×3（生成状态 / Embedder 状态 / 向量持久化状态）、按钮：生成所有缺失（onlyMissing）/ 强制生成全部（force）/ 强制擦除全部（口令确认弹层）。
+- **二级摘要**：开关、连接方式 select（fetch/profile 互斥禁用对应输入区）、profile 下拉（`getProfileOptions` 过滤 CC 类型）、baseUrl/apiKey/password/model/temperature/maxTokens、摘要模板 textarea（徽章校验 = 含 `{{故事历程}}`）、状态行 ×3（生成状态 / Embedder 状态 / 向量持久化状态）、按钮：生成所有缺失（onlyMissing）/ 强制生成全部（force）/ 强制擦除全部（口令确认弹层；清空全部二级摘要及相关元数据并关闭 `subSummaryToggle`）。
   - profile 下拉监听 `CONNECTION_PROFILE_LOADED/CREATED/UPDATED/DELETED` 事件刷新；已保存 id 失效时自动清空设置。
 - **模板**：historyPrompt / characterPrompt textarea + JSON 有效性徽章 + 重置按钮（回 `Settings.defaultSettings`）。
 - **角色查看**：角色下拉（活跃角色标 `<活跃角色>`）+ `buildRoleTree` 递归树渲染。
