@@ -1,6 +1,6 @@
 # Chat History Optimization (chat-optimization-v2) — 完整流程交接文档
 
-> 版本：v2.22.0（2026-09-07）
+> 版本：v2.23.0（2026-09-07）
 > 仓库：本目录是独立 git 仓库（嵌套在 SillyTavern 安装目录内），在此提交，不要提交到父仓库。
 > 无 package.json、无构建、无 lint。功能模块为浏览器端普通脚本。
 
@@ -12,8 +12,9 @@
 
 1. **结构化剧情协议**：要求 AI 每次回复末尾输出 `<NEW_STORY_DATA>` 块（含 `NEW_HISTORY` 故事历程 JSON、可选 `NEW_CHARACTER_CARD` 角色卡 JSON）。插件把全部楼层的这些块解析、合并、去重，形成全局「故事历程」数组和「角色卡」映射。
 2. **分层注入**：把最终 prompt 装配为三层——`RAG 远端召回段 + 中段历程窗口 + 正文 verbatim 尾部`，在 `tokenLimit` 预算内最大化保留上下文；超预算时用检索从远期条目中挑回相关条目。
-3. **角色卡管理**：槽位上限淘汰 + 蒸馏（久未出场角色只保留核心设定），阈值见 `core/constant.js`。
+3. **角色卡管理**：槽位上限淘汰 + 蒸馏（久未出场角色只保留核心设定），阈值见 `core/constant.js`；v2.23.0 起叠加角色状态追踪的顺序合并（追踪赢）。
 4. **分层摘要（v2.21.0 起，替代逐条目二级摘要 + 混合召回）**：L0 历程条目 → L1 天摘要（一 key 一条）→ L(k≥2) 连续 `hierFanin` 个同层节点合并，纯文本摘要持久化在 `chat_metadata`，父节点以子文本哈希校验。超预算时从最旧侧折叠（高层永远在远端），token 够用时零压缩；发送前永不等 LLM，缺失部分用原文兜底。
+5. **角色状态追踪（v2.23.0 起）**：角色卡模板中属性行 `//` 注释含 `<可变>` 标签的属性按同样树形组成可变状态模版；每次助手回复后以后台对本楼层 L0（该回复的 NEW_HISTORY 条目）调一次独立 LLM 连接，输入为可变状态模版 + 本楼层 L0 + 本楼层出现角色的完整角色卡（`{角色名: 角色卡}`），输出为一个 JSON 对象（以可变状态模版为树形参考，键为有状态变化的角色名），存该楼层 `extra`，装配角色卡时按楼层顺序合并为最终可变状态。
 
 ---
 
@@ -26,13 +27,15 @@
 │   ├── constant.js            # 可调常数集中定义（NS.Constants，每项附调整指导；须最先加载）
 │   ├── settings.js            # 设置存取（extension_settings["chat-optimization-v2"]）
 │   ├── engine.js              # 核心引擎（纯逻辑无 DOM）：解析/合并/折叠装配/拦截器
-│   └── subsummary.js          # 分层摘要生成器（纯逻辑）：LLM 调用、chat_metadata 持久化、自动触发、后台补齐
+│   │   └── subsummary.js          # 分层摘要生成器（纯逻辑）：LLM 调用、chat_metadata 持久化、自动触发、后台补齐
+│   └── roletrack.js           # 角色状态追踪（纯逻辑）：模版解析、逐楼层 LLM 追踪、楼层 extra 持久化、顺序合并
 ├── ui/
-│   └── coo-window.js          # 浮动窗口 UI（6 个 tab，全 createElement）
+│   └── coo-window.js          # 浮动窗口 UI（7 个 tab，全 createElement）
 ├── styles/
 │   └── coo.css                # 全部样式（按区块注释分节）
 ├── test/
-│   └── smoke-hybrid-recall.cjs  # Node 冒烟测试（mock 浏览器环境，node 直接跑）
+│   ├── smoke-hybrid-recall.cjs  # Node 冒烟测试（mock 浏览器环境，node 直接跑）
+│   └── smoke-roletrack.cjs      # 角色状态追踪冒烟测试（模版解析/逐楼层追踪/extra/顺序合并/端到端）
 └── docs/
     └── design.md              # 本文档
 ```
@@ -62,7 +65,7 @@
 5. 按 `MODULES` 数组顺序**逐个 `await` 加载** `<script>`（`loadScript` 返回 Promise，`script.async = false`，URL 带 `?v=VERSION` 缓存击穿），全部就绪后才进入 DOM ready 挂窗口：
      ```
       core/constant.js → core/settings.js → core/engine.js
-      → core/subsummary.js → ui/coo-window.js
+      → core/subsummary.js → core/roletrack.js → ui/coo-window.js
      ```
     **新增脚本模块文件必须加入此数组**，否则不加载。
 6. `DOMContentLoaded` 后调用 `NS.CooWindow.mount()`。
@@ -81,7 +84,7 @@
 ```
 
 - 模块间只通过 `NS.<Module>` 互相引用（如 `NS.Settings`、`NS.Engine`、`NS.SubSummary`），**禁止在功能模块里直接 import ST 文件**——一切 ST 访问走 `NS.bridge`。
-- 加载顺序即依赖顺序：constant 最先（人人经 `NS.Constants` 读可调常数），settings 次之（人人依赖），engine 第三（subsummary 依赖 `NS.Engine` 的 `getStoryProgressRange`/`entryToDocText` 做天分组与输入拼装）。
+- 加载顺序即依赖顺序：constant 最先（人人经 `NS.Constants` 读可调常数），settings 次之（人人依赖），engine 第三（subsummary 依赖 `NS.Engine` 的 `getStoryProgressRange`/`entryToDocText` 做天分组与输入拼装；roletrack 依赖 `NS.Engine` 的 `getFloorStoryBlock`/`entryToDocText`/`nameMatches`/`getKnownRoles` 做本楼层输入与角色列表）。engine 在装配时经 `NS.RoleTrack.applyToCharacterData` 合并追踪状态——调用时（生成/刷新）查 `NS`，不依赖加载时存在，保证向后兼容。
 - 各模块末尾 `Object.freeze` 导出 API，加载顺序变了若引用未初始化模块会直接抛错，可作断点。
 
 ### 3.4 启动时的自执行行为
@@ -90,6 +93,7 @@
 |---|---|
 | `constant.js` | 无（仅定义并冻结 `NS.Constants`） |
 | `subsummary.js` | `init()` 注册 `GENERATION_ENDED` 事件监听（后台补齐缺失摘要，不阻塞发送） |
+| `roletrack.js` | `init()` 注册 `MESSAGE_RECEIVED` 事件监听（助手新回复后后台追踪本楼层，不阻塞发送） |
 | `coo-window.js` | 由 index.js 在 DOM ready 后调 `mount()` |
 
 ---
@@ -144,6 +148,22 @@ chat_metadata["chat-optimization-v2-hier"] = {
 - **哈希失效**：L1 读时重算当天条目哈希，不匹配即视为缺失；上层节点读时重算子文本串哈希，不匹配即视为缺失。某天条目变化只脏该天 L1 + 覆盖该天的祖先链，不清整树。失效场景：楼层重新生成、手动编辑消息、切换 swipe。
 - 上层节点键为 span（`L<level>:<startKey>~<endKey>`）而非下标：新增天只追加尾部节点，旧节点键稳定。
 - 旧版 `extra["chat-optimization-v2"]` 逐条目摘要与 `chat_metadata["chat-optimization-v2-embed"]` 向量库已删除，不做迁移。
+
+### 4.5 角色状态追踪存储（v2.23.0）
+
+```js
+chat[floor].extra["chat-optimization-v2-roletrack"] = {
+    v: 2,
+    h: "<可变模版 + 本楼层 L0 条目 JSON 串哈希>",
+    states: { "<实际角色名>": { /* 以可变状态模版为树形参考的可变子树 */ } },
+    t: <ms>
+}
+```
+
+- 逐楼层存 `extra`（随聊天文件持久化，经 `saveChatDebounced` 落盘），不是 `chat_metadata`：追踪是单楼层 L0 的派生物，随楼层走。
+- `h` 覆盖可变模版与本楼层 L0：楼层重写/编辑消息/切换 swipe/模板变更即标脏，只重追该楼层，其余楼层保留。
+- `states` 为空对象表示"本楼层无角色状态变化"（有效结果，避免重复消耗 LLM）；无历程的楼层不建槽位。
+- 输出截断：单楼层最多 `ROLETRACK_TRACKS_MAX_PER_FLOOR`（默认 10）个角色，超长按返回顺序保留前 N 项。
 
 ---
 
@@ -260,6 +280,33 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
 - 触发：`GENERATION_ENDED` 后台补齐（`subSummaryToggle` 开且已配置）；手动 `generateMissing()` / `forceRebuild()` / `generateForDay(dayKey)` / `eraseAll()`（擦除只清摘要，不动开关与原文）。
 - 发送前永不等 LLM：`buildPromptData` 只读快照（见 §5.2-7），缺失即原文兜底。
 
+## 9. 角色状态追踪（v2.23.0，core/roletrack.js）
+
+### 9.1 可变状态模版
+
+- `extractVariablePaths` 按行解析角色卡模板原文：属性行 `//` 注释含 `<可变>` 即标记该行全部属性键；`{`/`[` 计数维护对象栈（要求模板保持一行一属性的 pretty 格式，与默认模板一致）。
+- 父级标记覆盖整棵子树：`"当前状态": { // <可变>` 下全部子属性自动为可变，无需逐行标记。
+- `getVariableInfo` 用标记路径集过滤 `parseTemplate` 后的模板对象：可变路径（含祖先被标记）整体保留，其余分支只保留通向可变后代的骨架；无标记/模板非法时 `hasVariable=false`，追踪拒绝生成并提示去模板 tab 标记。
+- 默认角色卡模板已带示例可变分区 `"当前状态"`（地点/穿着/身体状态/持有物/与主角关系，均 `<可变>` 标记）。老用户已保存的旧模板不受影响（设置按鍵合并），需点模板重置或手工加标记才能用追踪。
+
+### 9.2 单楼层输入输出
+
+- 本次故事历程 = 本楼层 L0：`Engine.getFloorStoryBlock` 取该楼层 NEW_HISTORY 的故事历程数组（与 `mergeDataInfo` 同提取口径，mes 优先、swipe 回退），经 `entryToDocText` 拼接；超 `ROLETRACK_JOURNEY_MAX_CHARS`（默认 12000 字符）时从最旧侧截断保留尾部。
+- 角色卡（`{{角色列表}}` 占位符的内容）= 本楼层历程文本中出现的角色的完整角色卡：`Engine.getKnownRoleCards()`（全部楼层 NEW_CHARACTER_CARD 合并映射）经 `Engine.nameMatches`（含长名消歧义）过滤，以 `{角色名: 角色卡}` 形式填入模板。历程中无已知角色时直接记空对象，不调 LLM。
+- 输出解析：一个 JSON 对象，以可变状态模版为树形参考（键为角色名，值为可变状态子树；空对象表示无变化）。兼容 code fence 包裹与前后杂文本，取首个 `{...}` 做 `JSON.parse`（数组形式宽容并入）；值须为非空对象，超上限截断。解析失败按普通失败走重试。
+
+### 9.3 连接、触发与批量
+
+- 独立连接配置（`roleTrackSource/Profile/BaseUrl/ApiKey/Model/ExtraParams/Temperature/MaxTokens/Concurrency/TimeoutSec`，见 §12），fetch / profile 双通道、超时（钳制复用 `SUBSUMMARY_TIMEOUT_MIN/MAX_MS`）、`MAX_RETRIES` 重试、状态节流口径与分层摘要一致；配置类错误（未配置/模板无效/附加参数非法）`noRetry`。
+- 自动触发：`MESSAGE_RECEIVED` 且新消息非用户消息 → 后台补齐全部缺失楼层（覆盖并发到达，不阻塞发送）。用户消息到达不触发；编辑/swipe 导致的过期由手动补齐覆盖（UI 显示"缺失"）。
+- 手动（不受 `roleTrackToggle` 限制，只受 `isConfigured()`）：`generateMissing()` 补齐缺失 / `forceRebuild()` 清空后全部重建 / `generateForFloor(floor, {force})` 单楼层 / `eraseAll()` 清空全部楼层追踪（UI 口令确认）。
+
+### 9.4 顺序合并（计算角色卡时）
+
+- `Engine.buildPromptData` 在 `processCharacterData` 淘汰/蒸馏**之后**调 `NS.RoleTrack.applyToCharacterData(characterData, chatCopy)`（`NS` 调用时查找，未加载跳过）。
+- `getMergedStates` 按楼层从旧到新遍历各楼层 `states` 对象：同一角色的后楼层覆盖前楼层（对象递归合并，其余含数组整体覆盖——状态快照语义）；未知键按当前角色卡模板校验跳过并 warn（防 LLM 幻觉污染）。
+- 合并只作用于传入 `characterData` 中已存在的角色：被槽位淘汰的角色不复活；蒸馏掉的可变字段会被追踪状态重新补回（追踪赢，token 代价见 §13）。
+
 
 
 ## 10. 分层摘要生成细节（subsummary.js）
@@ -308,7 +355,7 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
 
 - 入口：wand 扩展菜单（`#extensionsMenu`）顶部插入菜单项「剧情角色档案」；`#extensionsMenu` 不存在时回退插入 `#top-settings-holder` 顶部；DOM 未就绪时 500ms 间隔重试最多 30 次，并监听 `#extensionsMenuButton` 点击后重挂。
 - 浮动窗口（`#coo-root > .coo-shell`）：顶栏（标题+版本+关闭）+ 左侧栏（tab 导航 + 底部运行状态：失败楼层/Token 数）+ 工作区。侧边栏可折叠（localStorage `coo_sidebar_collapsed`）。
-- **6 个 tab**（`TABS`）：`settings` 基础设置 / `subsummary` 分层摘要 / `templates` 模板 / `roles` 角色查看 / `story` 故事历程 / `preview` 发送预览。激活 tab 记 localStorage `coo_active_tab`。
+- **7 个 tab**（`TABS`）：`settings` 基础设置 / `subsummary` 分层摘要 / `roletrack` 角色状态 / `templates` 模板 / `roles` 角色查看 / `story` 故事历程 / `preview` 发送预览。激活 tab 记 localStorage `coo_active_tab`。
 - **DOM 全部 `createElement` 构建，无 HTML 字符串、无 jQuery**（硬约束）。
 - 事件全委托到 workspace：`input`（按 `data-coo-field` switch 分发到 `Settings.set`）、`change`（roleSelect）、`click`（按 `data-coo-action` / `data-coo-reset` 分发）。Esc 关窗。
 - **布局与响应式**：workspace `overflow-y: auto`（内容高于窗口即滚动）；`.coo-tab-panel > .coo-section` 为 `flex: 1 0 auto`（永不压缩低于内容高）；模板 textarea 块 `.coo-template-block` 为 `flex: 1 1 auto`——**basis 必须是内容高**（v2.11.0 修复：旧值 `flex: 1 1 0` + `min-height: 0` 在窗口矮、section 无剩余空间时把块塌缩到 0px，内部 textarea（min-height 96px）溢出绘制到下方状态行/按钮上；二级摘要/模板 tab 均受影响）；高窗口时块按 `createTemplateBlock` 的 `flexGrow` 内联参数分配剩余空间撑满。`.coo-subsummary-actions` `flex-wrap: wrap`（窄窗换行）；`@media (max-width: 760px)` 侧栏缩为 56px 纯图标栏、窗口全屏、行内输入框缩窄。
@@ -321,6 +368,7 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
 - **模板**：historyPrompt / characterPrompt textarea + JSON 有效性徽章 + 重置按钮（回 `Settings.defaultSettings`）。
 - **角色查看**：角色下拉（活跃角色标 `<活跃角色>`）+ `buildRoleTree` 递归树渲染。
 - **故事历程**：楼层范围查询（起始/结束，空=全部）；上层合并卡片（Lx · 起止天 + 摘要正文）置顶；按天分组卡片：天标签 + 条目数 + 层级徽章（原文/天摘要/Lx合并/已丢弃，来自 `stats.hier`）+ 天摘要块（有效→正文 +「重新生成」；无效→「生成摘要」按钮）+ 天内条目（楼层 + 时间段|地点 + 历程正文）；被上层合并吞掉的天不单独展示；「补齐缺失摘要」按钮后台补齐。
+- **角色状态**：结构同分层摘要 tab（开关、独立连接配置、profile 下拉、三占位符模板 textarea + 有效性徽章、状态行 ×2、补齐缺失 / 强制重建全部 / 擦除全部口令确认）；另有可变状态模版预览行（可变属性数 + JSON）与逐楼层卡片列表（楼层号 + 历程条数 + 已追踪/缺失徽章 + 涉及角色 + 各角色状态树 + 单楼层生成/重新生成按钮）。`CONNECTION_PROFILE_*` 事件同时刷新两套 profile 下拉。
 ### 11.2.1 解析失败气泡（v2.10.2，v2.11.1 检查时机改为消息事件驱动）
 
 - 检查时机：`engine.js` 订阅 ST 消息事件——`MESSAGE_RECEIVED`（回复到达）/`MESSAGE_EDITED`/`MESSAGE_UPDATED`（消息修改）/`MESSAGE_SWIPED`（切 swipe）触发 `checkParseFailures()`；`MESSAGE_DELETED`/`CHAT_CHANGED`/`CHAT_LOADED` 触发**静默重建基线**（`silent` 模式：只更新 `lastStats.failedFloors` 不广播、不通知 UI，避免楼层下标错位导致误报/漏报）。不在生成拦截器（发送时）检查——发送时最新回复尚未到达，检查必然滞后一轮。
@@ -357,8 +405,18 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
 | `subSummaryConcurrency` | 4 | 批量生成并行数（1 为串行，上限 `SUBSUMMARY_CONCURRENCY_MAX=8`；限流时调小） |
 | `subSummaryTimeoutSec` | 120 | 单次请求超时秒数（钳制 10~600 秒；超时按失败重试，本地慢模型调大） |
 | `hierFanin` | 5 | L(k≥2) 合并扇入（钳制 `HIER_FANIN_MIN/MAX`） |
-| `hierDayPrompt` | （天摘要模板） | 纯文本模板，占位符 `{{当天历程}}`，长度由措辞控制 |
+| `hierDayPrompt` | （天摘要模板） | 纯文本模板，占位符 `{{当天历程}}`，长度只由措辞控制 |
 | `hierMergePrompt` | （合并摘要模板） | 纯文本模板，占位符 `{{子摘要列表}}`，L2 及以上复用 |
+| `roleTrackToggle` | true | 角色状态追踪自动开关（手动生成不受限） |
+| `roleTrackSource` | 'fetch' | 'fetch' / 'profile'（独立于分层摘要的连接） |
+| `roleTrackBaseUrl` / `ApiKey` / `Model` | '' | fetch 模式三项 |
+| `roleTrackProfileId` | '' | profile 模式 |
+| `roleTrackExtraParams` | '' | profile 附加参数（JSON 对象，口径同分层摘要；fetch 模式忽略） |
+| `roleTrackTemperature` | 0.3 | 非法值回退默认 |
+| `roleTrackMaxTokens` | 512 | 非法值回退默认 |
+| `roleTrackConcurrency` | 4 | 批量补齐并行数（上限 `ROLETRACK_CONCURRENCY_MAX=8`） |
+| `roleTrackTimeoutSec` | 120 | 单次请求超时秒数（钳制复用 `SUBSUMMARY_TIMEOUT_MIN/MAX_MS`） |
+| `roleTrackPrompt` | （追踪模板） | 纯文本模板，占位符 `{{可变状态模版}}` / `{{角色列表}}`（内容为完整角色卡 `{角色名: 角色卡}`） / `{{故事历程}}` 三者必填 |
 
 数值设置读取处均有 `isNaN` 回退（模式统一）。
 
@@ -380,6 +438,11 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
 | 摘要存 `chat_metadata`（per-chat） | 层级摘要是跨楼层的派生物，不随单条消息走；`fanin` 变化整树重建 |
 | 摘要生成批次串行 + 层内并行 | LLM 限流友好；层间串行保证父输入依赖子文本；自动/手动互斥避免写竞争 |
 | 分层摘要手动生成不受总开关限制 | 开关只表达「自动行为」意愿（用户确认的决策） |
+| 追踪存楼层 extra 而非 chat_metadata | 追踪是单楼层 L0 的派生物，随楼层走；删楼层即删其追踪，楼层重写只脏本楼层 |
+| 追踪用独立 LLM 连接 | 与分层摘要的成本/模型解耦：追踪输出 JSON 对模型指令遵循要求更高，允许配不同模型与参数 |
+| 本次历程 = 本楼层 L0 而非全量 | 增量语义：每楼层只判断本回复带来的状态变化，全局最终状态由顺序合并得出 |
+| 合并在淘汰/蒸馏之后、追踪赢 | 追踪是最新事实源；代价是久未出场角色的蒸馏节 token 效果被部分抵消（状态补回），角色多且上下文紧时可关追踪或调小可变分区 |
+| 合并未知键跳过、不复活淘汰角色 | LLM 幻觉键不污染角色卡；淘汰语义（槽位上限）不受追踪影响 |
 | 摘要长度只由模板措辞控制 | 代码不改写不截断摘要文本，只做整节点取舍；长度要求写进模板 |
 | 发送前永不等 LLM | 缺失摘要的天保持原文兜底；超时/失败不阻塞发送，后台补齐下次生效 |
 | 折叠估算 1.5 字符/token + 精确计数丢弃 | 估算优先保速度（`getTokenCountAsync` 调用重，尽量少调）；精确计数**无次数上限**地从最旧槽位丢弃至 ≤ midBudget |
@@ -430,12 +493,34 @@ node test/smoke-hybrid-recall.cjs
   - **G2**（编辑修复/再损坏）：修复楼层后 `MESSAGE_EDITED` 不再广播且失败基线清空；再次损坏则重新广播（修复后重新损坏可再提示）。
 - 改折叠装配/层级生成逻辑后**必须跑此测试**；新增场景往 `check` 里加。
 
+### 15.1.1 角色状态追踪冒烟测试
+
+```
+node test/smoke-roletrack.cjs
+```
+
+- 同 `15.1` 的 mock 口径另加：`saveChatDebounced` 计数；全局 `fetch` 桩按调用顺序返回 `{"爱丽丝":{"当前状态":{"地点":"地点N"}}}`（code fence 包裹，验证输出解析与顺序合并），并记录末次 prompt（验证 `{{角色列表}}` 为完整角色卡）；用 `(0,eval)` 按加载序注入 `constant/settings/engine/subsummary/roletrack` 五个模块。
+- 11 个场景：
+  - **A**（模版解析）：默认模板检出可变标记，`{{角色名}}.当前状态` 整子树保留、`角色设定` 剔除。
+  - **B**（无标记）：去掉 `<可变>` 后 `hasVariable=false`。
+  - **C**（逐楼层追踪）：3 楼层 `generateMissing` 成功 3 次、extra 落盘、`getCoverage` 全有效、prompt 中角色列表含完整角色卡字段。
+  - **D**（顺序合并）：三楼层地点依次不同，合并取最末楼层值。
+  - **E**（脏链）：改中间楼层历程只脏该楼层。
+  - **F**（合并语义）：追踪赢、不可变设定保留、幻觉键跳过、未出场/已淘汰角色不注入不复活。
+  - **G**（无角色楼层）：记空对象且不调 LLM。
+  - **H**（模板校验 + 未配置）：缺占位符无效、三占位符有效、空 baseUrl 未配置。
+  - **I**（自动触发）：`MESSAGE_RECEIVED` 助手楼层触发补齐、用户消息不触发。
+  - **J**（擦除）：清空 3 楼层后全缺失。
+  - **K**（端到端）：`replaceChatHistoryWithDetailsV2` 装配出的发送消息含合并后状态。
+- 改追踪/合并逻辑后**必须跑此测试**；改折叠/层级逻辑后仍跑 `15.1`。
+
 ### 15.2 浏览器手工验证清单
 
-1. wand 菜单出现「剧情角色档案」，打开窗口 6 个 tab 正常，控制台无红错。
+1. wand 菜单出现「剧情角色档案」，打开窗口 7 个 tab 正常，控制台无红错。
 2. 开 `extensionToggle`，正常聊天 → 控制台看 `全量 X tokens…分层折叠将启用/不启用`、`Final last message`；发送预览与之一致。
 3. 超预算 → 折叠激活，故事历程 tab 按天分组卡片出现层级徽章（原文/天摘要/Lx合并/已丢弃），上层合并卡片置顶；越新的天层级越低。
 4. 配置分层摘要（fetch 或 profile），发消息 → 后台自动补齐天摘要并落盘（刷新仍在）；手动 补齐缺失/强制重建/擦除（口令）行为正确；发送时缺失摘要不阻塞（用原文兜底）。
+5. （v2.23.0）配置角色状态（独立连接），发消息 → 新助手楼层后台自动追踪并写入 extra（刷新仍在）；角色状态 tab 楼层卡片显示已追踪/缺失与状态树；发送预览的 CHARACTER_CARD 中可变字段为顺序合并后的最终值；模板去掉 `<可变>` 后 tab 提示去标记且追踪拒绝生成。
 5. 编辑某旧楼层消息 → 仅该天 L1 失效（故事 tab 该天显示未生成），其余天摘要保留；后台自动重建。
 6. 配置不允许 CORS 的 API → 状态行 + console 明确报错，metadata 不被污染。
 7. （v2.11.1）解析失败气泡时机：让某次回复的 `<NEW_STORY_DATA>` JSON 损坏 → **回复到达即**弹出红色气泡（无需再发一条消息）；手动编辑修复该楼层后气泡不再出现、侧栏失败楼层消失；再次编辑弄坏 → 重新弹出；删除消息/切换聊天不产生误报气泡。
@@ -446,6 +531,7 @@ node test/smoke-hybrid-recall.cjs
 
 | 版本 | 内容 |
 |---|---|
+| 2.23.0 | **角色状态追踪**：角色卡模板 `// <可变>` 标记按同样树形组成可变状态模版；每次助手回复后后台对本楼层 L0 调独立 LLM 连接（`roleTrack*` 设置），输入为模版 + 本楼层 L0 + 出场角色完整角色卡，输出单个 JSON 对象（以模版为树形参考）存楼层 `extra`（哈希标脏），角色卡装配时按楼层顺序合并（追踪赢、未知键跳过、不复活淘汰角色）；新增「角色状态」tab（独立连接配置 + 模版预览 + 逐楼层卡片 + 单楼层生成）；`Engine.getKnownRoleCards/getKnownRoles` + `deepMerge` 导出；默认角色卡模板新增示例可变分区 `当前状态`；冒烟测试新增 `smoke-roletrack.cjs`（11 场景） |
 | 2.22.0 | **profile 附加参数**：`subSummaryExtraParams`（JSON 对象）经 `sendRequest` 第 5 参数 `overridePayload` 发往 ST 服务端，白名单采样字段直达上游，CUSTOM 源另支持 `custom_include_body` / `custom_include_headers`（YAML）；temperature 设置项优先；配置类错误（未配置/模板无效/非法 JSON）`noRetry` 不重试；冒烟测试新增 H 场景（透传 + 覆盖优先级 + 非法 JSON） |
 | 2.21.0 | **多层级摘要替代 tag + 稀疏远程记忆**：删除 `retrieval/embedding/embed-worker/embedstore/recallcache + lib/`（模型资产）与整套打分（`scoreFarEntries/ModeA/BM25`）；`subsummary.js` 重写为 L1 天摘要 + L(k≥2) 按 `hierFanin` 合并（纯文本，`chat_metadata` 持久化，childHash 校验，逐层收集执行，发送前永不等 LLM）；`engine.js` 改分层折叠装配（预算自然决定、从最旧侧折叠、天原子、精确丢弃保证硬上限）+ 摘要伪条目统一渲染；`ragRatio` 删除；UI 改按天分组 + 上层卡片（删语义打分 tab）；冒烟测试重写为 8 确定性场景，全过 |
 | 2.19.0 | **Mode A 改流式配额选中**：`FRAG_WEIGHT_USER/WIN_BASE/WIN_DECAY/WIN_MIN` 加权 max 删除，改 `MODEA_USER_BUDGET_RATIO(0.4)` + `MODEA_WINDOW_BUDGET_RATIO(0.2)`（每窗口片段独立配额）：Stage U 对全池按 user fragScore 降序选满 userQuota 并移出池，Stage W 按窗口最新→最旧逐片段只对剩余池选满 winQuota，总量满 ragBudget 即停（后续窗口不编码不打分）；单分公式/门槛/三级缓存沿用，选中来源唯一（`bestFrag` = 选中阶段）；精确裁剪改来源优先级（最旧window→…→最新window→最后user，同源内选中分低先剔）；空查询回退到最近非空用户消息；冒烟测试新增 J 场景（窗口通道从剩余池拾取 + 来源唯一）与 K 场景（空查询回退），全过 |

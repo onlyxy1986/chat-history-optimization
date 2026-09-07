@@ -629,6 +629,39 @@ ${newCharacterCardTemplate}
     }
 
     /**
+     * 当前聊天的全部已知角色卡（全部楼层 NEW_CHARACTER_CARD 合并后的映射）。
+     * 只读：深拷贝当前 chat 后走同一 mergeDataInfo，不修改 ST 数据。
+     * 供角色状态追踪取"故事历程中出现角色的完整角色卡"（全集输入，调用方再按
+     * 本楼层历程文本过滤）。角色卡关闭/模板非法/解析失败时返回空对象。
+     * @returns {object} { 角色名: 角色卡 }
+     */
+    function getKnownRoleCards() {
+        if (!isRoleCardEnabled()) return {};
+        const sourceChat = NS.bridge && NS.bridge.getCurrentChat ? NS.bridge.getCurrentChat() : null;
+        if (!sourceChat || !Array.isArray(sourceChat) || sourceChat.length === 0) return {};
+        const chatCopy = JSON.parse(JSON.stringify(sourceChat));
+        const historyTemplate = parseTemplate(Settings.get('historyPrompt'));
+        const characterTemplate = parseTemplate(Settings.get('characterPrompt'));
+        if (characterTemplate === null) return {};
+        try {
+            const info = mergeDataInfo(chatCopy, historyTemplate, characterTemplate);
+            const cards = (info && info.characterData) || {};
+            return (cards && typeof cards === 'object' && !Array.isArray(cards)) ? cards : {};
+        } catch (e) {
+            console.error('[Chat History Optimization] getKnownRoleCards 解析失败', e);
+            return {};
+        }
+    }
+
+    /**
+     * 当前聊天的全部已知角色名（getKnownRoleCards 的键）。
+     * @returns {string[]}
+     */
+    function getKnownRoles() {
+        return Object.keys(getKnownRoleCards());
+    }
+
+    /**
      * 角色卡淘汰与蒸馏：槽位上限 Constants.ROLE_CARD_MAX_SLOTS
      * 当前 prompt 提到的角色得分 Constants.ROLE_CARD_MENTION_SCORE（保证保留）；其余按最后出现索引计分
      * 超过 Constants.ROLE_CARD_STALE_DISTANCE 条消息未活跃（且非当前提问提及）的角色只保留核心设定
@@ -890,6 +923,15 @@ ${newCharacterCardTemplate}
         const mergedDataInfo = mergeDataInfo(chatCopy, historyTemplate, characterTemplate);
         const historyData = mergedDataInfo.historyData || {};
         const characterData = processCharacterData(mergedDataInfo.characterData || {}, chatCopy);
+        // 角色状态追踪：按楼层顺序把各楼层 extra 的可变状态数组合并为最终状态，
+        // 覆盖到角色卡可变子树（追踪赢）。RoleTrack 未加载时跳过，保证向后兼容。
+        try {
+            if (NS.RoleTrack && typeof NS.RoleTrack.applyToCharacterData === 'function') {
+                NS.RoleTrack.applyToCharacterData(characterData, chatCopy);
+            }
+        } catch (e) {
+            console.error('[Chat History Optimization] 角色状态合并失败，使用未合并角色卡', e);
+        }
         const charJson = JSON.stringify(characterData);
 
         // --- 正文：倒数第 keepCount 条 assistant 消息及其后的原文 ---
@@ -1174,12 +1216,15 @@ ${newCharacterCardTemplate}
         wordMapping,
         parseTemplate,
         validateTemplate,
+        deepMerge,
         onStats,
         onParseFail,
         getStats,
         refreshStats,
         getFloorStoryBlock,
         getStoryProgressRange,
+        getKnownRoles,
+        getKnownRoleCards,
         entryToDocText,
         getNameSearchTerms,
         nameMatches,

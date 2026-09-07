@@ -26,6 +26,7 @@
     const TABS = [
         { id: 'settings', label: '基础设置', icon: 'fa-solid fa-sliders' },
         { id: 'subsummary', label: '分层摘要', icon: 'fa-solid fa-compress' },
+        { id: 'roletrack', label: '角色状态', icon: 'fa-solid fa-user-clock' },
         { id: 'templates', label: '模板', icon: 'fa-solid fa-file-code' },
         { id: 'roles', label: '角色查看', icon: 'fa-solid fa-id-card' },
         { id: 'story', label: '故事历程', icon: 'fa-solid fa-route' },
@@ -634,18 +635,28 @@
     }
 
     // 擦除确认弹层：输入 ERASE_ALL_CONFIRM_TEXT 后才可执行，Esc/点遮罩/取消 关闭
-    function showEraseAllConfirm(onConfirm) {
+    function showEraseAllConfirm(titleOrConfirm, warnText, placeholderText, onConfirm) {
+        let title = '擦除全部层级摘要';
+        let warn = '将清空全部天摘要与上层合并摘要，不影响故事历程原文。此操作不可撤销。';
+        let placeholder = `输入「${ERASE_ALL_CONFIRM_TEXT}」以确认`;
+        if (typeof titleOrConfirm === 'function') {
+            onConfirm = titleOrConfirm;
+        } else if (typeof titleOrConfirm === 'string') {
+            title = titleOrConfirm;
+            if (typeof warnText === 'string') warn = warnText;
+            if (typeof placeholderText === 'string') placeholder = placeholderText;
+        }
         const root = document.getElementById(ROOT_ID);
         if (!root || root.querySelector('.coo-erase-confirm-overlay')) return;
 
         const overlay = createText('div', 'coo-erase-confirm-overlay');
         const dialog = createText('div', 'coo-erase-confirm-dialog');
-        dialog.appendChild(createText('div', 'coo-erase-confirm-title', '擦除全部层级摘要'));
-        dialog.appendChild(createText('div', 'coo-erase-confirm-warn', '将清空全部天摘要与上层合并摘要，不影响故事历程原文。此操作不可撤销。'));
+        dialog.appendChild(createText('div', 'coo-erase-confirm-title', title));
+        dialog.appendChild(createText('div', 'coo-erase-confirm-warn', warn));
         const input = document.createElement('input');
         input.type = 'text';
         input.className = 'coo-erase-confirm-input';
-        input.placeholder = `输入「${ERASE_ALL_CONFIRM_TEXT}」以确认`;
+        input.placeholder = placeholder;
         input.setAttribute('aria-label', '擦除确认口令');
         dialog.appendChild(input);
 
@@ -897,6 +908,297 @@
         });
     }
 
+    // ------------------------------------------------------------------
+    // 角色状态追踪 tab（roletrack.js）：独立连接 + 逐楼层 extra 存储。
+    // ------------------------------------------------------------------
+
+    function updateRoleTrackBadge(scope) {
+        if (!NS.RoleTrack) return;
+        const badge = scope.querySelector('[data-coo-validity="roleTrackPrompt"]');
+        const textarea = scope.querySelector('[data-coo-field="roleTrackPrompt"]');
+        if (badge && textarea) {
+            const valid = NS.RoleTrack.validateRoleTrackTemplate(textarea.value);
+            badge.textContent = valid ? '(有效)' : '(无效)';
+            badge.className = `coo-badge ${valid ? 'coo-badge-valid' : 'coo-badge-invalid'}`;
+        }
+        const extraBadge = scope.querySelector('[data-coo-validity="roleTrackExtraParams"]');
+        const extraTextarea = scope.querySelector('[data-coo-field="roleTrackExtraParams"]');
+        if (extraBadge && extraTextarea) {
+            const valid = NS.RoleTrack.validateExtraParams(extraTextarea.value);
+            extraBadge.textContent = valid ? '(有效)' : '(无效)';
+            extraBadge.className = `coo-badge ${valid ? 'coo-badge-valid' : 'coo-badge-invalid'}`;
+        }
+    }
+
+    function updateRoleTrackStatus(scope) {
+        scope.querySelectorAll('[data-coo-field="roleTrackStatus"]').forEach((el) => {
+            const status = NS.RoleTrack ? NS.RoleTrack.getStatus() : { running: false, current: '', done: 0, failed: 0, error: null, message: null };
+            if (status.running) {
+                el.textContent = `追踪中：${status.current}（成功 ${status.done} / 失败 ${status.failed}）`;
+                el.className = 'coo-subsummary-status coo-subsummary-status-running';
+            } else if (status.error) {
+                el.textContent = status.error;
+                el.className = 'coo-subsummary-status coo-subsummary-status-error';
+            } else if (status.done > 0 || status.failed > 0) {
+                el.textContent = `完成：成功 ${status.done}，失败 ${status.failed}`;
+                el.className = 'coo-subsummary-status';
+            } else if (status.message) {
+                el.textContent = status.message;
+                el.className = 'coo-subsummary-status';
+            } else {
+                el.textContent = '空闲';
+                el.className = 'coo-subsummary-status';
+            }
+        });
+    }
+
+    function updateRoleTrackInfo(scope) {
+        scope.querySelectorAll('[data-coo-field="roleTrackInfo"]').forEach((el) => {
+            if (!NS.RoleTrack || typeof NS.RoleTrack.getCoverage !== 'function') {
+                el.textContent = '追踪：模块未加载';
+                el.className = 'coo-subsummary-status';
+                return;
+            }
+            const cov = NS.RoleTrack.getCoverage();
+            if (!cov.hasVariable) {
+                el.textContent = '追踪：角色卡模板中未检测到 <可变> 标记（请在模板 tab 的属性行 // 注释中标记）';
+                el.className = 'coo-subsummary-status coo-subsummary-status-error';
+                return;
+            }
+            el.textContent = `追踪：已追踪 ${cov.tracked} / 共 ${cov.floors.length} 个有历程楼层（缺失 ${cov.missing}），可变属性 ${cov.variableCount} 个`;
+            el.className = 'coo-subsummary-status';
+        });
+        scope.querySelectorAll('[data-coo-field="roleTrackVarInfo"]').forEach((el) => {
+            if (!NS.RoleTrack || typeof NS.RoleTrack.getCoverage !== 'function') {
+                el.textContent = '可变状态模版：模块未加载';
+                return;
+            }
+            const cov = NS.RoleTrack.getCoverage();
+            if (!cov.hasVariable) {
+                el.textContent = '可变状态模版：未检测到 <可变> 标记';
+                return;
+            }
+            el.textContent = `可变状态模版（${cov.variableCount} 个可变属性）：${JSON.stringify(cov.variableTemplate)}`;
+        });
+    }
+
+    function buildRoleTrackFloorCard(floorInfo) {
+        const card = document.createElement('div');
+        card.className = 'coo-story-item';
+        const head = document.createElement('div');
+        head.className = 'coo-story-item-head';
+        head.appendChild(createText('span', 'coo-story-floor', `楼层${floorInfo.floor}（${floorInfo.count} 条历程）`));
+        if (floorInfo.valid) {
+            head.appendChild(createText('span', 'coo-rag-hit-score', '已追踪'));
+        } else {
+            head.appendChild(createText('span', 'coo-rag-miss-score', '缺失'));
+        }
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'coo-button coo-button-ghost coo-button-sm';
+        button.dataset.cooFloor = String(floorInfo.floor);
+        if (floorInfo.valid) {
+            button.dataset.cooAction = 'roleTrackFloorRegenerate';
+            button.appendChild(createIcon('fa-solid fa-rotate'));
+            button.appendChild(createText('span', 'coo-button-label', '重新生成'));
+            button.title = `重新追踪楼层${floorInfo.floor}的可变状态`;
+        } else {
+            button.dataset.cooAction = 'roleTrackFloorGenerate';
+            button.appendChild(createIcon('fa-solid fa-wand-magic-sparkles'));
+            button.appendChild(createText('span', 'coo-button-label', '生成追踪'));
+            button.title = `追踪楼层${floorInfo.floor}的可变状态`;
+        }
+        head.appendChild(button);
+        card.appendChild(head);
+        if (floorInfo.roles && floorInfo.roles.length > 0) {
+            card.appendChild(createText('div', 'coo-story-item-meta', `涉及角色：${floorInfo.roles.join('、')}`));
+        }
+        const states = floorInfo.states;
+        if (!floorInfo.valid || !states) {
+            card.appendChild(createText('div', 'coo-role-empty coo-story-summary-empty', '尚未追踪'));
+        } else if (Object.keys(states).length === 0) {
+            card.appendChild(createText('div', 'coo-role-empty coo-story-summary-empty', '本楼层无角色状态变化'));
+        } else {
+            for (const roleName of Object.keys(states)) {
+                card.appendChild(createText('div', 'coo-story-item-meta', roleName));
+                const tree = document.createElement('div');
+                tree.className = 'coo-role-info';
+                buildRoleTree(tree, states[roleName]);
+                card.appendChild(tree);
+            }
+        }
+        return card;
+    }
+
+    function renderRoleTrackList(scope) {
+        const list = scope.querySelector('[data-coo-field="roleTrackList"]');
+        if (!list) return;
+        list.textContent = '';
+        if (!NS.RoleTrack || typeof NS.RoleTrack.getCoverage !== 'function') {
+            list.appendChild(createText('span', 'coo-role-empty', '模块未加载'));
+            return;
+        }
+        const cov = NS.RoleTrack.getCoverage();
+        if (cov.floors.length === 0) {
+            list.appendChild(createText('span', 'coo-role-empty',
+                cov.hasVariable ? '暂无有历程的助手楼层' : '未检测到 <可变> 标记，无法追踪'));
+            return;
+        }
+        for (const floorInfo of cov.floors) {
+            list.appendChild(buildRoleTrackFloorCard(floorInfo));
+        }
+    }
+
+    function fillRoleTrackProfileSelect(select) {
+        if (!select) return;
+        const previous = select.value;
+        const options = NS.RoleTrack ? NS.RoleTrack.getProfileOptions() : [];
+        select.textContent = '';
+        const placeholder = document.createElement('option');
+        placeholder.value = '';
+        placeholder.textContent = options.length ? '(请选择)' : '（无可用 CC profile，Connection Manager 可能未启用）';
+        select.appendChild(placeholder);
+        for (const profile of options) {
+            const opt = document.createElement('option');
+            opt.value = profile.id;
+            opt.textContent = `${profile.name}（${profile.model}）`;
+            select.appendChild(opt);
+        }
+        const stillExists = previous && options.some((p) => p.id === previous);
+        select.value = stillExists ? previous : '';
+    }
+
+    function applyRoleTrackSourceState(scope) {
+        const sourceSelect = scope.querySelector('[data-coo-field="roleTrackSource"]');
+        const isProfile = Boolean(sourceSelect && sourceSelect.value === 'profile');
+        for (const field of ['roleTrackBaseUrl', 'roleTrackApiKey', 'roleTrackModel']) {
+            const input = scope.querySelector(`[data-coo-field="${field}"]`);
+            if (!input) continue;
+            input.disabled = isProfile;
+            const row = input.closest ? input.closest('.coo-row') : null;
+            if (row) row.classList.toggle('coo-row-disabled', isProfile);
+        }
+        const profileSelect = scope.querySelector('[data-coo-field="roleTrackProfileId"]');
+        if (profileSelect) {
+            profileSelect.disabled = !isProfile;
+            const row = profileSelect.closest ? profileSelect.closest('.coo-row') : null;
+            if (row) row.classList.toggle('coo-row-disabled', !isProfile);
+        }
+    }
+
+    function requireRoleTrackConfigured(scope) {
+        if (NS.RoleTrack && NS.RoleTrack.isConfigured()) return true;
+        scope.querySelectorAll('[data-coo-field="roleTrackStatus"]').forEach((el) => {
+            el.textContent = '角色状态追踪未配置：请在"角色状态"选项卡选择 connection profile，或配置直连的 baseUrl、apiKey 和模型';
+            el.className = 'coo-subsummary-status coo-subsummary-status-error';
+        });
+        return false;
+    }
+
+    function handleRoleTrackFloorAction(button, force) {
+        const scope = button.closest ? button.closest('.coo-workspace') : null;
+        if (scope && !requireRoleTrackConfigured(scope)) return;
+        const floor = parseInt(button.dataset.cooFloor, 10);
+        if (isNaN(floor) || floor < 1) return;
+        NS.RoleTrack.generateForFloor(floor, { force });
+    }
+
+    function handleRoleTrackGenerateMissing(scope) {
+        if (!requireRoleTrackConfigured(scope)) return;
+        NS.RoleTrack.generateMissing();
+        updateRoleTrackStatus(scope);
+    }
+
+    function handleRoleTrackForceRebuild(scope) {
+        if (!requireRoleTrackConfigured(scope)) return;
+        NS.RoleTrack.forceRebuild();
+        updateRoleTrackStatus(scope);
+    }
+
+    function handleRoleTrackEraseAll(scope) {
+        showEraseAllConfirm('擦除全部角色状态追踪', '将清空全部楼层 extra 中的状态追踪，不影响故事历程原文与角色卡。此操作不可撤销。', '输入「确认全部擦除」以确认', () => {
+            NS.RoleTrack.eraseAll();
+            updateRoleTrackStatus(scope);
+            updateRoleTrackInfo(scope);
+            renderRoleTrackList(scope);
+        });
+    }
+
+    function renderRoleTrackTab(panel) {
+        const section = createSection('fa-solid fa-user-clock', '角色状态');
+        section.appendChild(createSwitchRow('启用角色状态追踪', 'roleTrackToggle'));
+        section.appendChild(createText('div', 'coo-preview-hint', '助手新回复到达后后台追踪本楼层 L0 的可变状态（手动生成不受此开关限制；结果存楼层 extra，角色卡按楼层顺序合并；发送前不等待追踪）'));
+        section.appendChild(createSelectRow('连接方式', '直连走浏览器 fetch；profile 走 SillyTavern Connection Manager（API Key 由服务端解密，不经过浏览器）', 'roleTrackSource', [
+            { value: 'fetch', label: '直连（fetch）' },
+            { value: 'profile', label: 'SillyTavern connection profile' },
+        ]));
+        section.appendChild(createSelectRow('连接 profile', '仅支持 Chat Completion 类型的 profile', 'roleTrackProfileId'));
+        section.appendChild(createTextRow('API baseUrl', 'OpenAI 兼容接口，如 http://localhost:8080 或 http://localhost:8080/v1', 'roleTrackBaseUrl', { placeholder: 'http://localhost:8080' }));
+        section.appendChild(createTextRow('API Key', '', 'roleTrackApiKey', { type: 'password' }));
+        section.appendChild(createTextRow('模型名', '', 'roleTrackModel'));
+        section.appendChild(createNumberRow('temperature', '（采样温度）', 'roleTrackTemperature', { min: 0, max: 2, step: 0.1 }));
+        section.appendChild(createNumberRow('maxTokens', '（单次追踪最大 token 数）', 'roleTrackMaxTokens', { min: 1, step: 1 }));
+        section.appendChild(createNumberRow('并行数', '（批量补齐同时进行的请求数，1 为串行；API 限流时调小）', 'roleTrackConcurrency', { min: 1, max: 8, step: 1 }));
+        section.appendChild(createNumberRow('超时（秒）', '（单次请求超时，超时按失败重试；本地慢模型调大）', 'roleTrackTimeoutSec', { min: 10, max: 600, step: 10 }));
+        section.appendChild(createTemplateBlock('profile 附加参数（JSON 对象，仅 profile 模式生效）', 'roleTrackExtraParams', 3, 0));
+        section.appendChild(createTemplateBlock('状态追踪模板（{{可变状态模版}} / {{角色列表}} / {{故事历程}} 三个占位符必填）', 'roleTrackPrompt', 10, 10));
+
+        const varInfo = createText('div', 'coo-subsummary-status', '可变状态模版：检测中');
+        varInfo.dataset.cooField = 'roleTrackVarInfo';
+        section.appendChild(varInfo);
+
+        const status = createText('div', 'coo-subsummary-status', '空闲');
+        status.dataset.cooField = 'roleTrackStatus';
+        section.appendChild(status);
+
+        const info = createText('div', 'coo-subsummary-status', '追踪：暂无数据');
+        info.dataset.cooField = 'roleTrackInfo';
+        section.appendChild(info);
+
+        const actions = document.createElement('div');
+        actions.className = 'coo-subsummary-actions';
+        const genMissingButton = createButton('补齐缺失', 'coo-button coo-button-sm', 'fa-solid fa-wand-magic-sparkles');
+        genMissingButton.dataset.cooAction = 'roleTrackGenerateMissing';
+        genMissingButton.title = '后台补齐缺失的楼层状态追踪（已有有效的跳过）';
+        const forceGenButton = createButton('强制重建全部', 'coo-button coo-button-sm', 'fa-solid fa-bolt');
+        forceGenButton.dataset.cooAction = 'roleTrackForceRebuild';
+        forceGenButton.title = '清空现有楼层追踪后全部重新生成';
+        const eraseButton = createButton('擦除全部', 'coo-button coo-button-ghost coo-button-sm', 'fa-solid fa-eraser');
+        eraseButton.dataset.cooAction = 'roleTrackEraseAll';
+        eraseButton.title = '清空全部楼层的状态追踪（不影响故事历程原文与角色卡）';
+        actions.append(genMissingButton, forceGenButton, eraseButton);
+        section.appendChild(actions);
+
+        const list = document.createElement('div');
+        list.className = 'coo-story-list';
+        list.dataset.cooField = 'roleTrackList';
+        section.appendChild(list);
+
+        const settings = Settings.getSettings();
+        section.querySelector('[data-coo-field="roleTrackToggle"]').checked = Boolean(settings.roleTrackToggle);
+        const sourceSelect = section.querySelector('[data-coo-field="roleTrackSource"]');
+        sourceSelect.value = settings.roleTrackSource === 'profile' ? 'profile' : 'fetch';
+        const profileSelect = section.querySelector('[data-coo-field="roleTrackProfileId"]');
+        fillRoleTrackProfileSelect(profileSelect);
+        profileSelect.value = String(settings.roleTrackProfileId || '');
+        section.querySelector('[data-coo-field="roleTrackBaseUrl"]').value = settings.roleTrackBaseUrl || '';
+        section.querySelector('[data-coo-field="roleTrackApiKey"]').value = settings.roleTrackApiKey || '';
+        section.querySelector('[data-coo-field="roleTrackModel"]').value = settings.roleTrackModel || '';
+        section.querySelector('[data-coo-field="roleTrackTemperature"]').value = settings.roleTrackTemperature;
+        section.querySelector('[data-coo-field="roleTrackMaxTokens"]').value = settings.roleTrackMaxTokens;
+        section.querySelector('[data-coo-field="roleTrackConcurrency"]').value = settings.roleTrackConcurrency;
+        section.querySelector('[data-coo-field="roleTrackTimeoutSec"]').value = settings.roleTrackTimeoutSec;
+        section.querySelector('[data-coo-field="roleTrackExtraParams"]').value = settings.roleTrackExtraParams || '';
+        section.querySelector('[data-coo-field="roleTrackPrompt"]').value = settings.roleTrackPrompt;
+        applyRoleTrackSourceState(section);
+        updateRoleTrackBadge(section);
+        updateRoleTrackStatus(section);
+        updateRoleTrackInfo(section);
+        renderRoleTrackList(section);
+
+        panel.appendChild(section);
+    }
+
     function renderPreviewText(scope) {
         const box = scope.querySelector('[data-coo-field="previewText"]');
         if (!box) return;
@@ -923,6 +1225,7 @@
         roles: renderRolesTab,
         story: renderStoryTab,
         subsummary: renderSubSummaryTab,
+        roletrack: renderRoleTrackTab,
         preview: renderPreviewTab,
     };
 
@@ -1070,9 +1373,14 @@
         if (!workspace) return;
         updateStatsValues(shell);
         updateSubSummaryStatus(shell);
+        updateRoleTrackStatus(shell);
+        updateRoleTrackInfo(shell);
         if (activeTabId === 'roles') {
             renderRoleSelect(workspace);
             renderRoleInfo(workspace);
+        }
+        if (activeTabId === 'roletrack') {
+            renderRoleTrackList(workspace);
         }
     }
 
@@ -1164,9 +1472,61 @@
                     Settings.set('characterPrompt', event.target.value);
                     updateValidityBadge(workspace, 'characterPrompt');
                     break;
+                case 'roleTrackToggle':
+                    Settings.set('roleTrackToggle', Boolean(event.target.checked));
+                    break;
+                case 'roleTrackExtraParams':
+                    Settings.set('roleTrackExtraParams', event.target.value);
+                    updateRoleTrackBadge(workspace);
+                    break;
+                case 'roleTrackPrompt':
+                    Settings.set('roleTrackPrompt', event.target.value);
+                    updateRoleTrackBadge(workspace);
+                    break;
                 case 'subSummaryToggle':
                     Settings.set('subSummaryToggle', Boolean(event.target.checked));
                     break;
+                case 'roleTrackSource':
+                    Settings.set('roleTrackSource', event.target.value === 'profile' ? 'profile' : 'fetch');
+                    applyRoleTrackSourceState(workspace);
+                    break;
+                case 'roleTrackProfileId':
+                    Settings.set('roleTrackProfileId', event.target.value);
+                    break;
+                case 'roleTrackBaseUrl':
+                    Settings.set('roleTrackBaseUrl', event.target.value);
+                    break;
+                case 'roleTrackApiKey':
+                    Settings.set('roleTrackApiKey', event.target.value);
+                    break;
+                case 'roleTrackModel':
+                    Settings.set('roleTrackModel', event.target.value);
+                    break;
+                case 'roleTrackTemperature': {
+                    const value = parseFloat(event.target.value);
+                    Settings.set('roleTrackTemperature', isNaN(value) ? Settings.defaultSettings.roleTrackTemperature : value);
+                    break;
+                }
+                case 'roleTrackMaxTokens': {
+                    const value = parseInt(event.target.value, 10);
+                    Settings.set('roleTrackMaxTokens', isNaN(value) || value <= 0 ? Settings.defaultSettings.roleTrackMaxTokens : value);
+                    break;
+                }
+                case 'roleTrackConcurrency': {
+                    const value = parseInt(event.target.value, 10);
+                    const max = (NS.Constants && NS.Constants.ROLETRACK_CONCURRENCY_MAX) || 8;
+                    const fallback = Settings.defaultSettings.roleTrackConcurrency;
+                    Settings.set('roleTrackConcurrency', isNaN(value) ? fallback : Math.min(Math.max(1, value), max));
+                    break;
+                }
+                case 'roleTrackTimeoutSec': {
+                    const value = parseInt(event.target.value, 10);
+                    const minMs = (NS.Constants && NS.Constants.SUBSUMMARY_TIMEOUT_MIN_MS) || 10000;
+                    const maxMs = (NS.Constants && NS.Constants.SUBSUMMARY_TIMEOUT_MAX_MS) || 600000;
+                    const fallback = Settings.defaultSettings.roleTrackTimeoutSec;
+                    Settings.set('roleTrackTimeoutSec', isNaN(value) ? fallback : Math.min(Math.max(Math.round(minMs / 1000), value), Math.round(maxMs / 1000)));
+                    break;
+                }
                 case 'subSummarySource':
                     Settings.set('subSummarySource', event.target.value === 'profile' ? 'profile' : 'fetch');
                     applySubSummarySourceState(workspace);
@@ -1241,6 +1601,14 @@
                     handleSubEraseAll(workspace);
                 } else if (action === 'dayGenerate' || action === 'dayRegenerate') {
                     handleDaySummaryAction(actionButton, action === 'dayRegenerate');
+                } else if (action === 'roleTrackGenerateMissing') {
+                    handleRoleTrackGenerateMissing(workspace);
+                } else if (action === 'roleTrackForceRebuild') {
+                    handleRoleTrackForceRebuild(workspace);
+                } else if (action === 'roleTrackEraseAll') {
+                    handleRoleTrackEraseAll(workspace);
+                } else if (action === 'roleTrackFloorGenerate' || action === 'roleTrackFloorRegenerate') {
+                    handleRoleTrackFloorAction(actionButton, action === 'roleTrackFloorRegenerate');
                 }
                 return;
             }
@@ -1253,6 +1621,8 @@
             Settings.set(field, textarea.value);
             if (field === 'hierDayPrompt' || field === 'hierMergePrompt' || field === 'subSummaryExtraParams') {
                 updateSubSummaryBadge(workspace);
+            } else if (field === 'roleTrackPrompt' || field === 'roleTrackExtraParams') {
+                updateRoleTrackBadge(workspace);
             } else {
                 updateValidityBadge(workspace, field);
             }
@@ -1288,6 +1658,22 @@
         if (!workspace) return;
         if ((snapshot && snapshot.running === false) || (snapshot && snapshot.lastDone)) {
             renderStoryList(workspace);
+        }
+    }
+
+    // 角色状态追踪状态变化：状态行与统计行始终原地更新；角色状态 tab 下，
+    // 批次结束或单楼层完成时重绘楼层卡片列表。
+    function onRoleTrackStatusChanged(snapshot) {
+        const root = document.getElementById(ROOT_ID);
+        const shell = root ? root.querySelector('.coo-shell') : null;
+        if (!shell || shell.hidden) return;
+        updateRoleTrackStatus(shell);
+        updateRoleTrackInfo(shell);
+        if (activeTabId !== 'roletrack') return;
+        const workspace = shell.querySelector('.coo-workspace');
+        if (!workspace) return;
+        if ((snapshot && snapshot.running === false) || (snapshot && snapshot.lastDone)) {
+            renderRoleTrackList(workspace);
         }
     }
 
@@ -1445,6 +1831,7 @@
         bindShell(shell);
         Engine.onStats(onStatsChanged);
         if (NS.SubSummary) NS.SubSummary.onStatus(onSubSummaryStatusChanged);
+        if (NS.RoleTrack) NS.RoleTrack.onStatus(onRoleTrackStatusChanged);
         Engine.onParseFail(showParseFailBubble);
         watchConnectionProfiles(root);
         startExtensionEntryRetry();
@@ -1457,14 +1844,25 @@
         const types = [eventTypes.CONNECTION_PROFILE_LOADED, eventTypes.CONNECTION_PROFILE_CREATED, eventTypes.CONNECTION_PROFILE_UPDATED, eventTypes.CONNECTION_PROFILE_DELETED];
         const refresh = () => {
             const shell = root.querySelector('.coo-shell');
-            const select = shell && shell.querySelector ? shell.querySelector('[data-coo-field="subSummaryProfileId"]') : null;
-            if (!select) return;
-            const savedId = String(Settings.get('subSummaryProfileId') || '');
-            fillProfileSelect(select);
-            if (savedId && select.value !== savedId) {
-                Settings.set('subSummaryProfileId', '');
+            if (!shell || !shell.querySelector) return;
+            const select = shell.querySelector('[data-coo-field="subSummaryProfileId"]');
+            if (select) {
+                const savedId = String(Settings.get('subSummaryProfileId') || '');
+                fillProfileSelect(select);
+                if (savedId && select.value !== savedId) {
+                    Settings.set('subSummaryProfileId', '');
+                }
+                applySubSummarySourceState(shell);
             }
-            applySubSummarySourceState(shell);
+            const roleSelect = shell.querySelector('[data-coo-field="roleTrackProfileId"]');
+            if (roleSelect) {
+                const savedRoleId = String(Settings.get('roleTrackProfileId') || '');
+                fillRoleTrackProfileSelect(roleSelect);
+                if (savedRoleId && roleSelect.value !== savedRoleId) {
+                    Settings.set('roleTrackProfileId', '');
+                }
+                applyRoleTrackSourceState(shell);
+            }
         };
         for (const type of types) {
             if (typeof type === 'string') eventSource.on(type, refresh);

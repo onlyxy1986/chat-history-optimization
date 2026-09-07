@@ -50,6 +50,13 @@
                     // 必填: "足部": "足型+趾型+肤色+是否敏感"
                     // 必填: "处女": "是/否"
                 }
+            },
+            "当前状态": { // <可变> 随故事推进的可变状态，由角色状态追踪按楼层维护
+                "地点": "{{地点}}", // <可变> 角色当前所在地点
+                "穿着": "{{穿着}}", // <可变> 角色当前穿着
+                "身体状态": "{{身体状态}}", // <可变> 伤势/体力等即时身体情况
+                "持有物": [], // <可变> 角色当前持有物品
+                "与主角关系": "{{关系}}" // <可变> 与主角的当前关系
             }
         }
         // ... 其他角色
@@ -80,6 +87,29 @@
 3. 相对时间必须转为绝对时间（如"明天"改为"第X天"）
 子摘要列表：
 {{子摘要列表}}`,
+        roleTrackToggle: true, // 角色状态追踪总开关（只控制助手回复后的自动追踪，手动生成不受限）
+        roleTrackSource: 'fetch', // 'fetch' = 直连 OpenAI 兼容接口；'profile' = 使用 SillyTavern connection profile（仅 CC 类型）
+        roleTrackBaseUrl: '', // OpenAI 兼容 API 的 baseUrl
+        roleTrackApiKey: '', // API Key
+        roleTrackModel: '', // 模型名
+        roleTrackProfileId: '', // 选中的 SillyTavern connection profile id（source 为 profile 时生效）
+        roleTrackExtraParams: '', // profile 模式的附加参数（JSON 对象，经 overridePayload 发往 ST 服务端；fetch 模式忽略）
+        roleTrackTemperature: 0.3,
+        roleTrackMaxTokens: 512,
+        roleTrackConcurrency: 4, // 批量补齐缺失追踪时的并行数（1 = 串行；上限见 Constants.ROLETRACK_CONCURRENCY_MAX）
+        roleTrackTimeoutSec: 120, // 单次 LLM 请求超时（秒），钳制范围复用 SUBSUMMARY_TIMEOUT_MIN/MAX_MS
+        roleTrackPrompt: `你是角色状态追踪助手。请根据"本次故事历程"（本次助手回复的全部历程条目）推断各角色可变状态的变化，只输出一个 JSON 对象，不要输出任何其他内容。
+要求：
+1. 只输出在本次故事历程中有状态变化的角色，无变化的角色不要输出；若均无变化则输出 {}。
+2. 以"可变状态模版"为树形参考：输出对象的键为实际角色名，值为该角色的可变状态，只填写可变属性，不要输出不可变设定。
+3. 必须使用角色卡中的准确角色名，不要用代词；不要编造故事历程中没有依据的状态。
+4. 相对时间必须转为绝对时间（如"明天"改为"第X天"）。
+可变状态模版：
+{{可变状态模版}}
+角色卡：
+{{角色列表}}
+本次故事历程：
+{{故事历程}}`,
     };
 
     function getSettings() {
