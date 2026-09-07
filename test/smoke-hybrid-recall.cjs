@@ -19,7 +19,7 @@ function fireEvent(type, ...args) {
 }
 window.ChatOptimizationV2 = {
     loaded: true,
-    version: '2.21.0-test',
+    version: '2.22.0-test',
     baseUrl: ROOT + '/',
     bridge: {
         extensionSettings: {},
@@ -280,4 +280,37 @@ async function measureFullTokens() {
     chat[1].mes = brokenMes;
     fireEvent('message_edited', 1);
     check('G2: 重新损坏后再次广播', parseFailEvents.length === 2, parseFailEvents.length);
+
+    // 场景 H（profile 附加参数透传）：mock ConnectionManagerRequestService，
+    // 验证 extra 经 sendRequest 第 5 参数 overridePayload 发出，temperature 设置项优先
+    NS.bridge.extensionSettings.connectionManager = {
+        profiles: [{ id: 'p1', mode: 'cc', name: 'P1', model: 'm', 'api-url': 'http://x' }],
+    };
+    let capturedOverride = null;
+    NS.bridge.connectionManagerRequest = {
+        sendRequest: async (pid, msgs, maxTok, custom, override) => {
+            capturedOverride = { pid, override };
+            return { content: 'profile 摘要正文' };
+        },
+    };
+    buildChat(2);
+    NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings({
+        subSummarySource: 'profile', subSummaryProfileId: 'p1',
+        subSummaryExtraParams: '{"top_p": 0.9, "custom_include_headers": "X-Title: T"}',
+    });
+    check('H: profile 已配置', NS.SubSummary.isConfigured() === true);
+    const resH = await quiet(NS.SubSummary.generateMissing());
+    check('H: 生成成功', resH && resH.done > 0, resH);
+    check('H: 附加参数透传 overridePayload', capturedOverride && capturedOverride.pid === 'p1' && capturedOverride.override && capturedOverride.override.top_p === 0.9, capturedOverride);
+    check('H: temperature 设置项优先', capturedOverride && capturedOverride.override.temperature === 0.3, capturedOverride);
+    check('H: custom_include_headers 透传', capturedOverride && capturedOverride.override.custom_include_headers === 'X-Title: T', capturedOverride);
+    // 非法 JSON → fatal，不重试直接失败
+    NS.SubSummary.eraseAll();
+    NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings({
+        subSummarySource: 'profile', subSummaryProfileId: 'p1', subSummaryExtraParams: '{bad',
+    });
+    const resH2 = await quiet(NS.SubSummary.generateMissing());
+    check('H: 非法 JSON 生成失败且不重试', resH2 && resH2.failed > 0 && resH2.done === 0, resH2);
+    delete NS.bridge.extensionSettings.connectionManager;
+    delete NS.bridge.connectionManagerRequest;
 })().catch(e => { console.error('TEST ERROR', e); process.exit(1); });

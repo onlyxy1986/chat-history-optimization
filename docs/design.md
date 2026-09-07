@@ -1,6 +1,6 @@
 # Chat History Optimization (chat-optimization-v2) — 完整流程交接文档
 
-> 版本：v2.21.0（2026-09-07）
+> 版本：v2.22.0（2026-09-07）
 > 仓库：本目录是独立 git 仓库（嵌套在 SillyTavern 安装目录内），在此提交，不要提交到父仓库。
 > 无 package.json、无构建、无 lint。功能模块为浏览器端普通脚本。
 
@@ -269,7 +269,7 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
 `isConfigured()` 两种连接方式（`subSummarySource`）：
 
 - **fetch**（默认）：`subSummaryBaseUrl` + `subSummaryApiKey` + `subSummaryModel` 三项非空。浏览器直连 OpenAI 兼容接口（需对方允许 CORS）。
-- **profile**：`subSummaryProfileId` 指向 SillyTavern Connection Manager 的 **CC 类型** profile（`mode==='cc'` 且 url/model 齐全；secret-id 可缺省，服务端回退主 API Key）。走 `ConnectionManagerRequestService.sendRequest(profileId, messages, maxTokens, {stream:false, signal:null, extractData:true, includePreset:false, includeInstruct:false, instructSettings:{}}, {temperature})`——**API Key 由服务端解密，不经过浏览器**（比 fetch 模式更安全）。
+- **profile**：`subSummaryProfileId` 指向 SillyTavern Connection Manager 的 **CC 类型** profile（`mode==='cc'` 且 url/model 齐全；secret-id 可缺省，服务端回退主 API Key）。走 `ConnectionManagerRequestService.sendRequest(profileId, messages, maxTokens, {stream:false, signal:null, extractData:true, includePreset:false, includeInstruct:false, instructSettings:{}}, {...extraParams, temperature})`——**API Key 由服务端解密，不经过浏览器**（比 fetch 模式更安全）。第 5 参数 `overridePayload` 会展开进发往 `/api/backends/chat-completions/generate` 的请求体：白名单采样字段（`top_p/top_k/seed/stop/…`）直接转发上游；CUSTOM 源另支持 `custom_include_body` / `custom_include_headers`（YAML 字符串，即预设"Custom Include Body/Headers"机制）。注意扩展传 `includePreset: false`，profile 绑定的预设参数不会自动带入——要用 preset 里的采样参数请写进 `subSummaryExtraParams`。
 
 ### 10.2 单节点生成（`runOne`）
 
@@ -316,7 +316,7 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
 ### 11.2 各 tab 要点
 
 - **基础设置**：extensionToggle / roleCardToggle / keepCount / tokenLimit。
-- **分层摘要**：开关、连接方式 select（fetch/profile 互斥禁用对应输入区）、profile 下拉（`getProfileOptions` 过滤 CC 类型）、baseUrl/apiKey/password/model/temperature/maxTokens/concurrency/timeout、合并扇入 hierFanin、两模板 textarea（徽章校验 = 含 `{{当天历程}}` / `{{子摘要列表}}`）、状态行 ×2（生成状态 / 层级统计）、按钮：补齐缺失 / 强制重建全部 / 擦除全部（口令确认弹层；只清摘要，不动开关与原文）。
+- **分层摘要**：开关、连接方式 select（fetch/profile 互斥禁用对应输入区）、profile 下拉（`getProfileOptions` 过滤 CC 类型）、baseUrl/apiKey/password/model/temperature/maxTokens/concurrency/timeout、合并扇入 hierFanin、三模板 textarea（profile 附加参数 JSON 徽章 + `{{当天历程}}` / `{{子摘要列表}}` 徽章）、状态行 ×2（生成状态 / 层级统计）、按钮：补齐缺失 / 强制重建全部 / 擦除全部（口令确认弹层；只清摘要，不动开关与原文）。配置类错误（未配置连接/模板无效/附加参数非法 JSON）记 `noRetry`，失败即停不再重试。
   - profile 下拉监听 `CONNECTION_PROFILE_LOADED/CREATED/UPDATED/DELETED` 事件刷新；已保存 id 失效时自动清空设置。
 - **模板**：historyPrompt / characterPrompt textarea + JSON 有效性徽章 + 重置按钮（回 `Settings.defaultSettings`）。
 - **角色查看**：角色下拉（活跃角色标 `<活跃角色>`）+ `buildRoleTree` 递归树渲染。
@@ -351,6 +351,7 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
 | `subSummarySource` | 'fetch' | 'fetch' / 'profile' |
 | `subSummaryBaseUrl` / `ApiKey` / `Model` | '' | fetch 模式三项 |
 | `subSummaryProfileId` | '' | profile 模式 |
+| `subSummaryExtraParams` | '' | profile 附加参数（JSON 对象，经 overridePayload 发往服务端；temperature 设置项优先；fetch 模式忽略） |
 | `subSummaryTemperature` | 0.3 | 非法值回退默认 |
 | `subSummaryMaxTokens` | 512 | 非法值回退默认 |
 | `subSummaryConcurrency` | 4 | 批量生成并行数（1 为串行，上限 `SUBSUMMARY_CONCURRENCY_MAX=8`；限流时调小） |
@@ -445,6 +446,7 @@ node test/smoke-hybrid-recall.cjs
 
 | 版本 | 内容 |
 |---|---|
+| 2.22.0 | **profile 附加参数**：`subSummaryExtraParams`（JSON 对象）经 `sendRequest` 第 5 参数 `overridePayload` 发往 ST 服务端，白名单采样字段直达上游，CUSTOM 源另支持 `custom_include_body` / `custom_include_headers`（YAML）；temperature 设置项优先；配置类错误（未配置/模板无效/非法 JSON）`noRetry` 不重试；冒烟测试新增 H 场景（透传 + 覆盖优先级 + 非法 JSON） |
 | 2.21.0 | **多层级摘要替代 tag + 稀疏远程记忆**：删除 `retrieval/embedding/embed-worker/embedstore/recallcache + lib/`（模型资产）与整套打分（`scoreFarEntries/ModeA/BM25`）；`subsummary.js` 重写为 L1 天摘要 + L(k≥2) 按 `hierFanin` 合并（纯文本，`chat_metadata` 持久化，childHash 校验，逐层收集执行，发送前永不等 LLM）；`engine.js` 改分层折叠装配（预算自然决定、从最旧侧折叠、天原子、精确丢弃保证硬上限）+ 摘要伪条目统一渲染；`ragRatio` 删除；UI 改按天分组 + 上层卡片（删语义打分 tab）；冒烟测试重写为 8 确定性场景，全过 |
 | 2.19.0 | **Mode A 改流式配额选中**：`FRAG_WEIGHT_USER/WIN_BASE/WIN_DECAY/WIN_MIN` 加权 max 删除，改 `MODEA_USER_BUDGET_RATIO(0.4)` + `MODEA_WINDOW_BUDGET_RATIO(0.2)`（每窗口片段独立配额）：Stage U 对全池按 user fragScore 降序选满 userQuota 并移出池，Stage W 按窗口最新→最旧逐片段只对剩余池选满 winQuota，总量满 ragBudget 即停（后续窗口不编码不打分）；单分公式/门槛/三级缓存沿用，选中来源唯一（`bestFrag` = 选中阶段）；精确裁剪改来源优先级（最旧window→…→最新window→最后user，同源内选中分低先剔）；空查询回退到最近非空用户消息；冒烟测试新增 J 场景（窗口通道从剩余池拾取 + 来源唯一）与 K 场景（空查询回退），全过 |
 | 2.18.0 | **RAG 打分改纯语义 + 命中门槛，新增「语义打分」tab**：Mode B `scoreFarEntries` 与 Mode A `scoreFarEntriesModeA`（window 片段）的 `score = 0.25·S_actor + 0.15·S_location + 0.60·S_semantic` 改为门槛公式——`S_actor=0` 且 `S_location=0` → 0 分（未命中，parts 仍保留明细），命中 → 纯 `S_semantic` 排序；Mode A `user` 片段无门槛（恒为 `S_semantic`）；`SUMMARY_W_ACTOR/LOCATION/SEMANTIC` 删除（S_actor/S_location 仅作门槛信号不入总分；故事历程 RAG 徽章同步不再显示人/地算分，只保留命中比例）；新增 `Engine.scoreJourneySemantics(queryText)`（user 信息流程，全部楼层条目按 JSON 去重，无门槛，返回 floor/index/天数/时间段/地点/历程/semantic + event{text,score} + recall[{text,score}] 组件得分明细）与「语义打分」tab（输入信息→全部历程条目 S_semantic 故事卡片展示，按得分降序 + 事件/各触发实际语义得分明细，批量生成完成后自动重算）；冒烟测试假 Embedder 改 bigram 词袋向量（余弦与文本重叠正相关），场景 A 新增门槛断言、新增 I 场景，10 场景全过 |

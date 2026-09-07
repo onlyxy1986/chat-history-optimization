@@ -60,6 +60,7 @@
         subSummaryApiKey: '', // API Key
         subSummaryModel: '', // 模型名
         subSummaryProfileId: '', // 选中的 SillyTavern connection profile id（source 为 profile 时生效）
+        subSummaryExtraParams: '', // profile 模式的附加参数（JSON 对象，经 overridePayload 发往 ST 服务端；fetch 模式忽略）
         subSummaryTemperature: 0.3,
         subSummaryMaxTokens: 512,
         subSummaryConcurrency: 4, // 分层摘要批量生成的并行数（1 = 串行；上限见 Constants.SUBSUMMARY_CONCURRENCY_MAX）

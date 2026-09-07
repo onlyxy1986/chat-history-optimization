@@ -148,6 +148,44 @@
         return typeof text === 'string' && text.trim() !== '' && text.indexOf(MERGE_PLACEHOLDER) !== -1;
     }
 
+    function fatal(message) {
+        const err = new Error(message);
+        err.noRetry = true;
+        return err;
+    }
+
+    // profile 附加参数：设置项 subSummaryExtraParams，JSON 对象（空视为无）。
+    // 经 sendRequest 第 5 参数 overridePayload 发往 ST 服务端：
+    // 白名单采样字段（top_p/top_k/seed/stop/…）直接转发上游；
+    // CUSTOM 源另支持 custom_include_body / custom_include_headers（YAML 字符串，
+    // 即预设里"Custom Include Body/Headers"机制，见 ST 后端 chat-completions.js）。
+    // temperature 始终以温度设置项为准（见 callLlmViaProfile）。
+    // 非法时抛 fatal 错误（配置问题，重试无意义）。
+    function parseExtraParams() {
+        const raw = Settings.get('subSummaryExtraParams');
+        if (typeof raw !== 'string' || raw.trim() === '') return {};
+        let obj;
+        try {
+            obj = JSON.parse(raw);
+        } catch (e) {
+            throw fatal('profile 附加参数不是有效 JSON');
+        }
+        if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+            throw fatal('profile 附加参数必须是 JSON 对象');
+        }
+        return obj;
+    }
+
+    function validateExtraParams(text) {
+        if (typeof text !== 'string' || text.trim() === '') return true;
+        try {
+            const obj = JSON.parse(text);
+            return !!obj && typeof obj === 'object' && !Array.isArray(obj);
+        } catch (e) {
+            return false;
+        }
+    }
+
     function getTemperature() {
         const value = Settings.get('subSummaryTemperature');
         return (typeof value === 'number' && !isNaN(value)) ? value : Settings.defaultSettings.subSummaryTemperature;
@@ -478,6 +516,7 @@
     async function callLlmViaProfile(content, profileId) {
         const service = NS.bridge.connectionManagerRequest;
         if (!service || typeof service.sendRequest !== 'function') throw new Error('Connection Manager 服务不可用');
+        const extra = parseExtraParams();
         const timeoutMs = getRequestTimeoutMs();
         const controller = (typeof AbortController !== 'undefined') ? new AbortController() : null;
         let timer = null;
@@ -495,7 +534,8 @@
                     [{ role: 'user', content }],
                     getMaxTokens(),
                     { stream: false, signal: controller ? controller.signal : null, extractData: true, includePreset: false, includeInstruct: false, instructSettings: {} },
-                    { temperature: getTemperature() },
+                    // temperature 设置项优先于附加参数里的同名字段（保持现有行为）
+                    Object.assign({}, extra, { temperature: getTemperature() }),
                 ),
                 timeoutP,
             ]);
@@ -638,7 +678,7 @@
     // 单节点生成。返回 'ok'（已生成）或 'skip'（已有效且非 force）。失败时抛错。
     async function runOne(target, force) {
         if (!isConfigured()) {
-            throw new Error('请先在"分层摘要"选项卡选择 connection profile 或配置直连的 baseUrl、apiKey 和模型');
+            throw fatal('请先在"分层摘要"选项卡选择 connection profile 或配置直连的 baseUrl、apiKey 和模型');
         }
         if (target.kind === 'L1') {
             const groups = getDayGroups();
@@ -654,7 +694,7 @@
             }
             const template = Settings.get('hierDayPrompt');
             if (!validateDayTemplate(template)) {
-                throw new Error(`天摘要模板无效（需非空且包含 ${DAY_PLACEHOLDER}）`);
+                throw fatal(`天摘要模板无效（需非空且包含 ${DAY_PLACEHOLDER}）`);
             }
             // 占位符替换为当天历程文本；split/join 避免 $ 模式被 replace 解释
             const content = String(template).split(DAY_PLACEHOLDER).join(buildDayInput(day));
@@ -687,7 +727,7 @@
         }
         const template = Settings.get('hierMergePrompt');
         if (!validateMergeTemplate(template)) {
-            throw new Error(`合并摘要模板无效（需非空且包含 ${MERGE_PLACEHOLDER}）`);
+            throw fatal(`合并摘要模板无效（需非空且包含 ${MERGE_PLACEHOLDER}）`);
         }
         const labeled = childTexts.map((t, i) => `【子摘要${i + 1}】\n${t}`).join('\n\n');
         const content = String(template).split(MERGE_PLACEHOLDER).join(labeled);
@@ -707,6 +747,7 @@
                 return await runOne(target, force);
             } catch (e) {
                 lastErr = e;
+                if (e && e.noRetry) break;
                 if (attempt < Constants.MAX_RETRIES) {
                     console.warn(`[Chat History Optimization] 分层摘要生成失败，${Constants.RETRY_DELAY_MS}ms 后重试（第 ${attempt + 1}/${Constants.MAX_RETRIES} 次）:`, e);
                     await new Promise(r => setTimeout(r, Constants.RETRY_DELAY_MS));
@@ -979,6 +1020,8 @@
         getFanin,
         validateDayTemplate,
         validateMergeTemplate,
+        validateExtraParams,
+        parseExtraParams,
         getDayGroups,
         getCoverage,
         getMissingCount,

@@ -740,6 +740,9 @@
         if (!NS.SubSummary) return;
         updateHierBadge(scope, 'hierDayPrompt', NS.SubSummary.validateDayTemplate);
         updateHierBadge(scope, 'hierMergePrompt', NS.SubSummary.validateMergeTemplate);
+        if (NS.SubSummary.validateExtraParams) {
+            updateHierBadge(scope, 'subSummaryExtraParams', NS.SubSummary.validateExtraParams);
+        }
     }
 
     function updateSubSummaryStatus(scope) {
@@ -827,6 +830,7 @@
         section.appendChild(createNumberRow('并行数', '（批量生成同时进行的请求数，1 为串行；API 限流时调小）', 'subSummaryConcurrency', { min: 1, max: 8, step: 1 }));
         section.appendChild(createNumberRow('超时（秒）', '（单次请求超时，超时按失败重试；本地慢模型调大）', 'subSummaryTimeoutSec', { min: 10, max: 600, step: 10 }));
         section.appendChild(createNumberRow('合并扇入', '（连续几个同层摘要合并成一条父摘要）', 'hierFanin', { min: 2, max: 10, step: 1 }));
+        section.appendChild(createTemplateBlock('profile 附加参数（JSON 对象，仅 profile 模式生效；如 {"top_p": 0.9}，CUSTOM 源另支持 custom_include_body / custom_include_headers）', 'subSummaryExtraParams', 3, 0));
         section.appendChild(createTemplateBlock('天摘要模板（{{当天历程}} 为当天全部历程占位符，长度由模板措辞控制）', 'hierDayPrompt', 8, 10));
         section.appendChild(createTemplateBlock('合并摘要模板（{{子摘要列表}} 为连续子摘要占位符，L2 及以上复用）', 'hierMergePrompt', 8, 10));
 
@@ -867,6 +871,7 @@
         section.querySelector('[data-coo-field="subSummaryConcurrency"]').value = settings.subSummaryConcurrency;
         section.querySelector('[data-coo-field="subSummaryTimeoutSec"]').value = settings.subSummaryTimeoutSec;
         section.querySelector('[data-coo-field="hierFanin"]').value = settings.hierFanin;
+        section.querySelector('[data-coo-field="subSummaryExtraParams"]').value = settings.subSummaryExtraParams || '';
         section.querySelector('[data-coo-field="hierDayPrompt"]').value = settings.hierDayPrompt;
         section.querySelector('[data-coo-field="hierMergePrompt"]').value = settings.hierMergePrompt;
         applySubSummarySourceState(section);
@@ -1139,6 +1144,10 @@
                     Settings.set('hierFanin', isNaN(value) ? fallback : Math.min(Math.max(min, value), max));
                     break;
                 }
+                case 'subSummaryExtraParams':
+                    Settings.set('subSummaryExtraParams', event.target.value);
+                    updateSubSummaryBadge(workspace);
+                    break;
                 case 'hierDayPrompt':
                     Settings.set('hierDayPrompt', event.target.value);
                     updateSubSummaryBadge(workspace);
@@ -1242,7 +1251,7 @@
             if (!textarea) return;
             textarea.value = Settings.defaultSettings[field];
             Settings.set(field, textarea.value);
-            if (field === 'hierDayPrompt' || field === 'hierMergePrompt') {
+            if (field === 'hierDayPrompt' || field === 'hierMergePrompt' || field === 'subSummaryExtraParams') {
                 updateSubSummaryBadge(workspace);
             } else {
                 updateValidityBadge(workspace, field);

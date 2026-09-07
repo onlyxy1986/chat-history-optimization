@@ -13,7 +13,7 @@ import { ConnectionManagerRequestService } from '../../../extensions/shared.js';
     'use strict';
 
     const NAMESPACE = 'ChatOptimizationV2';
-    const VERSION = '2.21.0';
+    const VERSION = '2.22.0';
     const baseUrl = new URL('./', import.meta.url).href;
 
     const MODULES = [
