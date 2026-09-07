@@ -1,28 +1,36 @@
 // ============================================================================
-// chat-optimization-v2 二级摘要生成器。
+// chat-optimization-v2 分层摘要生成器。
 // 纯逻辑：不访问 DOM。UI 更新走状态事件总线（onStatus/getStatus）。
-// 摘要持久化在楼层消息 item.extra["chat-optimization-v2"]，
-// 以楼层级 FNV-1a 哈希校验 故事历程 数组是否变化，失效即清空。
+//
+// 层级：L0 = 历程条目原文（事实源，不存）；
+//   L1 = 天摘要（一 key 一条，key = 天数数字或 'unknown'），
+//   L(k≥2) = 连续 fanin 个 L(k-1) 节点合并成的父摘要，层数按需生长。
+// 摘要持久化在 chat_metadata["chat-optimization-v2-hier"]（per-chat），
+// 父节点以 childHash（子节点文本串哈希）校验，子变化即标脏，不清整树。
+// 发送前永不等 LLM：装配层只读已有摘要，缺失父节点用子节点原文兜底。
 // ============================================================================
 (function () {
     'use strict';
 
     const NS = window.ChatOptimizationV2 = window.ChatOptimizationV2 || {};
-    const { saveChatDebounced, eventSource, eventTypes } = NS.bridge;
+    const { eventSource, eventTypes } = NS.bridge;
     const Settings = NS.Settings;
     const Engine = NS.Engine;
 
     const Constants = NS.Constants;
-    const EXTRA_KEY = 'chat-optimization-v2';
-    const PLACEHOLDER = '{{故事历程}}';
+    const HIER_METADATA_KEY = 'chat-optimization-v2-hier';
+    const UNKNOWN_KEY = 'unknown';
+    const DAY_PLACEHOLDER = '{{当天历程}}';
+    const MERGE_PLACEHOLDER = '{{子摘要列表}}';
 
-    // lastDone：最近一次成功生成/擦除影响的 {floor, index}，供 UI 做单条目增量刷新
+    // lastDone：最近一次成功生成影响的 {dayKey, level, key}，供 UI 做增量刷新
     let lastStatus = { running: false, current: '', done: 0, failed: 0, error: null, message: null, lastDone: null };
     const statusListeners = new Set();
     let running = false;
     let initialized = false;
-    // 所有批次（自动触发 / 发送前补生成）经此链串行，批次之间不并行；
-    // 批次内部多条目经 worker 池并行（并发数见 getConcurrency）
+    // 所有批次（自动触发 / 手动）经此链串行，批次之间不并行；
+    // 批次内部同层级多节点经 worker 池并行（并发数见 getConcurrency），
+    // 层与层之间按 L1→L2→… 顺序执行（父输入依赖子文本）。
     let batchChain = Promise.resolve();
 
     // ------------------------------------------------------------------
@@ -38,18 +46,17 @@
         return hash.toString(16).padStart(8, '0');
     }
 
-    // storyHash 缓存：楼层解析缓存命中时 故事历程 数组引用不变，
-    // 直接复用哈希，避免逐条目重复 JSON.stringify 全数组 + FNV 哈希
-    // （故事历程 tab 每次重绘都逐条目取摘要，无此缓存时成本随条目数放大）
-    const storyHashCache = new Map();
+    function parseDayNumber(dayStr) {
+        if (typeof dayStr !== 'string') return null;
+        const m = dayStr.match(/第\s*(\d+)\s*天/);
+        return m ? parseInt(m[1], 10) : null;
+    }
 
-    function getStoryHash(item, journey) {
-        let slot = storyHashCache.get(item);
-        if (slot && slot.journey === journey) return slot.hash;
-        const hash = fnv1a32(JSON.stringify(journey));
-        if (storyHashCache.size >= Constants.STORY_PARSE_CACHE_MAX) storyHashCache.clear();
-        storyHashCache.set(item, { journey, hash });
-        return hash;
+    function dayLabel(dayKey) {
+        if (dayKey === UNKNOWN_KEY) {
+            return (Constants.HIER_UNKNOWN_DAY_LABEL || '未知天');
+        }
+        return `第${dayKey}天`;
     }
 
     // ------------------------------------------------------------------
@@ -67,7 +74,7 @@
             try {
                 listener(snapshot);
             } catch (e) {
-                console.error('[Chat History Optimization] 二级摘要状态监听器错误', e);
+                console.error('[Chat History Optimization] 分层摘要状态监听器错误', e);
             }
         }
     }
@@ -90,7 +97,7 @@
         return manager.profiles;
     }
 
-    // 可用于二级摘要的 connection profile（仅 CC 类型且 url/model 齐全；
+    // 可用于分层摘要的 connection profile（仅 CC 类型且 url/model 齐全；
     // secret-id 可缺省，缺省时服务端回退到该 API 类型的主 API Key）
     function getProfileOptions() {
         return getConnectionManagerProfiles()
@@ -113,56 +120,32 @@
             && Boolean(String(Settings.get('subSummaryModel') || '').trim());
     }
 
-    function validateTemplate(text) {
-        return typeof text === 'string' && text.trim() !== '' && text.indexOf(PLACEHOLDER) !== -1;
+    function getFanin() {
+        const min = (typeof Constants.HIER_FANIN_MIN === 'number' && Constants.HIER_FANIN_MIN >= 2)
+            ? Math.floor(Constants.HIER_FANIN_MIN) : 2;
+        const max = (typeof Constants.HIER_FANIN_MAX === 'number' && Constants.HIER_FANIN_MAX >= min)
+            ? Math.floor(Constants.HIER_FANIN_MAX) : 10;
+        const fallback = (typeof Constants.HIER_FANIN_DEFAULT === 'number')
+            ? Math.floor(Constants.HIER_FANIN_DEFAULT) : 5;
+        const raw = Settings.get('hierFanin');
+        const n = (typeof raw === 'number' && !isNaN(raw)) ? Math.floor(raw) : fallback;
+        if (n < min) return min;
+        if (n > max) return max;
+        return n;
     }
 
-    // ------------------------------------------------------------------
-    // 召回特化摘要 schema：{actor:[], location:[], event:'', recall_when:[]}
-    // ------------------------------------------------------------------
-
-    function toStringArray(value) {
-        let arr = value;
-        if (typeof value === 'string') arr = [value];
-        if (!Array.isArray(arr)) return [];
-        const seen = new Set();
-        const out = [];
-        for (const v of arr) {
-            if (typeof v !== 'string') continue;
-            const t = v.trim();
-            if (t !== '' && !seen.has(t)) {
-                seen.add(t);
-                out.push(t);
-            }
-        }
-        return out;
+    function getMaxLevels() {
+        const n = (typeof Constants.HIER_MAX_LEVELS === 'number' && Constants.HIER_MAX_LEVELS >= 2)
+            ? Math.floor(Constants.HIER_MAX_LEVELS) : 4;
+        return n;
     }
 
-    // 将 LLM 返回对象规范化为召回特化结构；所有字段均为空时返回 null（视为生成失败）
-    function normalizeSummary(obj) {
-        if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
-        const event = typeof obj.event === 'string' ? obj.event.trim() : '';
-        const actor = toStringArray(obj.actor);
-        const location = toStringArray(obj.location);
-        const recall_when = toStringArray(obj.recall_when);
-        if (event === '' && actor.length === 0 && location.length === 0 && recall_when.length === 0) return null;
-        return { actor, location, event, recall_when };
+    function validateDayTemplate(text) {
+        return typeof text === 'string' && text.trim() !== '' && text.indexOf(DAY_PLACEHOLDER) !== -1;
     }
 
-    // 已存摘要是否含可用召回字段（旧 schema 摘要返回 false，召回时回退 BM25）
-    function hasRecallFields(s) {
-        if (!s || typeof s !== 'object') return false;
-        return (typeof s.event === 'string' && s.event.trim() !== '')
-            || (Array.isArray(s.actor) && s.actor.length > 0)
-            || (Array.isArray(s.location) && s.location.length > 0)
-            || (Array.isArray(s.recall_when) && s.recall_when.length > 0);
-    }
-
-    function normalizeBaseUrl(baseUrl) {
-        let url = String(baseUrl || '').trim().replace(/\/+$/, '');
-        if (!url) return null;
-        if (!/\/chat\/completions$/.test(url)) url += '/chat/completions';
-        return url;
+    function validateMergeTemplate(text) {
+        return typeof text === 'string' && text.trim() !== '' && text.indexOf(MERGE_PLACEHOLDER) !== -1;
     }
 
     function getTemperature() {
@@ -212,86 +195,280 @@
     }
 
     // ------------------------------------------------------------------
-    // extra 读写（含楼层级哈希失效清空）
+    // L0 读取：全局去重历程条目 → 按天分组（顺序：天数升序，未知天最后）
     // ------------------------------------------------------------------
 
-    function getFloorItem(floor) {
-        const chat = NS.bridge.getCurrentChat ? NS.bridge.getCurrentChat() : null;
-        if (!chat || !Array.isArray(chat)) return null;
-        const item = chat[floor];
-        if (!item) return null;
-        if (!((("is_user" in item && !item.is_user) || (item.role && item.role === 'assistant')))) return null;
-        return item;
-    }
-
-    function getFloorJourney(floor) {
-        const item = getFloorItem(floor);
-        if (!item) return null;
-        const historyObj = Engine.getFloorStoryBlock(item);
-        if (!historyObj || !Array.isArray(historyObj.故事历程)) return null;
-        return { item, journey: historyObj.故事历程 };
-    }
-
-    // 哈希不匹配（或结构非法）时清空该楼层 extra 字段并返回 null
-    function readFloorExtra(item, storyHash) {
-        const extra = item.extra && typeof item.extra === 'object' ? item.extra[EXTRA_KEY] : null;
-        const valid = !!(extra && extra.storyHash === storyHash && Array.isArray(extra.summaries));
-        if (!valid) {
-            if (item.extra) delete item.extra[EXTRA_KEY];
-            return null;
+    function getDayGroups() {
+        const EngineRef = NS.Engine;
+        if (!EngineRef || typeof EngineRef.getStoryProgressRange !== 'function') return [];
+        const { entries } = EngineRef.getStoryProgressRange(null, null);
+        const groups = new Map(); // dayKey -> {dayKey, dayNum, entries: []}
+        for (const e of entries) {
+            const dayNum = parseDayNumber(e.天数);
+            const dayKey = dayNum !== null ? String(dayNum) : UNKNOWN_KEY;
+            if (!groups.has(dayKey)) {
+                groups.set(dayKey, { dayKey, dayNum, entries: [] });
+            }
+            groups.get(dayKey).entries.push(e);
         }
-        return extra;
+        const out = [...groups.values()];
+        out.sort((a, b) => {
+            if (a.dayNum === null && b.dayNum === null) return 0;
+            if (a.dayNum === null) return 1;
+            if (b.dayNum === null) return -1;
+            return a.dayNum - b.dayNum;
+        });
+        return out;
     }
 
-    function getFloorSummaries(floor) {
-        const floorData = getFloorJourney(floor);
-        if (!floorData) return { valid: false, summaries: [], storyHash: null };
-        const storyHash = getStoryHash(floorData.item, floorData.journey);
-        const extra = readFloorExtra(floorData.item, storyHash);
-        return {
-            valid: !!extra,
-            summaries: extra ? extra.summaries : [],
-            storyHash,
-        };
+    function dayChildHash(day) {
+        return fnv1a32(JSON.stringify(day.entries));
     }
 
-    function getValidSummary(floor, entryIndex) {
-        const { valid, summaries } = getFloorSummaries(floor);
-        if (!valid) return null;
-        const entry = summaries[entryIndex];
-        if (entry && typeof entry === 'object' && entry.s !== undefined && entry.s !== null) {
-            return { s: entry.s, t: entry.t || 0 };
+    function dayLocations(day) {
+        const seen = new Set();
+        const out = [];
+        for (const e of day.entries) {
+            const loc = String(e.地点 || '').trim();
+            if (loc && !seen.has(loc)) {
+                seen.add(loc);
+                out.push(loc);
+            }
         }
-        return null;
+        return out;
+    }
+
+    // ------------------------------------------------------------------
+    // store 读写（chat_metadata per-chat）
+    // ------------------------------------------------------------------
+
+    function getMetadata() {
+        const meta = NS.bridge.getChatMetadata ? NS.bridge.getChatMetadata() : null;
+        if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return null;
+        return meta;
+    }
+
+    function freshStore() {
+        return { version: 1, fanin: getFanin(), l1: {}, upper: {} };
+    }
+
+    function loadStore() {
+        const meta = getMetadata();
+        if (!meta) return null;
+        const raw = meta[HIER_METADATA_KEY];
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return freshStore();
+        if (!raw.l1 || typeof raw.l1 !== 'object' || Array.isArray(raw.l1)) return freshStore();
+        if (!raw.upper || typeof raw.upper !== 'object' || Array.isArray(raw.upper)) return freshStore();
+        return raw;
+    }
+
+    function saveStore(store) {
+        const meta = getMetadata();
+        if (!meta) return false;
+        store.fanin = getFanin();
+        meta[HIER_METADATA_KEY] = store;
+        if (typeof NS.bridge.saveMetadataDebounced === 'function') NS.bridge.saveMetadataDebounced();
+        return true;
+    }
+
+    // ------------------------------------------------------------------
+    // 上层树规划：按天序把同层节点按 fanin 从最旧侧切块
+    // ------------------------------------------------------------------
+
+    function upperKey(level, startKey, endKey) {
+        return `L${level}:${startKey}~${endKey}`;
+    }
+
+    // 按当前天序 + fanin 规划全树结构（不含文本）：
+    // 返回 [{level, key, startKey, endKey, startLabel, endLabel, childKeys: [L1 dayKey | 下层 upperKey]}]
+    function planUpperTree(dayKeys) {
+        const fanin = getFanin();
+        const maxLevels = getMaxLevels();
+        const nodes = [];
+        if (dayKeys.length <= 1) return nodes;
+        let prevKeys = dayKeys.slice();
+        for (let level = 2; level <= maxLevels; level++) {
+            if (prevKeys.length <= 1) break;
+            const curKeys = [];
+            for (let i = 0; i < prevKeys.length; i += fanin) {
+                const chunk = prevKeys.slice(i, i + fanin);
+                if (chunk.length <= 1) {
+                    // 落单节点直接晋升（不生成摘要，沿用子节点）
+                    curKeys.push(chunk[0]);
+                    continue;
+                }
+                const first = chunk[0];
+                const last = chunk[chunk.length - 1];
+                const startKey = first.indexOf('~') !== -1 || first[0] === 'L'
+                    ? first.split(':')[1].split('~')[0] : first;
+                const endKey = last.indexOf('~') !== -1 || last[0] === 'L'
+                    ? last.split(':')[1].split('~')[1] : last;
+                const key = upperKey(level, startKey, endKey);
+                nodes.push({
+                    level,
+                    key,
+                    startKey,
+                    endKey,
+                    startLabel: dayLabel(startKey),
+                    endLabel: dayLabel(endKey),
+                    childKeys: chunk.slice(),
+                });
+                curKeys.push(key);
+            }
+            if (curKeys.length === prevKeys.length) break;
+            prevKeys = curKeys;
+        }
+        return nodes;
+    }
+
+    function childrenTexts(store, validL1, validUpper, node) {
+        const texts = [];
+        for (const ck of node.childKeys) {
+            if (ck[0] === 'L') {
+                const u = validUpper.get(ck);
+                if (!u) return null;
+                texts.push(u.text);
+            } else {
+                const d = validL1.get(ck);
+                if (!d) return null;
+                texts.push(d.text);
+            }
+        }
+        return texts;
+    }
+
+    // ------------------------------------------------------------------
+    // 只读快照：校验后的 days + upper（装配层与 UI 共用，不触发 LLM）
+    // ------------------------------------------------------------------
+
+    function getCoverage() {
+        const groups = getDayGroups();
+        const store = loadStore();
+        const dayKeys = groups.map((g) => g.dayKey);
+        const days = [];
+        const validL1 = new Map(); // dayKey -> {text, t}
+        if (store) {
+            for (const g of groups) {
+                const slot = store.l1[g.dayKey];
+                const hash = dayChildHash(g);
+                if (slot && typeof slot === 'object' && typeof slot.text === 'string' && slot.text.trim() !== '' && slot.h === hash) {
+                    validL1.set(g.dayKey, { text: slot.text, t: slot.t || 0 });
+                    days.push({
+                        dayKey: g.dayKey,
+                        label: dayLabel(g.dayKey),
+                        count: g.entries.length,
+                        floors: [...new Set(g.entries.map((e) => e.floor))],
+                        locations: dayLocations(g),
+                        text: slot.text,
+                        t: slot.t || 0,
+                    });
+                } else {
+                    days.push({
+                        dayKey: g.dayKey,
+                        label: dayLabel(g.dayKey),
+                        count: g.entries.length,
+                        floors: [...new Set(g.entries.map((e) => e.floor))],
+                        locations: dayLocations(g),
+                        text: null,
+                        t: 0,
+                    });
+                }
+            }
+        } else {
+            for (const g of groups) {
+                days.push({
+                    dayKey: g.dayKey,
+                    label: dayLabel(g.dayKey),
+                    count: g.entries.length,
+                    floors: [...new Set(g.entries.map((e) => e.floor))],
+                    locations: dayLocations(g),
+                    text: null,
+                    t: 0,
+                });
+            }
+        }
+
+        // 自底向上校验上层节点
+        const plan = planUpperTree(dayKeys);
+        const validUpper = new Map(); // key -> {text, t}
+        const upper = [];
+        if (store) {
+            for (const node of plan) {
+                const texts = childrenTexts(store, validL1, validUpper, node);
+                const slot = store.upper[node.key];
+                if (texts && slot && typeof slot === 'object'
+                    && typeof slot.text === 'string' && slot.text.trim() !== ''
+                    && slot.h === fnv1a32(texts.join('\n---\n'))) {
+                    validUpper.set(node.key, { text: slot.text, t: slot.t || 0 });
+                    upper.push({
+                        level: node.level,
+                        key: node.key,
+                        startKey: node.startKey,
+                        endKey: node.endKey,
+                        startLabel: node.startLabel,
+                        endLabel: node.endLabel,
+                        childKeys: node.childKeys.slice(),
+                        text: slot.text,
+                        t: slot.t || 0,
+                    });
+                } else {
+                    upper.push({
+                        level: node.level,
+                        key: node.key,
+                        startKey: node.startKey,
+                        endKey: node.endKey,
+                        startLabel: node.startLabel,
+                        endLabel: node.endLabel,
+                        childKeys: node.childKeys.slice(),
+                        text: null,
+                        t: 0,
+                    });
+                }
+            }
+        } else {
+            for (const node of plan) {
+                upper.push({
+                    level: node.level,
+                    key: node.key,
+                    startKey: node.startKey,
+                    endKey: node.endKey,
+                    startLabel: node.startLabel,
+                    endLabel: node.endLabel,
+                    childKeys: node.childKeys.slice(),
+                    text: null,
+                    t: 0,
+                });
+            }
+        }
+        return { fanin: getFanin(), days, upper };
+    }
+
+    function getMissingCount() {
+        const cov = getCoverage();
+        let n = 0;
+        for (const d of cov.days) if (!d.text) n++;
+        for (const u of cov.upper) {
+            // 上层缺失只计子齐备的（子不齐时生成也无意义）
+            if (!u.text) n++;
+        }
+        return n;
     }
 
     // ------------------------------------------------------------------
     // LLM 调用
     // ------------------------------------------------------------------
 
-    // 从 LLM 原始返回文本中提取第一个 {...} JSON 对象（兼容 markdown code fence 包裹）
-    function extractJson(raw) {
+    // 从 LLM 原始返回文本中提取正文（兼容 markdown code fence 包裹）
+    function extractText(raw) {
         if (typeof raw !== 'string' || raw.trim() === '') {
-            console.error('[Chat History Optimization] 二级摘要 API 响应结构异常:', raw);
+            console.error('[Chat History Optimization] 分层摘要 API 响应结构异常:', raw);
             throw new Error('API 响应结构异常');
         }
-        const match = raw.match(/\{[\s\S]*\}/);
-        if (!match) {
-            console.error('[Chat History Optimization] 二级摘要 API 响应中未找到 JSON 对象:', raw);
-            throw new Error('API 响应中未找到 JSON 对象');
-        }
-        let obj;
-        try {
-            obj = JSON.parse(match[0]);
-        } catch (e) {
-            console.error('[Chat History Optimization] 二级摘要 API 响应 JSON 解析失败:', match[0], e);
-            throw new Error('API 响应 JSON 解析失败');
-        }
-        if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
-            console.error('[Chat History Optimization] 二级摘要 API 响应 JSON 不是对象:', raw);
-            throw new Error('API 响应 JSON 不是对象');
-        }
-        return obj;
+        let text = raw.trim();
+        const fence = text.match(/```(?:[a-zA-Z]*\n)?([\s\S]*?)```/);
+        if (fence) text = fence[1].trim();
+        if (text === '') throw new Error('API 响应内容为空');
+        return text;
     }
 
     // 通过 SillyTavern connection profile 调用（API Key 由服务端按 secret_id 解密，不经过浏览器）。
@@ -324,14 +501,14 @@
             ]);
         } catch (e) {
             if (e && typeof e.message === 'string' && e.message.indexOf('请求超时') !== -1) {
-                console.error('[Chat History Optimization] 二级摘要 connection profile 请求超时:', e);
+                console.error('[Chat History Optimization] 分层摘要 connection profile 请求超时:', e);
                 throw e;
             }
             if (isAbortError(e) || (controller && controller.signal.aborted)) {
-                console.error('[Chat History Optimization] 二级摘要 connection profile 请求超时（abort）:', e);
+                console.error('[Chat History Optimization] 分层摘要 connection profile 请求超时（abort）:', e);
                 throw new Error(timeoutMessage('Connection profile ', timeoutMs));
             }
-            console.error('[Chat History Optimization] 二级摘要 connection profile 请求失败:', e);
+            console.error('[Chat History Optimization] 分层摘要 connection profile 请求失败:', e);
             const cause = e && e.cause ? e.cause : null;
             throw new Error(`Connection profile 请求失败${cause && cause.message ? `：${cause.message}` : ''}`);
         } finally {
@@ -342,9 +519,9 @@
             ? (typeof result.content === 'string' ? result.content : null)
             : (typeof result === 'string' ? result : null);
         if (raw === null) {
-            console.error('[Chat History Optimization] 二级摘要 profile 响应中未提取到 content，当前 LLM 完整回复:', result);
+            console.error('[Chat History Optimization] 分层摘要 profile 响应中未提取到 content，当前 LLM 完整回复:', result);
         }
-        return extractJson(raw);
+        return extractText(raw);
     }
 
     async function callLlm(content) {
@@ -354,7 +531,9 @@
             if (!profileId) throw new Error('未选择 connection profile');
             return callLlmViaProfile(content, profileId);
         }
-        const url = normalizeBaseUrl(Settings.get('subSummaryBaseUrl'));
+        const baseUrl = String(Settings.get('subSummaryBaseUrl') || '').trim().replace(/\/+$/, '');
+        let url = baseUrl || null;
+        if (url && !/\/chat\/completions$/.test(url)) url += '/chat/completions';
         if (!url) throw new Error('API baseUrl 未配置');
         const apiKey = String(Settings.get('subSummaryApiKey') || '').trim();
         const model = String(Settings.get('subSummaryModel') || '').trim();
@@ -400,13 +579,13 @@
                 if (timedOut || isAbortError(e) || (controller && controller.signal.aborted)) {
                     throw new Error(timeoutMessage('API ', timeoutMs));
                 }
-                console.error('[Chat History Optimization] 二级摘要 API 请求失败（网络/CORS 错误）:', e);
+                console.error('[Chat History Optimization] 分层摘要 API 请求失败（网络/CORS 错误）:', e);
                 throw new Error('API 请求失败（网络/CORS 错误）');
             }
 
             if (!response.ok) {
                 const text = await response.text().catch(() => '');
-                console.error(`[Chat History Optimization] 二级摘要 API 返回 ${response.status}:`, text);
+                console.error(`[Chat History Optimization] 分层摘要 API 返回 ${response.status}:`, text);
                 throw new Error(`API 返回 ${response.status}`);
             }
 
@@ -417,7 +596,7 @@
                 if (timedOut || isAbortError(e) || (controller && controller.signal.aborted)) {
                     throw new Error(timeoutMessage('API ', timeoutMs));
                 }
-                console.error('[Chat History Optimization] 二级摘要 API 响应不是 JSON:', e);
+                console.error('[Chat History Optimization] 分层摘要 API 响应不是 JSON:', e);
                 throw new Error('API 响应不是 JSON');
             }
 
@@ -425,16 +604,16 @@
                 ? data.choices[0].message.content
                 : null;
             if (raw === null) {
-                console.error('[Chat History Optimization] 二级摘要 API 响应中未提取到 message.content，当前 LLM 完整回复:', data);
+                console.error('[Chat History Optimization] 分层摘要 API 响应中未提取到 message.content，当前 LLM 完整回复:', data);
             }
-            return extractJson(raw);
+            return extractText(raw);
         };
 
         try {
             return await Promise.race([doFetch(), timeoutP]);
         } catch (e) {
             if (e && typeof e.message === 'string' && e.message.indexOf('请求超时') !== -1) {
-                console.error('[Chat History Optimization] 二级摘要 API 请求超时:', e);
+                console.error('[Chat History Optimization] 分层摘要 API 请求超时:', e);
             }
             throw e;
         } finally {
@@ -446,65 +625,90 @@
     // 生成核心
     // ------------------------------------------------------------------
 
-    // 单条目生成。返回 'ok'（已生成）或 'skip'（已有效且非 force）。失败时抛错。
-    async function runOne(floor, entryIndex, force) {
-        if (!isConfigured()) {
-            throw new Error('请先在"二级摘要"选项卡选择 connection profile 或配置直连的 baseUrl、apiKey 和模型');
-        }
-        const floorData = getFloorJourney(floor);
-        if (!floorData) throw new Error(`楼层 ${floor} 无有效故事历程`);
-        const { item, journey } = floorData;
-        const entry = journey[entryIndex];
-        if (!entry || typeof entry !== 'object') throw new Error(`楼层 ${floor} 条目 ${entryIndex + 1} 不存在`);
+    function buildDayInput(day) {
+        const EngineRef = NS.Engine;
+        const lines = day.entries.map((e) => {
+            const doc = (EngineRef && typeof EngineRef.entryToDocText === 'function')
+                ? EngineRef.entryToDocText(e) : String(e.历程 || '');
+            return doc;
+        });
+        return lines.join('\n');
+    }
 
-        const storyHash = getStoryHash(item, journey);
-        const extra = readFloorExtra(item, storyHash);
-        if (!force && extra) {
-            const existing = extra.summaries[entryIndex];
-            if (existing && typeof existing === 'object' && existing.s !== undefined && existing.s !== null) {
+    // 单节点生成。返回 'ok'（已生成）或 'skip'（已有效且非 force）。失败时抛错。
+    async function runOne(target, force) {
+        if (!isConfigured()) {
+            throw new Error('请先在"分层摘要"选项卡选择 connection profile 或配置直连的 baseUrl、apiKey 和模型');
+        }
+        if (target.kind === 'L1') {
+            const groups = getDayGroups();
+            const day = groups.find((g) => g.dayKey === target.dayKey);
+            if (!day) throw new Error(`当天历程不存在：${target.dayKey}`);
+            const hash = dayChildHash(day);
+            if (!force) {
+                const store = loadStore();
+                const slot = store && store.l1[target.dayKey];
+                if (slot && slot.h === hash && typeof slot.text === 'string' && slot.text.trim() !== '') {
+                    return 'skip';
+                }
+            }
+            const template = Settings.get('hierDayPrompt');
+            if (!validateDayTemplate(template)) {
+                throw new Error(`天摘要模板无效（需非空且包含 ${DAY_PLACEHOLDER}）`);
+            }
+            // 占位符替换为当天历程文本；split/join 避免 $ 模式被 replace 解释
+            const content = String(template).split(DAY_PLACEHOLDER).join(buildDayInput(day));
+            const text = await callLlm(content);
+            const store = loadStore() || freshStore();
+            store.l1[target.dayKey] = { text, h: hash, t: Date.now() };
+            saveStore(store);
+            return 'ok';
+        }
+        // 上层节点：子文本必须齐备（缺失则抛错，由收集阶段保证不入队）
+        const cov = getCoverage();
+        const validL1 = new Map(cov.days.filter((d) => d.text).map((d) => [d.dayKey, { text: d.text }]));
+        const validUpper = new Map(cov.upper.filter((u) => u.text).map((u) => [u.key, { text: u.text }]));
+        const node = (cov.upper.find((u) => u.key === target.key)
+            || planUpperTree(cov.days.map((d) => d.dayKey)).find((n) => n.key === target.key));
+        if (!node || !node.childKeys) throw new Error(`上层节点不存在：${target.key}`);
+        const childTexts = [];
+        for (const ck of node.childKeys) {
+            const c = ck[0] === 'L' ? validUpper.get(ck) : validL1.get(ck);
+            if (!c) throw new Error(`子节点缺失，跳过：${target.key}`);
+            childTexts.push(c.text);
+        }
+        const hash = fnv1a32(childTexts.join('\n---\n'));
+        if (!force) {
+            const store = loadStore();
+            const slot = store && store.upper[target.key];
+            if (slot && slot.h === hash && typeof slot.text === 'string' && slot.text.trim() !== '') {
                 return 'skip';
             }
         }
-
-        const template = Settings.get('subSummaryPrompt');
-        if (!validateTemplate(template)) {
-            throw new Error(`二级摘要模板无效（需非空且包含 ${PLACEHOLDER}）`);
+        const template = Settings.get('hierMergePrompt');
+        if (!validateMergeTemplate(template)) {
+            throw new Error(`合并摘要模板无效（需非空且包含 ${MERGE_PLACEHOLDER}）`);
         }
-        // 占位符替换为条目完整 JSON（紧凑格式）；split/join 避免 JSON 中 $ 模式被 replace 解释
-        const content = String(template).split(PLACEHOLDER).join(JSON.stringify(entry));
-
-        const s = normalizeSummary(await callLlm(content));
-        if (!s) {
-            console.error('[Chat History Optimization] 二级摘要返回内容全部字段为空，视为生成失败');
-            throw new Error('二级摘要返回内容全部字段为空');
-        }
-
-        // 并行安全写回：LLM 等待期间同楼层其他 worker 可能已写入，
-        // 必须以写回时刻的最新 extra 为基合并，不能复用 await 前的 extra 快照，
-        // 否则同楼层多条目并行时后写者会覆盖先写者（丢摘要）。
-        // 同步合并段内无 await，单线程下是原子的。
-        const latest = readFloorExtra(item, storyHash);
-        const summaries = (latest && Array.isArray(latest.summaries)) ? latest.summaries : new Array(journey.length).fill(null);
-        while (summaries.length < journey.length) summaries.push(null);
-        summaries[entryIndex] = { s, t: Date.now() };
-        item.extra = item.extra || {};
-        item.extra[EXTRA_KEY] = { storyHash, summaries };
-        saveChatDebounced();
+        const labeled = childTexts.map((t, i) => `【子摘要${i + 1}】\n${t}`).join('\n\n');
+        const content = String(template).split(MERGE_PLACEHOLDER).join(labeled);
+        const text = await callLlm(content);
+        const store = loadStore() || freshStore();
+        store.upper[target.key] = { text, h: hash, t: Date.now() };
+        saveStore(store);
         return 'ok';
     }
 
     // 带重试的 runOne：失败（含单次请求超时）等待 Constants.RETRY_DELAY_MS 后重试，
     // 最多 Constants.MAX_RETRIES 次，全部失败则抛出最后错误。
-    // 超时计为普通失败：瞬时 hang 重试可能恢复；持续 hang 则最终记 failed，不会卡死批次。
-    async function runOneWithRetry(floor, index, force) {
+    async function runOneWithRetry(target, force) {
         let lastErr = null;
         for (let attempt = 0; attempt <= Constants.MAX_RETRIES; attempt++) {
             try {
-                return await runOne(floor, index, force);
+                return await runOne(target, force);
             } catch (e) {
                 lastErr = e;
                 if (attempt < Constants.MAX_RETRIES) {
-                    console.warn(`[Chat History Optimization] 楼层 ${floor} 条目 ${index + 1} 二级摘要生成失败，${Constants.RETRY_DELAY_MS}ms 后重试（第 ${attempt + 1}/${Constants.MAX_RETRIES} 次）:`, e);
+                    console.warn(`[Chat History Optimization] 分层摘要生成失败，${Constants.RETRY_DELAY_MS}ms 后重试（第 ${attempt + 1}/${Constants.MAX_RETRIES} 次）:`, e);
                     await new Promise(r => setTimeout(r, Constants.RETRY_DELAY_MS));
                 }
             }
@@ -512,26 +716,21 @@
         throw lastErr;
     }
 
-    // worker 池并行执行一批 {floor, index} 目标，统一维护状态总线。
-    // 并发数 = 设置项 subSummaryConcurrency（clamp 到 1..SUBSUMMARY_CONCURRENCY_MAX，
-    // 1 即退化为串行）。LLM 调用是 IO 等待，并行省的是等待时间。
-    // 进度通知按 Constants.SUBSUMMARY_STATUS_NOTIFY_INTERVAL_MS 做 trailing 节流：
-    // 每条完成都尝试通知，间隔不足时合并进下一次，保证批次最后一条进度不丢失；
-    // 批次终态（成功/失败汇总）不受节流、始终立即通知。
-    // 成功生成的通知附带 lastDone={floor,index}，UI 据此只原地更新该条目摘要块，
-    // 避免大批量时逐条全量重绘。
-    async function executeBatch(targets, force) {
+    function targetLabel(target) {
+        if (target.kind === 'L1') return `${dayLabel(target.dayKey)}天摘要`;
+        return `${target.key}合并摘要`;
+    }
+
+    // 同层级内 worker 池并行执行一批目标，统一维护状态总线。
+    // 进度通知按 Constants.SUBSUMMARY_STATUS_NOTIFY_INTERVAL_MS 做 trailing 节流。
+    // 成功生成的通知附带 lastDone={dayKey, level, key}，UI 据此增量更新。
+    async function executeLevel(targets, force, counter) {
         const total = targets.length;
-        if (total === 0) {
-            notifyStatus({ running: false, current: '', done: 0, failed: 0, error: '没有可生成的故事历程条目', lastDone: null });
-            return { done: 0, failed: 0 };
-        }
-        let done = 0;
-        let failed = 0;
-        let lastError = null;
-        running = true;
+        if (total === 0) return;
+        let done = counter.done;
+        let failed = counter.failed;
         const interval = Constants.SUBSUMMARY_STATUS_NOTIFY_INTERVAL_MS;
-        let lastNotifyAt = 0;
+        let lastNotifyAt = counter.lastNotifyAt || 0;
         let throttleTimer = null;
         let pendingPatch = null;
         const emitStatus = (patch) => {
@@ -559,320 +758,208 @@
                 while (true) {
                     const k = next++;
                     if (k >= total) return;
-                    const floor = targets[k].floor;
-                    const index = targets[k].index;
-                    emitStatus({ running: true, current: `第${k + 1}/${total}条 · 楼层${floor} 条目${index + 1}`, done, failed, error: null, lastDone: null });
+                    const target = targets[k];
+                    emitStatus({ running: true, current: `第${counter.seq + k + 1}个 · ${targetLabel(target)}`, done, failed, error: null, lastDone: null });
                     try {
-                        const result = await runOneWithRetry(floor, index, force);
+                        const result = await runOneWithRetry(target, force);
                         if (result === 'ok') {
                             done++;
-                            emitStatus({ done, lastDone: { floor, index } });
+                            emitStatus({
+                                done,
+                                lastDone: target.kind === 'L1'
+                                    ? { dayKey: target.dayKey, level: 1, key: target.dayKey }
+                                    : { dayKey: null, level: target.level, key: target.key },
+                            });
                         }
                     } catch (e) {
                         failed++;
-                        lastError = String((e && e.message) || e);
+                        counter.lastError = String((e && e.message) || e);
                         emitStatus({ failed, lastDone: null });
-                        console.error(`[Chat History Optimization] 楼层 ${floor} 条目 ${index + 1} 二级摘要生成失败:`, e);
+                        console.error(`[Chat History Optimization] ${targetLabel(target)}生成失败:`, e);
                     }
                 }
             }
             const workers = [];
             for (let w = 0; w < concurrency; w++) workers.push(worker());
             await Promise.all(workers);
-            if (done > 0) saveChatDebounced();
         } finally {
-            running = false;
             if (throttleTimer !== null) {
                 clearTimeout(throttleTimer);
                 throttleTimer = null;
             }
             pendingPatch = null;
-            notifyStatus({
-                running: false,
-                current: '',
-                done,
-                failed,
-                error: failed > 0 ? `失败 ${failed} 条${lastError ? '：' + lastError : ''}` : null,
-                message: (failed === 0 && done === 0) ? '范围内条目均已有有效摘要，无需生成' : null,
-                lastDone: null,
-            });
+            counter.done = done;
+            counter.failed = failed;
+            counter.seq += total;
+            counter.lastNotifyAt = lastNotifyAt;
         }
-        return { done, failed };
     }
 
-    async function generateForEntry(floor, entryIndex, options = {}) {
-        if (running) {
-            console.warn('[Chat History Optimization] 二级摘要生成进行中，忽略本次请求');
-            return false;
+    // 收集指定层级的缺失/脏节点：上层节点只在子齐备时收集。
+    // 调用方按 L1→L2→… 逐层收集执行（每层执行后重算快照），保证父输入依赖子文本。
+    function collectLevelTargets(level, force) {
+        const cov = getCoverage();
+        if (level === 1) {
+            const out = [];
+            for (const d of cov.days) {
+                if (force || !d.text) out.push({ kind: 'L1', dayKey: d.dayKey });
+            }
+            return out;
         }
-        const force = Boolean(options && options.force);
-        let done = 0;
-        let failed = 0;
-        let error = null;
-        let message = null;
-        running = true;
-        notifyStatus({ running: true, current: `楼层${floor} 条目${entryIndex + 1}`, done: 0, failed: 0, error: null, message: null, lastDone: null });
-        try {
-            const result = await runOneWithRetry(floor, entryIndex, force);
-            if (result === 'ok') done = 1;
-            else if (result === 'skip') message = '该条目已有有效摘要，无需生成';
-        } catch (e) {
-            failed = 1;
-            error = String((e && e.message) || e);
-            console.error(`[Chat History Optimization] 楼层 ${floor} 条目 ${entryIndex + 1} 二级摘要生成失败:`, e);
-        } finally {
-            running = false;
-            notifyStatus({
-                running: false,
-                current: '',
-                done,
-                failed,
-                error,
-                message,
-                lastDone: done === 1 ? { floor, index: entryIndex } : null,
-            });
-        }
-        return failed === 0;
-    }
-
-    function toFloor(value) {
-        if (value === null || value === undefined || value === '') return null;
-        const n = Math.floor(Number(value));
-        return isNaN(n) ? null : n;
-    }
-
-    // onlyMissing 为 true 时只收集缺少有效摘要的条目（进度总数即缺失数）
-    function collectRangeTargets(startFloor, endFloor, onlyMissing) {
-        const chat = NS.bridge.getCurrentChat ? NS.bridge.getCurrentChat() : null;
-        if (!chat || !Array.isArray(chat)) return null;
-        const totalFloors = Math.max(0, chat.length - 1);
-        if (totalFloors < 1) return null;
-
-        let start = toFloor(startFloor);
-        let end = toFloor(endFloor);
-        if (start === null) start = 1;
-        if (end === null) end = totalFloors;
-        start = Math.max(1, start);
-        end = Math.min(totalFloors, end);
-        if (start > end) {
-            const tmp = start;
-            start = end;
-            end = tmp;
-        }
-
-        const targets = [];
-        for (let floor = start; floor <= end; floor++) {
-            const floorData = getFloorJourney(floor);
-            if (!floorData) continue;
-            const cached = onlyMissing ? getFloorSummaries(floor) : null;
-            const valid = cached ? cached.valid : false;
-            const summaries = cached ? cached.summaries : [];
-            for (let i = 0; i < floorData.journey.length; i++) {
-                if (onlyMissing) {
-                    const existing = valid ? summaries[i] : null;
-                    if (existing && typeof existing === 'object' && existing.s !== undefined && existing.s !== null) continue;
-                }
-                targets.push({ floor, index: i });
+        const readyL1 = new Set(cov.days.filter((d) => d.text).map((d) => d.dayKey));
+        const readyUpper = new Set(cov.upper.filter((u) => u.text).map((u) => u.key));
+        const plan = planUpperTree(cov.days.map((d) => d.dayKey));
+        const upperByKey = new Map(cov.upper.map((u) => [u.key, u]));
+        const out = [];
+        for (const node of plan) {
+            if (node.level !== level) continue;
+            const childrenReady = node.childKeys.every((ck) => (ck[0] === 'L' ? readyUpper.has(ck) : readyL1.has(ck)));
+            if (!childrenReady) continue;
+            const slot = upperByKey.get(node.key);
+            if (force || !slot || !slot.text) {
+                out.push({ kind: 'L' + level, level, key: node.key });
             }
         }
-        return targets;
+        return out;
     }
 
-    // 收集楼层范围内「无 s 或 s 不含可用召回字段（旧 schema 摘要）」的条目，
-    // 这些条目在 Mode A（二级摘要功能开启）召回前必须先补齐生成。
-    function collectRecallMissingTargets(startFloor, endFloor) {
-        const chat = NS.bridge.getCurrentChat ? NS.bridge.getCurrentChat() : null;
-        if (!chat || !Array.isArray(chat)) return null;
-        const totalFloors = Math.max(0, chat.length - 1);
-        if (totalFloors < 1) return null;
-
-        let start = toFloor(startFloor);
-        let end = toFloor(endFloor);
-        if (start === null) start = 1;
-        if (end === null) end = totalFloors;
-        start = Math.max(1, start);
-        end = Math.min(totalFloors, end);
-        if (start > end) {
-            const tmp = start;
-            start = end;
-            end = tmp;
-        }
-
-        const targets = [];
-        for (let floor = start; floor <= end; floor++) {
-            const floorData = getFloorJourney(floor);
-            if (!floorData) continue;
-            const { valid, summaries } = getFloorSummaries(floor);
-            for (let i = 0; i < floorData.journey.length; i++) {
-                const existing = valid ? summaries[i] : null;
-                const s = (existing && typeof existing === 'object') ? existing.s : undefined;
-                if (!s || !hasRecallFields(s)) targets.push({ floor, index: i });
-            }
-        }
-        return targets;
-    }
-
-    function getRecallMissingCount(startFloor, endFloor) {
-        const targets = collectRecallMissingTargets(startFloor, endFloor);
-        return targets ? targets.length : 0;
-    }
-
-    // 召回补生成入口（Mode A 发送前调用）：经 promise 链串行，
-    // 若已有批次进行中则挂在其后，结束后重收集仍未补齐的条目再跑，
-    // 消除 onGenerationEnded 原实现在 running 时直接忽略导致的竞态。
-    function ensureRecallSummaries(startFloor, endFloor) {
+    // 后台补齐入口：经 batchChain 串行；按层顺序逐层收集执行。
+    function ensureMissing(force) {
         const run = async () => {
-            const targets = collectRecallMissingTargets(startFloor, endFloor);
-            if (!targets || targets.length === 0) {
-                return { done: 0, failed: 0, total: 0 };
+            running = true;
+            notifyStatus({ running: true, current: '', done: 0, failed: 0, error: null, message: null, lastDone: null });
+            const counter = { done: 0, failed: 0, seq: 0, lastNotifyAt: 0, lastError: null };
+            try {
+                const maxLevels = getMaxLevels();
+                for (let level = 1; level <= maxLevels; level++) {
+                    const targets = collectLevelTargets(level, force);
+                    if (targets.length > 0) {
+                        await executeLevel(targets, force, counter);
+                    }
+                }
+                if (counter.done > 0 && typeof NS.bridge.saveMetadataDebounced === 'function') NS.bridge.saveMetadataDebounced();
+            } finally {
+                running = false;
+                notifyStatus({
+                    running: false,
+                    current: '',
+                    done: counter.done,
+                    failed: counter.failed,
+                    error: counter.failed > 0 ? `失败 ${counter.failed} 个${counter.lastError ? '：' + counter.lastError : ''}` : null,
+                    message: (counter.failed === 0 && counter.done === 0) ? '摘要均已有效，无需生成' : null,
+                    lastDone: null,
+                });
             }
-            return executeBatch(targets, false);
+            return { done: counter.done, failed: counter.failed, total: counter.seq };
         };
         const p = batchChain.then(run, run);
         batchChain = p.catch(() => {});
         return p;
     }
 
-    async function generateForRange(startFloor, endFloor, options = {}) {
+    function generateMissing() {
         if (running) {
-            console.warn('[Chat History Optimization] 二级摘要生成进行中，忽略本次请求');
+            console.warn('[Chat History Optimization] 分层摘要生成进行中，忽略本次请求');
+            return false;
+        }
+        return ensureMissing(false).catch((e) => {
+            console.error('[Chat History Optimization] 分层摘要补齐失败:', e);
+            return { done: 0, failed: 0, total: 0 };
+        });
+    }
+
+    function forceRebuild() {
+        if (running) {
+            console.warn('[Chat History Optimization] 分层摘要生成进行中，忽略本次请求');
+            return false;
+        }
+        const meta = getMetadata();
+        if (meta && meta[HIER_METADATA_KEY]) {
+            delete meta[HIER_METADATA_KEY];
+            if (typeof NS.bridge.saveMetadataDebounced === 'function') NS.bridge.saveMetadataDebounced();
+        }
+        return ensureMissing(true).catch((e) => {
+            console.error('[Chat History Optimization] 分层摘要重建失败:', e);
+            return { done: 0, failed: 0, total: 0 };
+        });
+    }
+
+    // 单天生成/重新生成（故事 tab 按天按钮用）
+    function generateForDay(dayKey, options = {}) {
+        if (running) {
+            console.warn('[Chat History Optimization] 分层摘要生成进行中，忽略本次请求');
             return false;
         }
         const force = Boolean(options && options.force);
-        const onlyMissing = Boolean(options && options.onlyMissing);
-        const targets = collectRangeTargets(startFloor, endFloor, onlyMissing);
-        if (targets === null) {
-            notifyStatus({ running: false, current: '', done: 0, failed: 0, error: '没有可用的楼层范围', lastDone: null });
-            return false;
-        }
-        if (targets.length === 0 && onlyMissing) {
-            notifyStatus({ running: false, current: '', done: 0, failed: 0, error: null, message: '没有缺失的条目，无需生成', lastDone: null });
-            return true;
-        }
-        await executeBatch(targets, force);
-        return true;
+        const run = async () => {
+            running = true;
+            notifyStatus({ running: true, current: `${dayLabel(dayKey)}天摘要`, done: 0, failed: 0, error: null, message: null, lastDone: null });
+            let done = 0;
+            let failed = 0;
+            let error = null;
+            try {
+                const result = await runOneWithRetry({ kind: 'L1', dayKey }, force);
+                if (result === 'ok') done = 1;
+                else if (result === 'skip') error = null;
+            } catch (e) {
+                failed = 1;
+                error = String((e && e.message) || e);
+                console.error(`[Chat History Optimization] ${dayLabel(dayKey)}天摘要生成失败:`, e);
+            } finally {
+                running = false;
+                notifyStatus({
+                    running: false,
+                    current: '',
+                    done,
+                    failed,
+                    error,
+                    message: (failed === 0 && done === 0) ? '该天摘要已有效，无需生成' : null,
+                    lastDone: done === 1 ? { dayKey, level: 1, key: dayKey } : null,
+                });
+            }
+            return failed === 0;
+        };
+        const p = batchChain.then(run, run);
+        batchChain = p.catch(() => {});
+        return p.catch(() => false);
     }
 
-    // 强制擦除范围内全部楼层的二级摘要（无视哈希有效性），返回擦除的楼层数。
-    // 全量擦除（start/end 均为 null/空，即 UI“强制擦除全部”按钮）额外清空所有
-    // 二级摘要相关元数据并关闭二级摘要开关（RAG 切到 Mode B / off）：
-    //   - 各楼层 extra[EXTRA_KEY]
-    //   - 内存摘要哈希缓存 storyHashCache
-    //   - RecallCache 内存打分缓存（fragVec/docVec/pairScore）
-    //   - Embedder 内存向量缓存
-    //   - EmbedStore 持久化向量库（chat_metadata）
-    //   - Settings subSummaryToggle → false（停止自动生成与发送前补生成）
-    // 范围擦除（传了具体楼层）只清该范围 extra + 哈希缓存，不动开关与向量库
-    // （向量库失效条目由 EmbedStore.sync 下次同步时按期望集合自动清理）。
-    function eraseForRange(startFloor, endFloor) {
+    // 擦除全部层级摘要（不影响故事历程原文与开关）
+    function eraseAll() {
         if (running) {
             notifyStatus({ running: false, current: '', done: 0, failed: 0, error: '生成进行中，请稍后再擦除', message: null, lastDone: null });
             return 0;
         }
-        const chat = NS.bridge.getCurrentChat ? NS.bridge.getCurrentChat() : null;
-        if (!chat || !Array.isArray(chat)) {
-            notifyStatus({ running: false, current: '', done: 0, failed: 0, error: '没有可用的聊天数据', message: null, lastDone: null });
-            return 0;
-        }
-        const totalFloors = Math.max(0, chat.length - 1);
-        let start = toFloor(startFloor);
-        let end = toFloor(endFloor);
-        if (start === null) start = 1;
-        if (end === null) end = totalFloors;
-        start = Math.max(1, start);
-        end = Math.min(totalFloors, end);
-        if (start > end) {
-            const tmp = start;
-            start = end;
-            end = tmp;
-        }
+        const meta = getMetadata();
         let erased = 0;
-        for (let floor = start; floor <= end; floor++) {
-            const item = chat[floor];
-            if (item && item.extra && item.extra[EXTRA_KEY]) {
-                delete item.extra[EXTRA_KEY];
-                erased++;
-            }
+        if (meta && meta[HIER_METADATA_KEY]) {
+            const store = meta[HIER_METADATA_KEY];
+            erased = Object.keys(store.l1 || {}).length + Object.keys(store.upper || {}).length;
+            delete meta[HIER_METADATA_KEY];
+            if (typeof NS.bridge.saveMetadataDebounced === 'function') NS.bridge.saveMetadataDebounced();
         }
-        if (erased > 0) saveChatDebounced();
-        // 摘要哈希缓存以楼层消息对象为键，extra 删除后缓存的 journey 引用即失效，直接全清
-        storyHashCache.clear();
-        // 全量擦除：清空其余二级摘要相关元数据并关闭开关（RAG off）
-        const isFullErase = toFloor(startFloor) === null && toFloor(endFloor) === null;
-        if (isFullErase) {
-            try {
-                if (NS.RecallCache && typeof NS.RecallCache.clear === 'function') NS.RecallCache.clear();
-            } catch (e) {
-                console.error('[Chat History Optimization] 清空召回缓存失败:', e);
-            }
-            try {
-                if (NS.Embedder && typeof NS.Embedder.clearCache === 'function') NS.Embedder.clearCache();
-            } catch (e) {
-                console.error('[Chat History Optimization] 清空嵌入缓存失败:', e);
-            }
-            try {
-                if (NS.EmbedStore && typeof NS.EmbedStore.clear === 'function') NS.EmbedStore.clear();
-            } catch (e) {
-                console.error('[Chat History Optimization] 清空向量库失败:', e);
-            }
-            try {
-                Settings.set('subSummaryToggle', false);
-            } catch (e) {
-                console.error('[Chat History Optimization] 关闭二级摘要开关失败:', e);
-            }
-        }
-        // 擦除影响多个楼层，无法用单个 lastDone 表达，置 null 让 UI 全量重绘
         notifyStatus({
             running: false,
             current: '',
             done: 0,
             failed: 0,
             error: null,
-            message: isFullErase
-                ? '已清空全部二级摘要及相关元数据，并关闭二级摘要开关'
-                : (erased > 0 ? `已擦除 ${erased} 个楼层的二级摘要` : '楼层范围内没有可擦除的二级摘要'),
+            message: erased > 0 ? `已擦除 ${erased} 条层级摘要` : '没有可擦除的层级摘要',
             lastDone: null,
         });
         return erased;
     }
 
     // ------------------------------------------------------------------
-    // 自动触发：AI 回复生成结束后，为最后一条 assistant 楼层补齐缺失条目
+    // 自动触发：AI 回复生成结束后，后台补齐缺失摘要（不阻塞发送）
     // ------------------------------------------------------------------
 
     function onGenerationEnded() {
         if (running) return;
         if (!Settings.get('subSummaryToggle')) return;
         if (!isConfigured()) return;
-        const chat = NS.bridge.getCurrentChat ? NS.bridge.getCurrentChat() : null;
-        if (!chat || !Array.isArray(chat)) return;
-
-        let lastFloor = null;
-        for (let i = chat.length - 1; i >= 1; i--) {
-            if (getFloorItem(i)) {
-                lastFloor = i;
-                break;
-            }
-        }
-        if (lastFloor === null) return;
-
-        const floorData = getFloorJourney(lastFloor);
-        if (!floorData) return;
-        const { journey } = floorData;
-
-        const { valid, summaries } = getFloorSummaries(lastFloor);
-        const targets = [];
-        for (let i = 0; i < journey.length; i++) {
-            const existing = valid ? summaries[i] : null;
-            if (!existing || typeof existing !== 'object' || existing.s === undefined || existing.s === null) {
-                targets.push({ floor: lastFloor, index: i });
-            }
-        }
-        if (targets.length === 0) return;
-
-        console.log(`[Chat History Optimization] 自动生成二级摘要：楼层 ${lastFloor} 缺失 ${targets.length} 条`);
-        ensureRecallSummaries(lastFloor, lastFloor).catch((e) => {
-            console.error('[Chat History Optimization] 自动生成二级摘要失败:', e);
+        ensureMissing(false).catch((e) => {
+            console.error('[Chat History Optimization] 自动生成分层摘要失败:', e);
         });
     }
 
@@ -883,20 +970,22 @@
     }
 
     NS.SubSummary = Object.freeze({
-        EXTRA_KEY,
-        PLACEHOLDER,
+        HIER_METADATA_KEY,
+        DAY_PLACEHOLDER,
+        MERGE_PLACEHOLDER,
         textHash: fnv1a32,
         isConfigured,
         getProfileOptions,
-        validateTemplate,
-        hasRecallFields,
-        getFloorSummaries,
-        getValidSummary,
-        generateForEntry,
-        generateForRange,
-        eraseForRange,
-        getRecallMissingCount,
-        ensureRecallSummaries,
+        getFanin,
+        validateDayTemplate,
+        validateMergeTemplate,
+        getDayGroups,
+        getCoverage,
+        getMissingCount,
+        generateMissing,
+        generateForDay,
+        forceRebuild,
+        eraseAll,
         onStatus,
         getStatus,
         init,

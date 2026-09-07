@@ -32,7 +32,7 @@
         failedFloors: [],
         roles: {},
         activeRoleNames: [],
-        rag: null,
+        hier: null,
         lastMessage: '',
     };
     const statsListeners = new Set();
@@ -96,7 +96,7 @@
             failedFloors: [...lastStats.failedFloors],
             roles: JSON.parse(JSON.stringify(lastStats.roles)),
             activeRoleNames: [...lastStats.activeRoleNames],
-            rag: lastStats.rag ? JSON.parse(JSON.stringify(lastStats.rag)) : null,
+            hier: lastStats.hier ? JSON.parse(JSON.stringify(lastStats.hier)) : null,
             lastMessage: lastStats.lastMessage || '',
         };
     }
@@ -450,7 +450,7 @@
     }
 
     /**
-      * 单条历程条目 → RAG 检索文本（含天数/时间段/地点，用作 BM25 文档与查询）。
+      * 单条历程条目 → 检索文本（含天数/时间段/地点，用作天摘要生成的当天历程输入）。
       */
     function entryToDocText(entry) {
         const meta = [entry && entry.天数, entry && entry.时间段, entry && entry.地点]
@@ -698,615 +698,190 @@ ${newCharacterCardTemplate}
      *
      * - 正文：倒数第 keepCount 条 assistant 回复起的原文（其 messageCount 对应的
      *   历程条目已被正文覆盖，从历程中排除，避免重复）。
-      * - 中段：历程中未被正文覆盖的条目；RAG 触发时二分搜索最大后缀窗口，
-      *   使 窗口+正文+角色卡 ≤ contentLimit - ragBudget。
-       * - RAG：触发时（全量 > contentLimit×(1-ragRatio)），
-       *   以 最新用户消息 + 窗口历程条目（最新→次新→…，含天数/时间段/地点）为查询序列
-       *   逐个 BM25 检索，窗口外的远端条目按得分 topK 贪心装入，直到预算装满，
-      *   按时间顺序渲染为历程 markdown 放在 <HISTORY> 头部（与中段格式一致），
-      *   预算 ragBudget = contentLimit × ragRatio。
-      * - 预算基于 contentLimit = max(1, tokenLimit - 模板/包装开销)，
-      *   使最终 lastMessage（含 STORY_DATA 骨架与 NEW_STORY_DATA 模板）≤ tokenLimit。
-      * - 未触发：全量注入，不裁剪。
+     * - 中段：历程中未被正文覆盖的条目，按天分组后从最旧侧折叠为
+     *   L1 天摘要 / L(k≥2) 合并摘要（见 planFoldSlots），使
+     *   中段+正文+角色卡 ≤ contentLimit。
+     * - 折叠：触发条件为全量 > contentLimit；token 够用时零压缩（全量原文），
+     *   不够时只折叠最旧的天，高层摘要永远只出现在远端。
+     * - 预算基于 contentLimit = max(1, tokenLimit - 模板/包装开销)，
+     *   使最终 lastMessage（含 STORY_DATA 骨架与 NEW_STORY_DATA 模板）≤ tokenLimit。
+     * - 未触发：全量注入，不裁剪。
      *
      * @param {object[]} chatCopy - 聊天记录的深拷贝（mergeDataInfo 会写入 messageCount）
-     * @param {{runRag?: boolean}} options - runRag=false 时只判断是否触发，不执行检索
+     * @param {{runFold?: boolean}} options - runFold=false 时只判断是否触发，不执行折叠
      */
     // ------------------------------------------------------------------
-    // 召回特化摘要混合打分
+    // 分层折叠：L0 条目按天分组 → 从最旧侧折叠为摘要 → 装不下再丢弃最旧节点
     // ------------------------------------------------------------------
 
-    /**
-     * 收集各楼层 extra 中的有效召回特化摘要，
-     * 键为 JSON.stringify(故事历程条目)（与 deepMerge 去重键一致，
-     * 使合并后的 farEntries 可直接命中）。
-     */
-    function buildSummaryMap(chatCopy) {
-        const map = new Map();
-        const SubSummary = NS.SubSummary;
-        if (!SubSummary) return map;
-        for (let i = 0; i < chatCopy.length; i++) {
-            const item = chatCopy[i];
-            if (!item) continue;
-            if (!((("is_user" in item && !item.is_user) || (item.role && item.role === 'assistant')))) continue;
-            const historyObj = getFloorStoryBlock(item);
-            if (!historyObj || !Array.isArray(historyObj.故事历程)) continue;
-            const journey = historyObj.故事历程;
-            const { summaries } = SubSummary.getFloorSummaries(i);
-            for (let j = 0; j < journey.length; j++) {
-                const slot = summaries[j];
-                if (!slot || typeof slot !== 'object') continue;
-                if (slot.s === undefined || slot.s === null) continue;
-                if (!SubSummary.hasRecallFields(slot.s)) continue;
-                map.set(JSON.stringify(journey[j]), slot.s);
-            }
-        }
-        return map;
+    function dayKeyOf(entry) {
+        const day = parseDayNumber(entry && entry.天数);
+        return day !== null ? String(day) : 'unknown';
     }
 
-    /**
-     * 远端条目混合打分（与 farEntries 同序返回）：
-     * - 有召回特化摘要且 Embedder 就绪：
-     *   命中门槛：S_actor=0 且 S_location=0 → score = 0（未命中，不参与召回）；
-     *   否则 score = S_semantic（纯语义排序）
-     *   S_semantic = max(S_event, S_recall)，
-     *   S_event = clamp01(cos(query,event))，S_recall = max(clamp01(cos(query,recall_when[i])))
-      *   S_actor = 2|Q∩F|/(|Q|+|F|)（Dice），Q=查询提及的已知人物集，F=摘要 actor（去重，不排除主角）
-     * - 否则：BM25 回退，score = bm25/(bm25+Constants.BM25_NORM_K)
-     * Embedder 未就绪时全池走 BM25 归一化（等价于纯 BM25 排序）。
-     */
-    async function scoreFarEntries(queryText, farEntries, docs, summaryMap, knownNames) {
-        const embedderReady = !!(NS.Embedder && NS.Embedder.isReady());
-        const summaries = farEntries.map(entry => (embedderReady ? summaryMap.get(JSON.stringify(entry)) : null));
-
-        // BM25 回退池：无摘要条目（Embedder 未就绪时为全池）
-        const bm25Score = new Map(); // entryIdx -> 归一化分数
-        const poolIdx = [];
-        for (let i = 0; i < farEntries.length; i++) {
-            if (!summaries[i] && docs[i]) poolIdx.push(i);
-        }
-        if (poolIdx.length > 0 && NS.Retriever) {
-            const hits = await NS.Retriever.retrieve(queryText, poolIdx.map(i => docs[i]), poolIdx.length, Constants.RAG_MIN_SCORE);
-            for (const hit of hits) {
-                const idx = poolIdx[hit.index];
-                if (idx !== undefined && !bm25Score.has(idx)) {
-                    bm25Score.set(idx, hit.score / (hit.score + Constants.BM25_NORM_K));
-                }
-            }
-        }
-
-        // actor 消歧名单：全部摘要人物 ∪ 已知角色名
-        const allNames = new Set(knownNames || []);
-        for (const s of summaries) {
-            if (s && Array.isArray(s.actor)) for (const a of s.actor) allNames.add(a);
-        }
-        const nameList = [...allNames];
-
-        // actor 打分：S_actor = 2|Q∩F|/(|Q|+|F|)（Dice 系数，天然 [0,1]）；
-        // Q = 查询中 nameMatches 命中的已知人物集（nameList 消歧），同一查询对所有条目共用
-        const queryActorSet = new Set();
-        for (const n of nameList) {
-            if (nameMatches(n, queryText, nameList)) queryActorSet.add(n);
-        }
-
-        // 批量编码 event / recall_when（文档侧不加查询指令）
-        const jobTexts = [];
-        const jobMap = new Map(); // entryIdx -> { eventPos, recallPos: [] }
-        for (let i = 0; i < farEntries.length; i++) {
-            const s = summaries[i];
-            if (!s) continue;
-            const job = { eventPos: -1, recallPos: [] };
-            if (typeof s.event === 'string' && s.event.trim() !== '') job.eventPos = jobTexts.push(s.event.trim()) - 1;
-            if (Array.isArray(s.recall_when)) {
-                for (const r of s.recall_when) {
-                    const t = String(r == null ? '' : r).trim();
-                    if (t !== '') job.recallPos.push(jobTexts.push(t) - 1);
-                }
-            }
-            jobMap.set(i, job);
-        }
-        const queryVec = embedderReady && queryText !== ''
-            ? (await NS.Embedder.encodeBatch([NS.Embedder.withQueryInstruction(queryText)]))[0]
-            : null;
-        // 文档侧向量优先读 chat_metadata 持久化 store（缺失现场编码并回写）
-        let vecs = [];
-        if (jobTexts.length > 0) {
-            if (NS.EmbedStore && typeof NS.EmbedStore.resolve === 'function') {
-                const vecMap = await NS.EmbedStore.resolve(jobTexts);
-                vecs = jobTexts.map(t => vecMap.get(t) || null);
-            } else {
-                vecs = await NS.Embedder.encodeBatch(jobTexts);
-            }
-        }
-
-        const clamp01 = v => Math.min(1, Math.max(0, v));
-        const results = new Array(farEntries.length);
-        for (let i = 0; i < farEntries.length; i++) {
-            const s = summaries[i];
-            if (s) {
-                const actors = Array.isArray(s.actor) ? s.actor : [];
-                const farActors = [...new Set(actors)];
-                let actorHit = 0;
-                for (const a of farActors) if (queryActorSet.has(a)) actorHit++;
-                const actorScore = (queryActorSet.size + farActors.length) > 0
-                    ? 2 * actorHit / (queryActorSet.size + farActors.length) : 0;
-                const locations = Array.isArray(s.location) ? s.location : [];
-                let locHit = 0;
-                for (const loc of locations) {
-                    if (loc && queryText.includes(loc)) locHit++;
-                }
-                const locationScore = locations.length > 0 ? locHit / locations.length : 0;
-                const job = jobMap.get(i) || { eventPos: -1, recallPos: [] };
-                const sEvent = (job.eventPos >= 0 && queryVec && vecs[job.eventPos])
-                    ? clamp01(NS.Embedder.cosine(queryVec, vecs[job.eventPos])) : 0;
-                let sRecall = 0;
-                for (const p of job.recallPos) {
-                    if (queryVec && vecs[p]) sRecall = Math.max(sRecall, clamp01(NS.Embedder.cosine(queryVec, vecs[p])));
-                }
-                const sSemantic = Math.max(sEvent, sRecall);
-                // 命中门槛：人物与地点均未命中 → 不召回；命中则纯 S_semantic 排序
-                const score = (actorScore > 0 || locationScore > 0) ? sSemantic : 0;
-                results[i] = {
-                    index: i,
-                    score,
-                    parts: {
-                        source: 'summary',
-                        actor: actorHit + '/' + actors.length,
-                        location: locHit + '/' + locations.length,
-                        actorScore: Number(actorScore.toFixed(2)),
-                        locationScore: Number(locationScore.toFixed(2)),
-                        semantic: Number(sSemantic.toFixed(2)),
-                    },
-                };
-            } else {
-                const b = bm25Score.has(i) ? bm25Score.get(i) : 0;
-                results[i] = {
-                    index: i,
-                    score: b,
-                    parts: { source: 'bm25', score: Number(b.toFixed(2)) },
-                };
-            }
-        }
-        return results;
+    function dayLabelOf(dayKey) {
+        if (dayKey === 'unknown') return (Constants.HIER_UNKNOWN_DAY_LABEL || '未知天');
+        return `第${dayKey}天`;
     }
 
-    // 地点层级匹配：分段（"大地点.小地点"）后短者段序列是长者前缀，或全等，视为命中
-    function isHierMatch(locA, locB) {
-        if (!locA || !locB) return false;
-        if (locA === locB) return true;
-        const sa = locA.split('.');
-        const sb = locB.split('.');
-        const short = sa.length <= sb.length ? sa : sb;
-        const long = sa.length <= sb.length ? sb : sa;
-        for (let i = 0; i < short.length; i++) if (short[i] !== long[i]) return false;
+    // 摘要伪条目：与 L0 同形（天数|时间段|地点 + 历程），复用 renderJourneyMarkdown。
+    // 摘要原文原样使用，不走 extractItemProcess 的补句号逻辑。
+    function summaryToEntry(dayKey, endKey, text, locations) {
+        const loc = (locations || []).filter(Boolean).join('、');
+        if (endKey && endKey !== dayKey) {
+            return { 天数: `${dayLabelOf(dayKey)}~${dayLabelOf(endKey)}`, 时间段: '多日', 地点: loc, 历程: text };
+        }
+        return { 天数: dayLabelOf(dayKey), 时间段: '全天', 地点: loc, 历程: text };
+    }
+
+    function estChars(text) {
+        return Math.ceil(String(text || '').length / Constants.EST_CHARS_PER_TOKEN);
+    }
+
+    // 天在上层节点起止范围内（含端点；unknown 键排最后，只与 unknown 匹配）
+    function dayKeyInSpan(dayKey, startKey, endKey, order) {
+        const pos = order.indexOf(dayKey);
+        const s = order.indexOf(startKey);
+        const e = order.indexOf(endKey);
+        if (pos === -1 || s === -1 || e === -1) return false;
+        return pos >= Math.min(s, e) && pos <= Math.max(s, e);
+    }
+
+    // 上层节点整个 span 的天必须全部完全落在中段内：
+    // 否则父文本会覆盖正文 verbatim 区的条目造成重复，或覆盖不存在的天。
+    function spanFullyInside(startKey, endKey, fullDayCounts, midDayCounts) {
+        if (startKey === 'unknown' || endKey === 'unknown') {
+            return startKey === 'unknown' && endKey === 'unknown'
+                && (fullDayCounts.get('unknown') || 0) > 0
+                && (midDayCounts.get('unknown') || 0) === (fullDayCounts.get('unknown') || 0);
+        }
+        const s = parseInt(startKey, 10);
+        const e = parseInt(endKey, 10);
+        if (isNaN(s) || isNaN(e)) return false;
+        const lo = Math.min(s, e);
+        const hi = Math.max(s, e);
+        for (let n = lo; n <= hi; n++) {
+            const k = String(n);
+            const f = fullDayCounts.get(k) || 0;
+            if (f === 0) return false;
+            if ((midDayCounts.get(k) || 0) !== f) return false;
+        }
         return true;
     }
 
-    function withTimeout(promise, ms) {
-        return new Promise((resolve, reject) => {
-            const t = setTimeout(() => resolve(null), ms);
-            Promise.resolve(promise).then(
-                (v) => { clearTimeout(t); resolve(v); },
-                (e) => { clearTimeout(t); reject(e); }
-            );
-        });
-    }
-
-    // ------------------------------------------------------------------
-    // Mode A 召回打分（subSummaryToggle 开启）：流式配额选中
-    // Stage U 先对全池按 user fragScore 降序选满 userQuota 并移出池；
-    // 再按窗口最新→最旧逐片段，只对剩余池按该片段 fragScore 降序选满 winQuota；
-    // estTotal >= ragBudget 即停（后续窗口不编码、不打分）。
-    // 单分公式与三级缓存复用（doc/frag/pair）沿用旧逻辑；选中来源唯一。
-    // 无摘要 farEntry 直接排除（不占预算，绝不 BM25 回退）。
-    // 返回 { scored, packed, packedSet }：scored 与旧形状一致供 farScores；
-    // packed 为估算口径的选中结果（精确裁剪由调用方统一做）。
-    // ------------------------------------------------------------------
-    async function scoreFarEntriesModeA(queryUserText, farEntries, summaryMap, allRoleNames, windowEntries, windowFloors, ragBudget) {
-        const embedderReady = !!(NS.Embedder && NS.Embedder.isReady());
-        const RecallCache = NS.RecallCache;
-        const clamp01 = (v) => Math.min(1, Math.max(0, v));
-
-        const entryKeys = farEntries.map((e) => JSON.stringify(e));
-        const entrySummary = entryKeys.map((k) => summaryMap.get(k) || null);
-        const docs = farEntries.map(entryToDocText);
-        // 时间序位（与旧 docOrder 一致：同文本取首现下标）
-        const docOrder = new Map();
-        docs.forEach((text, i) => {
-            if (text && !docOrder.has(text)) docOrder.set(text, i);
-        });
-
-        // far 池摘要集合：消歧名单
-        const farSummaries = entrySummary.filter(Boolean);
-        const allNames = new Set(allRoleNames || []);
-        for (const s of farSummaries) if (Array.isArray(s.actor)) for (const a of s.actor) allNames.add(a);
-        const nameList = [...allNames];
-
-        // user 片段人物集：从全角色名单提取消息中提及的人物
-        const userActorSet = new Set();
-        for (const n of nameList) {
-            if (nameMatches(n, queryUserText, nameList)) userActorSet.add(n);
-        }
-        const userFrag = {
-            kind: 'user',
-            text: queryUserText || '',
-            actorSet: userActorSet,
-            location: [],
-            summary: null,
-            floor: null,
-        };
-
-        // 窗口片段（最新→最旧，无截断；无摘要窗口条目跳过该片段）
-        const windowFrags = [];
-        for (let k = windowEntries.length - 1, wi = 0; k >= 0; k--, wi++) {
-            const entry = windowEntries[k];
-            const s = entry ? summaryMap.get(JSON.stringify(entry)) : null;
-            if (!s) continue; // 无摘要窗口条目：跳过该片段
-            const winActorSet = new Set();
-            if (Array.isArray(s.actor)) for (const a of s.actor) winActorSet.add(a);
-            windowFrags.push({
-                kind: 'window',
-                wi,
-                floor: windowFloors ? (windowFloors[k] != null ? windowFloors[k] : null) : null,
-                text: (s.event && String(s.event).trim()) || '',
-                actorSet: winActorSet,
-                location: Array.isArray(s.location) ? s.location : [],
-                summary: s,
-            });
-        }
-
-        // 文档侧向量：优先命中 RecallCache.docVec，缺失经 EmbedStore 解析并回写（全池一次备好）
-        const entryDocs = new Array(farEntries.length);
-        const needTexts = [];
-        for (let i = 0; i < farEntries.length; i++) {
-            const s = entrySummary[i];
-            if (!s) { entryDocs[i] = null; continue; }
-            const entryKey = entryKeys[i];
-            if (embedderReady && RecallCache && RecallCache.getDocVecs) {
-                const c = RecallCache.getDocVecs(entryKey, s);
-                if (c) { entryDocs[i] = c; continue; }
-            }
-            const texts = [];
-            if (s.event && String(s.event).trim()) texts.push(String(s.event).trim());
-            if (Array.isArray(s.recall_when)) {
-                for (const r of s.recall_when) {
-                    const t = String(r == null ? '' : r).trim();
-                    if (t) texts.push(t);
-                }
-            }
-            entryDocs[i] = { _texts: texts };
-            texts.forEach((t) => { if (!needTexts.includes(t)) needTexts.push(t); });
-        }
-        if (needTexts.length > 0 && embedderReady) {
-            let vecMap = new Map();
-            if (NS.EmbedStore && typeof NS.EmbedStore.resolve === 'function') {
-                vecMap = await NS.EmbedStore.resolve(needTexts);
-            } else if (NS.Embedder) {
-                const vs = await NS.Embedder.encodeBatch(needTexts);
-                needTexts.forEach((t, idx) => vecMap.set(t, vs[idx]));
-            }
-            if (RecallCache && RecallCache.setDocVecs) {
-                for (let i = 0; i < farEntries.length; i++) {
-                    if (!entryDocs[i] || !entryDocs[i]._texts) continue;
-                    const s = entrySummary[i];
-                    const entryKey = entryKeys[i];
-                    const eventVec = (s.event && String(s.event).trim())
-                        ? vecMap.get(String(s.event).trim()) || null : null;
-                    const recallVecs = entryDocs[i]._texts.map((t) => vecMap.get(t) || null).filter(Boolean);
-                    const c = RecallCache.getDocVecs(entryKey, s);
-                    if (!c || c.eventVec !== eventVec) RecallCache.setDocVecs(entryKey, s, eventVec, recallVecs);
-                    entryDocs[i] = { eventVec, recallVecs };
-                }
-            } else {
-                for (let i = 0; i < farEntries.length; i++) {
-                    if (!entryDocs[i] || !entryDocs[i]._texts) continue;
-                    const s = entrySummary[i];
-                    const eventVec = (s.event && String(s.event).trim())
-                        ? vecMap.get(String(s.event).trim()) || null : null;
-                    const recallVecs = entryDocs[i]._texts.map((t) => vecMap.get(t) || null).filter(Boolean);
-                    entryDocs[i] = { eventVec, recallVecs };
-                }
-            }
-        } else {
-            for (let i = 0; i < farEntries.length; i++) {
-                if (entryDocs[i] && entryDocs[i]._texts) entryDocs[i] = { eventVec: null, recallVecs: [] };
-            }
-        }
-
-        // 片段 query 向量按需编码（命中 RecallCache.fragVec 则复用；总量满后尾部片段不编码）
-        async function fragVecOf(f) {
-            if (!f.text || !embedderReady) return null;
-            if (RecallCache && RecallCache.getFragVec) {
-                const hit = RecallCache.getFragVec(f.text);
-                if (hit) return hit;
-            }
-            const vecs = await NS.Embedder.encodeBatch([NS.Embedder.withQueryInstruction(f.text)]);
-            const v = vecs && vecs[0] ? vecs[0] : null;
-            if (RecallCache && RecallCache.setFragVec) RecallCache.setFragVec(f.text, v);
-            return v;
-        }
-
-        // 单片段对单条目的纯内容打分（公式沿用旧逻辑，经 pair 缓存）
-        function scoreOne(f, qv, i) {
-            const s = entrySummary[i];
-            const entryKey = entryKeys[i];
-            const cached = (RecallCache && RecallCache.getPair)
-                ? RecallCache.getPair(f.text, f.summary, entryKey, s) : null;
-            if (cached) return { fragScore: cached.fragScore, parts: cached.parts };
-            const doc = entryDocs[i] || { eventVec: null, recallVecs: [] };
-            const actors = Array.isArray(s.actor) ? s.actor : [];
-            const locations = Array.isArray(s.location) ? s.location : [];
-            // S_actor：Dice = 2|Q∩F|/(|Q|+|F|)，Q=片段人物集，F=远端 actor（去重，不排除主角）
-            const farActors = [...new Set(actors)];
-            let actorHit = 0;
-            if (f.kind === 'window') {
-                for (const aFar of farActors) {
-                    for (const aWin of f.actorSet) {
-                        if (nameMatches(aWin, aFar, nameList)) { actorHit++; break; }
-                    }
-                }
-            } else {
-                for (const aFar of farActors) if (f.actorSet.has(aFar)) actorHit++;
-            }
-            const actorScore = (f.actorSet.size + farActors.length) > 0
-                ? 2 * actorHit / (f.actorSet.size + farActors.length) : 0;
-            // S_location
-            let locHit = 0;
-            if (f.kind === 'window') {
-                for (const lFar of locations) {
-                    for (const lWin of f.location) { if (isHierMatch(lWin, lFar)) { locHit++; break; } }
-                }
-            } else {
-                for (const loc of locations) { if (loc && f.text.includes(loc)) locHit++; }
-            }
-            const locationScore = locations.length > 0 ? locHit / locations.length : 0;
-            // S_semantic = max(S_event, S_recall)
-            const sEvent = (doc.eventVec && qv) ? clamp01(NS.Embedder.cosine(qv, doc.eventVec)) : 0;
-            let sRecall = 0;
-            if (qv) for (const rv of doc.recallVecs) sRecall = Math.max(sRecall, clamp01(NS.Embedder.cosine(qv, rv)));
-            const sSemantic = Math.max(sEvent, sRecall);
-            // user 信息不受命中门槛限制；窗口片段要求 S_actor / S_location 至少一项命中
-            const fragScore = (f.kind === 'user' || actorScore > 0 || locationScore > 0) ? sSemantic : 0;
-            const parts = {
-                source: 'summary',
-                actor: actorHit + '/' + actors.length,
-                location: locHit + '/' + locations.length,
-                actorScore: Number(actorScore.toFixed(2)),
-                locationScore: Number(locationScore.toFixed(2)),
-                semantic: Number(sSemantic.toFixed(2)),
-            };
-            if (RecallCache && RecallCache.setPair) {
-                RecallCache.setPair(f.text, f.summary, entryKey, s, fragScore, parts);
-            }
-            return { fragScore, parts };
-        }
-
-        function fragLabel(f) {
-            if (f.kind === 'user') return 'user';
-            return f.floor != null ? ('f' + f.floor) : ('w' + f.wi);
-        }
-
-        const estOf = (entry) => Math.ceil(renderJourneyMarkdown([entry], 0).length / Constants.EST_CHARS_PER_TOKEN);
-        const userQuota = Math.max(0, ragBudget * Constants.MODEA_USER_BUDGET_RATIO);
-        const winQuota = Math.max(0, ragBudget * Constants.MODEA_WINDOW_BUDGET_RATIO);
-
-        const scored = new Array(farEntries.length).fill(null);
-        const picked = [];
-        const pickedSet = new Set(); // 文本键去重（与旧装箱一致）
-        let estTotal = 0;
-        // remaining：未被选走的候选下标（保持时间序）
-        const remaining = new Set();
-        for (let i = 0; i < farEntries.length; i++) {
-            if (entrySummary[i] && docs[i]) remaining.add(i);
-        }
-
-        function take(i, fragScore, parts, f, wPos) {
-            const text = docs[i];
-            if (!text || pickedSet.has(text)) return 0;
-            const entry = farEntries[i];
-            const est = estOf(entry);
-            const label = fragLabel(f);
-            pickedSet.add(text);
-            remaining.delete(i);
-            // evictRank：精确裁剪时的剔除优先级（越大越先剔；user 最后保）
-            const evictRank = f.kind === 'user' ? -1 : (windowFrags.length - wPos);
-            picked.push({
-                text, score: fragScore,
-                parts: Object.assign({ bestFrag: label }, parts),
-                order: docOrder.get(text) ?? Infinity,
-                entry, evictRank,
-            });
-            scored[i] = { index: i, score: fragScore, parts: picked[picked.length - 1].parts };
-            return est;
-        }
-
-        // Stage U：user 通道对全池打分，按降序选满 userQuota 并移出池
-        const qvUser = await fragVecOf(userFrag);
-        const userScores = new Map(); // i -> { fragScore, parts }
-        for (const i of remaining) {
-            userScores.set(i, scoreOne(userFrag, qvUser, i));
-        }
-        // 未命中者记 user 基线分（供 farScores 展示落选原因）
-        for (const [i, r] of userScores) {
-            scored[i] = {
-                index: i, score: r.fragScore,
-                parts: Object.assign({ bestFrag: 'user' }, r.parts),
-            };
-        }
-        const userRanked = [...userScores.entries()]
-            .sort((a, b) => b[1].fragScore - a[1].fragScore);
-        let usedUser = 0;
-        for (const [i, r] of userRanked) {
-            if (usedUser >= userQuota || estTotal >= ragBudget) break;
-            if (r.fragScore <= 0) continue;
-            if (!remaining.has(i)) continue;
-            const est = take(i, r.fragScore, r.parts, userFrag, 0);
-            if (est > 0) { usedUser += est; estTotal += est; }
-        }
-
-        // Stage W：按窗口最新→最旧逐片段，只对剩余池打分并选满 winQuota
-        for (let w = 0; w < windowFrags.length; w++) {
-            if (estTotal >= ragBudget) break; // 总量满：后续窗口不编码不打分
-            if (remaining.size === 0) break;
-            const f = windowFrags[w];
-            const qv = await fragVecOf(f);
-            const ranked = [];
-            for (const i of remaining) {
-                const r = scoreOne(f, qv, i);
-                ranked.push({ i, fragScore: r.fragScore, parts: r.parts });
-            }
-            ranked.sort((a, b) => b.fragScore - a.fragScore);
-            let usedWin = 0;
-            for (const r of ranked) {
-                if (usedWin >= winQuota || estTotal >= ragBudget) break;
-                if (r.fragScore <= 0) continue;
-                if (!remaining.has(r.i)) continue;
-                const est = take(r.i, r.fragScore, r.parts, f, w);
-                if (est > 0) { usedWin += est; estTotal += est; }
-            }
-        }
-
-        return { scored, packed: picked, packedSet: pickedSet };
-    }
-
     /**
-     * 语义打分（只读，UI 专用）：对输入文本计算全部楼层故事历程条目的 S_semantic。
-     * 输入文本按 user 信息流程编码（withQueryInstruction + RecallCache.fragVec 复用），
-     * 不受 S_actor / S_location 命中门槛限制——所有有有效召回摘要的条目均参与打分；
-     * 无有效摘要的条目 semantic 为 null。不修改 ST 的 chat 数组。
-     * @param {string} queryText - 用户输入的信息
-     * @returns {{query: string, embedderReady: boolean, entries: Array<{floor: number, index: number, 天数: string, 时间段: string, 地点: string, 历程: string, semantic: number|null}>}}
+     * 规划中段折叠：midEntries（时间序）按天分组（首现顺序），从最旧侧折叠。
+     * hier = NS.SubSummary.getCoverage() 只读快照（无 LLM）。
+     * midBudgetEst 为估算口径的中段预算（estChars 单位）。
+     * 天为原子单位：整天要么原文、要么摘要、要么丢弃。
+     * 部分落在正文覆盖区（tailCovered）的天永不折叠（其 L1 文本含正文内容，会重复）。
+     * 返回 { days, upperUsed }：
+     *   days: [{dayKey, label, count, entries, locations, level, text, endKey, dropped}]
+     *     level 0=原文，1=天摘要，≥2=上层合并，dropped=true=已丢弃。
      */
-    async function scoreJourneySemantics(queryText) {
-        const qText = String(queryText == null ? '' : queryText).trim();
-        const sourceChat = NS.bridge && NS.bridge.getCurrentChat ? NS.bridge.getCurrentChat() : null;
-        const embedderReady = !!(NS.Embedder && NS.Embedder.isReady());
-        const entries = [];
-        if (sourceChat && Array.isArray(sourceChat)) {
-            const summaryMap = buildSummaryMap(sourceChat);
-            const seen = new Set();
-            for (let floor = 1; floor < sourceChat.length; floor++) {
-                const item = sourceChat[floor];
-                if (!item || (!((("is_user" in item && !item.is_user) || (item.role && item.role === 'assistant'))))) continue;
-                const historyObj = getFloorStoryBlock(item);
-                if (!historyObj || !Array.isArray(historyObj.故事历程)) continue;
-                const journey = historyObj.故事历程;
-                for (let i = 0; i < journey.length; i++) {
-                    const entry = journey[i];
-                    if (!entry || typeof entry !== 'object') continue;
-                    const key = JSON.stringify(entry);
-                    if (seen.has(key)) continue;
-                    seen.add(key);
-                    entries.push({
-                        key: key,
-                        floor: floor,
-                        index: i,
-                        天数: entry.天数 || '',
-                        时间段: entry.时间段 || '',
-                        地点: entry.地点 || '',
-                        历程: extractItemProcess(entry),
-                        summary: summaryMap.get(key) || null,
-                    });
+    function planFoldSlots(midEntries, fullDayCounts, midDayCounts, hier, midBudgetEst) {
+        const days = [];
+        const dayIdx = new Map();
+        for (const entry of midEntries) {
+            const dk = dayKeyOf(entry);
+            let d = dayIdx.has(dk) ? days[dayIdx.get(dk)] : null;
+            if (!d) {
+                d = { dayKey: dk, label: dayLabelOf(dk), count: 0, entries: [], locations: [], level: 0, text: null, endKey: dk, dropped: false };
+                dayIdx.set(dk, days.length);
+                days.push(d);
+            }
+            d.entries.push(entry);
+            d.count++;
+            const loc = String(entry.地点 || '').trim();
+            if (loc && !d.locations.includes(loc)) d.locations.push(loc);
+        }
+        // 完全落在中段内的天（才允许折叠/参与上层合并）
+        const fullyInside = new Set();
+        for (const d of days) {
+            if ((fullDayCounts.get(d.dayKey) || 0) === d.count) fullyInside.add(d.dayKey);
+        }
+        const l1ByDay = new Map();
+        if (hier && Array.isArray(hier.days)) {
+            for (const hd of hier.days) {
+                if (hd && hd.text && fullyInside.has(hd.dayKey)) l1ByDay.set(hd.dayKey, hd.text);
+            }
+        }
+        const validUpper = [];
+        if (hier && Array.isArray(hier.upper)) {
+            for (const u of hier.upper) {
+                if (u && u.text) validUpper.push(u);
+            }
+        }
+        const order = days.map((d) => d.dayKey);
+        const dayEst = (d) => {
+            if (d.dropped) return 0;
+            if (d.level === 0) return estChars(renderJourneyMarkdown(d.entries, 0));
+            return estChars(renderJourneyMarkdown([summaryToEntry(d.dayKey, d.endKey, d.text, d.locations)], 0));
+        };
+        const totalEst = () => days.reduce((a, d) => a + dayEst(d), 0);
+
+        // Phase A：从最旧天开始把 L0 换成 L1（有有效天摘要且完全落在中段内才可折）
+        for (const d of days) {
+            if (totalEst() <= midBudgetEst) break;
+            if (d.level === 0 && fullyInside.has(d.dayKey)) {
+                const t = l1ByDay.get(d.dayKey);
+                if (t) {
+                    d.level = 1;
+                    d.text = t;
                 }
             }
         }
-        if (!embedderReady || qText === '') {
-            for (const e of entries) {
-                e.semantic = null;
-                e.event = null;
-                e.recall = [];
-                delete e.summary;
-                delete e.key;
-            }
-            return { query: qText, embedderReady: embedderReady, entries: entries };
-        }
-
-        // 查询向量：user 信息流程（查询指令 + RecallCache.fragVec 复用）
-        const RecallCache = NS.RecallCache;
-        let qv = (RecallCache && RecallCache.getFragVec) ? RecallCache.getFragVec(qText) : null;
-        if (!qv) {
-            const vecs = await NS.Embedder.encodeBatch([NS.Embedder.withQueryInstruction(qText)]);
-            qv = vecs && vecs[0] ? vecs[0] : null;
-            if (RecallCache && RecallCache.setFragVec) RecallCache.setFragVec(qText, qv);
-        }
-
-        // 文档侧向量：优先命中 RecallCache.docVec，缺失经 EmbedStore 解析并回写
-        // 第一遍：逐条建文本清单（事件 + 各触发，保持文本与向量一一对应），收集需补编码的文本
-        const needTexts = [];
-        for (const e of entries) {
-            const s = e.summary;
-            if (!s) continue;
-            e._eventText = (s.event && String(s.event).trim()) ? String(s.event).trim() : null;
-            e._recallTexts = [];
-            if (Array.isArray(s.recall_when)) {
-                for (const r of s.recall_when) {
-                    const t = String(r == null ? '' : r).trim();
-                    if (t) e._recallTexts.push(t);
-                }
-            }
-            e._cached = (RecallCache && RecallCache.getDocVecs) ? (RecallCache.getDocVecs(e.key, s) || null) : null;
-            const cachedRecallOk = e._cached && Array.isArray(e._cached.recallVecs) && e._cached.recallVecs.length === e._recallTexts.length;
-            if (!cachedRecallOk) {
-                e._recallTexts.forEach((t) => { if (!needTexts.includes(t)) needTexts.push(t); });
-            }
-            if (e._eventText && !(e._cached && e._cached.eventVec)) {
-                if (!needTexts.includes(e._eventText)) needTexts.push(e._eventText);
-            }
-        }
-        const vecMap = new Map();
-        if (needTexts.length > 0) {
-            if (NS.EmbedStore && typeof NS.EmbedStore.resolve === 'function') {
-                const rm = await NS.EmbedStore.resolve(needTexts);
-                for (const [t, v] of rm) vecMap.set(t, v);
-            } else {
-                const vs = await NS.Embedder.encodeBatch(needTexts);
-                needTexts.forEach((t, idx) => vecMap.set(t, vs[idx]));
-            }
-        }
-
-        const clamp01 = (v) => Math.min(1, Math.max(0, v));
-        for (const e of entries) {
-            const s = e.summary;
-            let semantic = null;
-            let eventPart = null;
-            const recallParts = [];
-            if (s) {
-                const cached = e._cached;
-                const cachedRecallOk = cached && Array.isArray(cached.recallVecs) && cached.recallVecs.length === e._recallTexts.length;
-                const eventVec = (cached && cached.eventVec) ? cached.eventVec : (e._eventText ? (vecMap.get(e._eventText) || null) : null);
-                const recallPairs = e._recallTexts
-                    .map((t, i) => ({ text: t, vec: cachedRecallOk ? cached.recallVecs[i] : (vecMap.get(t) || null) }))
-                    .filter((p) => p.vec);
-                if (!cached && (eventVec || recallPairs.length > 0) && RecallCache && RecallCache.setDocVecs) {
-                    RecallCache.setDocVecs(e.key, s, eventVec, recallPairs.map((p) => p.vec));
-                }
-                let sEvent = null;
-                let sRecall = 0;
-                if (qv) {
-                    if (eventVec) sEvent = clamp01(NS.Embedder.cosine(qv, eventVec));
-                    for (const p of recallPairs) {
-                        const sc = clamp01(NS.Embedder.cosine(qv, p.vec));
-                        recallParts.push({ text: p.text, score: Number(sc.toFixed(2)) });
-                        if (sc > sRecall) sRecall = sc;
+        // Phase B：从最旧侧把连续同层天换成父节点（逐层上升）
+        if (totalEst() > midBudgetEst) {
+            const maxLevel = (typeof Constants.HIER_MAX_LEVELS === 'number' && Constants.HIER_MAX_LEVELS >= 2)
+                ? Math.floor(Constants.HIER_MAX_LEVELS) : 4;
+            for (let level = 2; level <= maxLevel; level++) {
+                if (totalEst() <= midBudgetEst) break;
+                for (const u of validUpper) {
+                    if (u.level !== level) continue;
+                    if (totalEst() <= midBudgetEst) break;
+                    // span 必须整体完全落在中段内（防正文重复），且 span 内中段天
+                    // 必须全部处于 level-1 且未丢弃
+                    if (!spanFullyInside(u.startKey, u.endKey, fullDayCounts, midDayCounts)) continue;
+                    const covered = days.filter((d) => !d.dropped && dayKeyInSpan(d.dayKey, u.startKey, u.endKey, order));
+                    if (covered.length <= 1) continue;
+                    if (!covered.every((d) => d.level === level - 1)) continue;
+                    if (!covered.every((d) => fullyInside.has(d.dayKey))) continue;
+                    const first = covered[0];
+                    first.level = level;
+                    first.text = u.text;
+                    first.endKey = u.endKey;
+                    // 合并地点；被吞掉的天标记 mergedInto（与精确裁剪的丢弃区分）
+                    for (const d of covered.slice(1)) {
+                        for (const loc of d.locations) {
+                            if (loc && !first.locations.includes(loc)) first.locations.push(loc);
+                        }
+                        d.dropped = true;
+                        d.mergedInto = u.key;
+                        d.mergedLevel = level;
                     }
                 }
-                if (e._eventText !== null) eventPart = { text: e._eventText, score: Number((sEvent === null ? 0 : sEvent).toFixed(2)) };
-                semantic = Number(Math.max(sEvent === null ? 0 : sEvent, sRecall).toFixed(2));
             }
-            e.semantic = semantic;
-            e.event = eventPart;
-            e.recall = recallParts;
-            delete e.summary;
-            delete e._eventText;
-            delete e._recallTexts;
-            delete e._cached;
-            delete e.key;
         }
-        return { query: qText, embedderReady: embedderReady, entries: entries };
+        return { days, upperUsed: validUpper.length };
+    }
+
+    // 槽位 → 统一 markdown 条目列（原文与摘要伪条目同形，一次渲染）
+    function slotsToEntries(days) {
+        const out = [];
+        for (const d of days) {
+            if (d.dropped) continue;
+            if (d.level === 0) {
+                for (const e of d.entries) out.push(e);
+            } else {
+                out.push(summaryToEntry(d.dayKey, d.endKey, d.text, d.locations));
+            }
+        }
+        return out;
     }
 
     async function buildPromptData(chatCopy, options) {
-        const runRag = Boolean(options && options.runRag);
+        const runFold = Boolean(options && (options.runFold !== undefined ? options.runFold : options.runRag));
         const historyTemplate = parseTemplate(Settings.get('historyPrompt'), true);
         const characterTemplate = isRoleCardEnabled() ? parseTemplate(Settings.get('characterPrompt'), true) : null;
         if (historyTemplate === null || (isRoleCardEnabled() && characterTemplate === null)) {
@@ -1356,43 +931,35 @@ ${newCharacterCardTemplate}
 
         let tokenLimit = Settings.get('tokenLimit');
         if (typeof tokenLimit !== 'number' || isNaN(tokenLimit)) tokenLimit = Settings.defaultSettings.tokenLimit;
-        let ragRatio = Settings.get('ragRatio');
-        if (typeof ragRatio !== 'number' || isNaN(ragRatio) || ragRatio <= 0) ragRatio = Settings.defaultSettings.ragRatio;
 
         // 模板/包装开销：STORY_DATA 骨架 + NEW_STORY_DATA 模板恒附在最终消息上，
         // 从内容预算中扣除，保证最终 tokenCount ≤ tokenLimit
         const overheadTokens = await getTokenCountAsync(getCharPrompt({ 前文: '' }, {}));
         const contentLimit = Math.max(1, tokenLimit - overheadTokens);
 
-        // Mode A（二级摘要开启）召回不依赖 BM25 检索器，故激活门对两者都开放
-        const useModeA = !!(NS.SubSummary && Settings.get('subSummaryToggle'));
-
         let fullMidMarkdown = renderJourneyMarkdown(midEntries, midMaxDay);
         const fullTokens = await getTokenCountAsync(joinNonEmpty([fullMidMarkdown, tailText]) + charJson);
 
-        const ragReady = (NS.Retriever ? NS.Retriever.isReady() : false) || useModeA;
-        const ragWillActivate = ragReady && fullTokens > contentLimit * (1 - ragRatio);
-        console.log(`[Chat History Optimization] 全量 ${fullTokens} tokens，tokenLimit=${tokenLimit}（模板开销 ${overheadTokens}，内容预算 ${contentLimit}），ragRatio=${ragRatio}，RAG ${ragWillActivate ? '将启用' : '不启用'}（ready=${ragReady}）`);
+        // 分层折叠由预算自然决定：全量装得下 → 零压缩；装不下 → 从最旧侧折叠。
+        // 发送前永不等 LLM：只读已有摘要，缺失父节点用子节点原文兜底。
+        const hierWillActivate = fullTokens > contentLimit;
+        console.log(`[Chat History Optimization] 全量 ${fullTokens} tokens，tokenLimit=${tokenLimit}（模板开销 ${overheadTokens}，内容预算 ${contentLimit}），分层折叠${hierWillActivate ? '将启用' : '不启用'}（中段 ${midEntries.length} 条）`);
 
-        let rag = {
+        let hier = {
             active: false,
-            willActivate: ragWillActivate,
-            hits: [],
-            farScores: [],
-            windowCount: midEntries.length,
-            farCount: 0,
-            query: '',
+            willActivate: hierWillActivate,
+            days: [],
+            upper: [],
+            foldedDays: 0,
+            droppedDays: 0,
         };
         let midMarkdown = fullMidMarkdown;
-        let ragMarkdown = '';
 
-        if (ragWillActivate && runRag && midEntries.length > 0) {
-            const ragBudget = Math.max(1, Math.round(contentLimit * ragRatio));
-            const midBudget = contentLimit - ragBudget;
-            // 正文硬上限：正文+角色卡 超 midBudget 时从最旧整条 assistant 消息丢弃，
-            // 其历程条目回归中段（可被窗口/召回重新拾取）
+        if (hierWillActivate && runFold && midEntries.length > 0) {
+            // 正文硬上限：正文+角色卡超 contentLimit 时从最旧整条 assistant 消息丢弃，
+            // 其历程条目回归中段（仍可被折叠覆盖）
             let tailTok = await getTokenCountAsync(tailText + charJson);
-            while (tailTok > midBudget && tailPos < assistantIdxArr.length - 1) {
+            while (tailTok > contentLimit && tailPos < assistantIdxArr.length - 1) {
                 tailPos++;
                 const t = buildTail(tailPos);
                 tailText = t.text;
@@ -1403,188 +970,65 @@ ${newCharacterCardTemplate}
                 fullMidMarkdown = renderJourneyMarkdown(midEntries, midMaxDay);
                 tailTok = await getTokenCountAsync(tailText + charJson);
             }
-            if (tailTok > midBudget) {
-                console.warn(`[Chat History Optimization] 正文+角色卡（${tailTok}）超出中段预算（${midBudget}）且无可丢弃消息，最终将超 tokenLimit，请调大 tokenLimit 或调小 keepCount`);
+            if (tailTok > contentLimit) {
+                console.warn(`[Chat History Optimization] 正文+角色卡（${tailTok}）超出内容预算（${contentLimit}）且无可丢弃消息，最终将超 tokenLimit，请调大 tokenLimit 或调小 keepCount`);
             }
-            // 楼层归属：按首现顺序扫各楼层 NEW_HISTORY 块，原始条目 JSON 作键
-            // （与 getStoryProgressRange 的全局去重语义一致），供窗口对齐与 bestFrag 楼层标注
-            const floorByKey = new Map();
-            {
-                const seen = new Set();
-                for (let f = 1; f < chatCopy.length; f++) {
-                    const item = chatCopy[f];
-                    if (!item) continue;
-                    const isAssistant = ("is_user" in item && !item.is_user) || (item.role && item.role == "assistant");
-                    if (!isAssistant) continue;
-                    const block = getFloorStoryBlock(item);
-                    if (!block || !Array.isArray(block.故事历程)) continue;
-                    for (const e of block.故事历程) {
-                        if (!e || typeof e !== 'object') continue;
-                        const key = JSON.stringify(e);
-                        if (seen.has(key)) continue;
-                        seen.add(key);
-                        floorByKey.set(key, f);
-                    }
+            const midBudget = Math.max(0, contentLimit - tailTok);
+            // 全历程/中段按天计数：判定"完全落在中段内"的天（部分被正文覆盖的天永不折叠）
+            const fullDayCounts = new Map();
+            for (const e of fullJourney) {
+                const dk = dayKeyOf(e);
+                fullDayCounts.set(dk, (fullDayCounts.get(dk) || 0) + 1);
+            }
+            const midDayCounts = new Map();
+            for (const e of midEntries) {
+                const dk = dayKeyOf(e);
+                midDayCounts.set(dk, (midDayCounts.get(dk) || 0) + 1);
+            }
+            try {
+                const coverage = (NS.SubSummary && typeof NS.SubSummary.getCoverage === 'function')
+                    ? NS.SubSummary.getCoverage() : { days: [], upper: [] };
+                const plan = planFoldSlots(midEntries, fullDayCounts, midDayCounts, coverage, midBudget);
+                const renderPlan = () => renderJourneyMarkdown(slotsToEntries(plan.days), midMaxDay);
+                midMarkdown = renderPlan();
+                // 精确计数：超预算则从最旧槽位逐个丢弃，直到 ≤ midBudget（无次数上限，保证硬上限）
+                let tok = await getTokenCountAsync(midMarkdown);
+                while (tok > midBudget) {
+                    const idx = plan.days.findIndex((d) => !d.dropped);
+                    if (idx === -1) break;
+                    plan.days[idx].dropped = true;
+                    midMarkdown = renderPlan();
+                    tok = await getTokenCountAsync(midMarkdown);
                 }
-            }
-            const midFloors = midEntries.map((e) => floorByKey.get(JSON.stringify(e)) ?? null);
-            // 二分搜索最大后缀窗口 k：tokens(窗口markdown + 正文 + 角色卡) ≤ midBudget
-            let lo = 0, hi = midEntries.length, bestK = 0;
-            while (lo <= hi) {
-                const k = (lo + hi) >> 1;
-                const windowMarkdown = k === 0 ? '' : renderJourneyMarkdown(midEntries.slice(midEntries.length - k), midMaxDay);
-                const tokens = await getTokenCountAsync(joinNonEmpty([windowMarkdown, tailText]) + charJson);
-                if (tokens <= midBudget) {
-                    bestK = k;
-                    lo = k + 1;
-                } else {
-                    hi = k - 1;
-                }
-            }
-            // 窗口起点对齐楼层边界：楼层不可拆，整层要么在窗口要么在远端
-            while (bestK > 0) {
-                const start = midEntries.length - bestK;
-                if (start === 0) break;
-                const fCur = midFloors[start], fPrev = midFloors[start - 1];
-                if (fCur == null || fPrev == null || fCur !== fPrev) break;
-                bestK--;
-            }
-            const farEntries = midEntries.slice(0, midEntries.length - bestK);
-            midMarkdown = bestK === 0 ? '' : renderJourneyMarkdown(midEntries.slice(midEntries.length - bestK), midMaxDay);
-            rag.windowCount = bestK;
-            rag.farCount = farEntries.length;
-
-            // 查询信号：最后一条消息的 mes；为空（空发送/重生成等流程）时向前回退到
-            // 最近一条非空用户消息，保证 user 通道有提问信号可驱动
-            let query = (chatCopy[chatCopy.length - 1] && chatCopy[chatCopy.length - 1].mes) || '';
-            if (query.trim() === '') {
-                for (let i = chatCopy.length - 1; i >= 0; i--) {
-                    const item = chatCopy[i];
-                    const isUser = item && (item.is_user === true || item.role === 'user');
-                    const text = item && typeof item.mes === 'string' ? item.mes : '';
-                    if (isUser && text.trim() !== '') { query = text; break; }
-                }
-            }
-            rag.query = query;
-            // 组合查询文本：最新用户消息 + 窗口历程条目，供混合打分与 BM25 回退共用
-            const queryText = joinNonEmpty([query, ...midEntries.slice(midEntries.length - bestK).map(entryToDocText)]);
-            if (farEntries.length > 0 && queryText !== '') {
-                try {
-                    const docs = farEntries.map(entryToDocText);
-                    // 记录每条远端条目在 farEntries 中的原始（时间）顺序，用于最终排序
-                    const docOrder = new Map();
-                    docs.forEach((text, i) => {
-                        if (text && !docOrder.has(text)) docOrder.set(text, i);
-                    });
-                    const uniqueDocCount = docOrder.size;
-
-                    const summaryMap = buildSummaryMap(chatCopy);
-                    const allRoleNames = Object.keys(mergedDataInfo.characterData || {});
-
-                    let scored;
-                    // Mode A 流式配额已在打分时完成选中（packed/packedSet 直接可用）；
-                    // Mode B 沿用分数降序贪心装入
-                    let packed = [];
-                    let packedSet = new Set();
-                    const modeAStreamed = useModeA;
-                    if (useModeA) {
-                        // Mode A：发送前补齐缺失二级摘要（带超时），绝不 BM25 回退
-                        const lastFloor = chatCopy.length - 1;
-                        const missing = NS.SubSummary.getRecallMissingCount
-                            ? NS.SubSummary.getRecallMissingCount(1, lastFloor) : 0;
-                        if (missing > 0 && NS.SubSummary.isConfigured && NS.SubSummary.isConfigured()) {
-                            if (NS.RecallCache && NS.RecallCache.setFilling) NS.RecallCache.setFilling(missing);
-                            try {
-                                await withTimeout(NS.SubSummary.ensureRecallSummaries(1, lastFloor), Constants.SUBSUMMARY_WAIT_TIMEOUT_MS);
-                            } catch (e) {
-                                console.error('[Chat History Optimization] 二级摘要补生成失败:', e);
-                            }
-                            if (NS.RecallCache && NS.RecallCache.setFilled) NS.RecallCache.setFilled();
-                        } else if (missing > 0) {
-                            console.warn(`[Chat History Optimization] 二级摘要功能已开启但未配置连接，缺失 ${missing} 条摘要未生成，相关条目本次不参与召回`);
-                        }
-                        const windowEntries = bestK === 0 ? [] : midEntries.slice(midEntries.length - bestK);
-                        const windowFloors = bestK === 0 ? [] : midFloors.slice(midEntries.length - bestK);
-                        const streamRes = await scoreFarEntriesModeA(query, farEntries, summaryMap, allRoleNames, windowEntries, windowFloors, ragBudget);
-                        scored = streamRes.scored;
-                        packed = streamRes.packed;
-                        packedSet = streamRes.packedSet;
-                    } else {
-                        scored = await scoreFarEntries(queryText, farEntries, docs, summaryMap, allRoleNames);
-                        // 按最终分数降序贪心装入（单条详细 markdown 估算成本，1 token ≈ 1.5 汉字）
-                        const ranked = scored
-                            .map((r, i) => (r && docs[i] ? r : null))
-                            .filter(Boolean)
-                            .sort((a, b) => b.score - a.score);
-                        let used = 0;
-                        let minEst = Infinity;
-                        for (const r of ranked) {
-                            // 预算装满 / 远端条目已全部装入 / 剩余预算装不下已见最小条目 时停止
-                            if (used >= ragBudget || packedSet.size >= uniqueDocCount
-                                || (minEst !== Infinity && used + minEst > ragBudget)) break;
-                            const text = docs[r.index];
-                            if (packedSet.has(text)) continue;
-                            const entry = farEntries[r.index];
-                            const est = Math.ceil(renderJourneyMarkdown([entry], 0).length / Constants.EST_CHARS_PER_TOKEN);
-                            if (est < minEst) minEst = est;
-                            if (used + est > ragBudget) continue;
-                            packedSet.add(text);
-                            packed.push({ text, score: r.score, parts: r.parts, order: docOrder.get(text) ?? Infinity, entry });
-                            used += est;
-                        }
-                    }
-                    // 按时间序渲染后精确计数：装箱估算(1.5 字符/token)对中文偏乐观，
-                    // 超预算则逐条剔除，直到 ≤ ragBudget（无次数上限，保证硬上限）。
-                    // 剔除优先级：Mode B 从最低分剔；Mode A 从最旧窗口来源剔（同源内选中分低先剔），user 锚点最后保。
-                    if (packed.length > 0) {
-                        const finalize = () => {
-                            if (packed.length === 0) {
-                                ragMarkdown = '';
-                                rag.hits = [];
-                                rag.active = false;
-                                return;
-                            }
-                            packed.sort((a, b) => a.order - b.order);
-                            ragMarkdown = renderJourneyMarkdown(packed.map((p) => p.entry), midMaxDay);
-                            rag.hits = packed.map((p) => ({ text: p.text, score: p.score, parts: p.parts }));
-                            rag.active = true;
-                        };
-                        finalize();
-                        let tok = await getTokenCountAsync(ragMarkdown);
-                        while (tok > ragBudget && packed.length > 0) {
-                            if (modeAStreamed) {
-                                packed.sort((a, b) => (b.evictRank - a.evictRank) || (a.score - b.score));
-                            } else {
-                                packed.sort((a, b) => a.score - b.score);
-                            }
-                            packedSet.delete(packed[0].text);
-                            packed.shift();
-                            finalize();
-                            tok = await getTokenCountAsync(ragMarkdown);
-                        }
-                    }
-                    // 全部远端条目的打分明细（命中 + 未命中 + 无摘要被排除），
-                    // UI 以 entryToDocText 反查，在每个 far 卡片上标记 RAG命中/未命中
-                    rag.farScores = farEntries.map((entry, i) => {
-                        const r = scored[i];
-                        const text = docs[i];
-                        return {
-                            text,
-                            score: r ? r.score : null,
-                            parts: r ? r.parts : null,
-                            hit: !!(text && packedSet.has(text)),
-                        };
-                    });
-                } catch (e) {
-                    console.error('[Chat History Optimization] RAG retrieval failed, keeping capped window mid', e);
-                    rag = { active: false, willActivate: true, hits: [], farScores: [], windowCount: bestK, farCount: farEntries.length, query: rag.query };
-                    ragMarkdown = '';
-                    // midMarkdown 保持二分窗口结果（≤ midBudget），不退回无上限全量
-                }
+                hier.active = true;
+                hier.days = plan.days.map((d) => ({
+                    dayKey: d.dayKey,
+                    label: d.label,
+                    count: d.count,
+                    level: d.dropped ? (d.mergedInto ? d.mergedLevel : -1) : d.level,
+                    text: (!d.dropped && d.level > 0) ? d.text : null,
+                    endKey: d.endKey,
+                    mergedInto: d.mergedInto || null,
+                }));
+                hier.upper = (coverage.upper || []).filter((u) => u && u.text).map((u) => ({
+                    level: u.level,
+                    key: u.key,
+                    startKey: u.startKey,
+                    endKey: u.endKey,
+                    startLabel: u.startLabel,
+                    endLabel: u.endLabel,
+                    text: u.text,
+                }));
+                hier.foldedDays = hier.days.filter((d) => d.level > 0).length;
+                hier.droppedDays = hier.days.filter((d) => d.level < 0).length;
+            } catch (e) {
+                console.error('[Chat History Optimization] 分层折叠失败，使用全量中段', e);
+                hier = { active: false, willActivate: true, days: [], upper: [], foldedDays: 0, droppedDays: 0 };
+                midMarkdown = fullMidMarkdown;
             }
         }
 
-        historyData.前文 = joinNonEmpty([ragMarkdown, midMarkdown, tailText]);
+        historyData.前文 = joinNonEmpty([midMarkdown, tailText]);
         // token 数按最终拼接的最后一条消息（含 STORY_DATA 包装与 NEW_STORY_DATA 模板）计算，
         // 与实际发送给模型的内容一致
         const lastMessage = getCharPrompt(historyData, characterData);
@@ -1597,10 +1041,10 @@ ${newCharacterCardTemplate}
             activeRoleNames: Object.keys(characterData),
             failedFloors: mergedDataInfo.failedFloors,
             failedDetails: mergedDataInfo.failedDetails,
-            ragMarkdown,
+            hierMarkdown: midMarkdown,
             lastMessage,
             tokenCount,
-            rag,
+            hier,
         };
     }
 
@@ -1625,20 +1069,20 @@ ${newCharacterCardTemplate}
     /**
      * 只读解析当前聊天记录并刷新统计（失败楼层/角色卡/Token 数/发送预览），
      * 用于 UI 打开时拿到最新数据。与正常生成走同一装配逻辑
-     * （含 RAG 检索与首条信息后缀），保证预览与"现在生成会发送的内容"一致。
+     * （含分层折叠与首条信息后缀），保证预览与"现在生成会发送的内容"一致。
      * 不修改 ST 的 chat 数组。
      */
     async function refreshStats() {
         const sourceChat = NS.bridge && NS.bridge.getCurrentChat ? NS.bridge.getCurrentChat() : null;
         if (!sourceChat || !Array.isArray(sourceChat) || sourceChat.length === 0) return;
         const chatCopy = JSON.parse(JSON.stringify(sourceChat));
-        const result = await assembleFinalPrompt(chatCopy, { runRag: true });
+        const result = await assembleFinalPrompt(chatCopy, { runFold: true });
         notifyStats({
             failedFloors: result.failedFloors,
             roles: JSON.parse(JSON.stringify(result.allCharacterData)),
             activeRoleNames: [...result.activeRoleNames],
             tokenCount: result.tokenCount,
-            rag: result.rag,
+            hier: result.hier,
             lastMessage: result.lastMessage,
         });
     }
@@ -1681,19 +1125,8 @@ ${newCharacterCardTemplate}
         }
 
         // 深拷贝：mergeDataInfo 会写入 item.messageCount，不能污染 ST 数据
-        // TEMP-DIAG（查 user query 为空问题用，定位后删除）
-        try {
-            const lastItem = chat[chat.length - 1];
-            console.log('[Chat History Optimization] 拦截器输入检查', JSON.stringify({
-                chatLen: chat.length,
-                lastIsUser: !!(lastItem && lastItem.is_user),
-                lastRole: lastItem && lastItem.role,
-                mesLen: String((lastItem && lastItem.mes) || '').length,
-                mesHead: String((lastItem && lastItem.mes) || '').slice(0, 80),
-            }));
-        } catch (diagE) { console.log('[Chat History Optimization] 拦截器输入检查失败', diagE); }
         const chatCopy = JSON.parse(JSON.stringify(chat));
-        const result = await assembleFinalPrompt(chatCopy, { runRag: true });
+        const result = await assembleFinalPrompt(chatCopy, { runFold: true });
         const historyData = result.historyData;
         const characterData = result.characterData;
 
@@ -1704,7 +1137,7 @@ ${newCharacterCardTemplate}
             roles: JSON.parse(JSON.stringify(result.allCharacterData)),
             activeRoleNames: [...result.activeRoleNames],
             tokenCount: result.tokenCount,
-            rag: result.rag,
+            hier: result.hier,
             lastMessage: result.lastMessage,
         });
 
@@ -1747,7 +1180,6 @@ ${newCharacterCardTemplate}
         refreshStats,
         getFloorStoryBlock,
         getStoryProgressRange,
-        scoreJourneySemantics,
         entryToDocText,
         getNameSearchTerms,
         nameMatches,

@@ -1069,6 +1069,16 @@
     background: var(--coo-valid-soft);
 }
 
+#coo-root .coo-story-day-entry {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px dashed var(--coo-border-soft);
+}
+
+#coo-root .coo-story-day-entry .coo-story-item-body {
+    margin-top: 4px;
+}
+
 #coo-root .coo-story-only-label {
     display: inline-flex;
     align-items: center;
@@ -1341,28 +1351,6 @@
         max-width: 100%;
         font-size: 10px;
     }
-}
-
-/* ------------------------------ "补漏" 气泡 ------------------------------- */
-
-#coo-root .coo-fill-bubble {
-    position: fixed;
-    right: 18px;
-    bottom: 18px;
-    z-index: 10001;
-    max-width: 280px;
-    padding: 10px 14px;
-    border-radius: 10px;
-    background: var(--coo-accent, #4a7bd6);
-    color: #fff;
-    font-size: 13px;
-    line-height: 1.4;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
-    opacity: 0.96;
-}
-
-#coo-root .coo-fill-bubble[hidden] {
-    display: none;
 }
 
 /* ------------------------------ NEW_STORY_DATA 解析失败气泡 ------------------------------- */

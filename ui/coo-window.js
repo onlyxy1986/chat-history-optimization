@@ -25,23 +25,18 @@
 
     const TABS = [
         { id: 'settings', label: '基础设置', icon: 'fa-solid fa-sliders' },
-        { id: 'subsummary', label: '二级摘要', icon: 'fa-solid fa-compress' },
+        { id: 'subsummary', label: '分层摘要', icon: 'fa-solid fa-compress' },
         { id: 'templates', label: '模板', icon: 'fa-solid fa-file-code' },
         { id: 'roles', label: '角色查看', icon: 'fa-solid fa-id-card' },
         { id: 'story', label: '故事历程', icon: 'fa-solid fa-route' },
-        { id: 'semantic', label: '语义打分', icon: 'fa-solid fa-magnifying-glass-chart' },
         { id: 'preview', label: '发送预览', icon: 'fa-solid fa-paper-plane' },
     ];
 
     let extensionRetryTimer = null;
     let activeTabId = 'settings';
     let selectedRoleName = '';
-    // 故事历程 tab 当前查询的楼层范围（供复选框/统计刷新时重绘）
+    // 故事历程 tab 当前查询的楼层范围（供统计刷新时重绘）
     let storyQuery = { start: '1', end: '' };
-    let storySelectedOnly = false;
-    // 语义打分 tab 当前输入文本与最近一次计算结果（切 tab / 摘要批次结束后保留）
-    let semanticQuery = '';
-    let semanticResult = null;
 
     // ------------------------------------------------------------------
     // Storage helpers
@@ -403,16 +398,13 @@
         section.appendChild(createSwitchRow('启用功能', 'extensionToggle'));
         section.appendChild(createSwitchRow('启用角色卡', 'roleCardToggle'));
         section.appendChild(createNumberRow('正文深度', '（保留的AI最后回复的完整消息数量）', 'keepCount', { min: 0, max: 100, step: 1 }));
-        section.appendChild(createNumberRow('Token 限制', '（超限且RAG可用时启用分层注入）', 'tokenLimit', { min: 0, max: 2000000, step: 1024 }));
-        section.appendChild(createSliderRow('稀疏远期记忆预算', '（远期历程区段占 Token 限制的比例）', 'ragRatio', { min: 0.1, max: 0.9, step: 0.05 }));
+        section.appendChild(createNumberRow('Token 限制', '（超限时启用分层折叠注入）', 'tokenLimit', { min: 0, max: 2000000, step: 1024 }));
 
         const settings = Settings.getSettings();
         section.querySelector('[data-coo-field="extensionToggle"]').checked = Boolean(settings.extensionToggle);
         section.querySelector('[data-coo-field="roleCardToggle"]').checked = Boolean(settings.roleCardToggle);
         section.querySelector('[data-coo-field="keepCount"]').value = settings.keepCount;
         section.querySelector('[data-coo-field="tokenLimit"]').value = settings.tokenLimit;
-        section.querySelector('[data-coo-field="ragRatio"]').value = settings.ragRatio;
-        refreshSliderValues(section);
 
         panel.appendChild(section);
     }
@@ -460,157 +452,147 @@
         return fieldBox;
     }
 
-    function buildStorySummary(floor, index) {
+    function parseStoryDayNumber(dayStr) {
+        if (typeof dayStr !== 'string') return null;
+        const m = dayStr.match(/第\s*(\d+)\s*天/);
+        return m ? parseInt(m[1], 10) : null;
+    }
+
+    function storyDayKey(entry) {
+        const day = parseStoryDayNumber(entry.天数);
+        return day !== null ? String(day) : 'unknown';
+    }
+
+    function storyDayLabel(dayKey) {
+        return dayKey === 'unknown' ? '未知天' : `第${dayKey}天`;
+    }
+
+    // 层级徽章：0=原文，1=天摘要，≥2=Lx合并，-1=已丢弃
+    function buildLevelBadge(level) {
+        if (level === 1) return createText('span', 'coo-rag-hit-score', '天摘要');
+        if (level > 1) return createText('span', 'coo-rag-hit-score', `L${level}合并`);
+        if (level < 0) return createText('span', 'coo-rag-miss-score', '已丢弃');
+        return createText('span', 'coo-rag-miss-score', '原文');
+    }
+
+    function buildDaySummaryBox(dayKey, dayText, emptyText) {
         const box = document.createElement('div');
         box.className = 'coo-story-summary';
-        const valid = NS.SubSummary ? NS.SubSummary.getValidSummary(floor, index) : null;
         const head = document.createElement('div');
         head.className = 'coo-story-summary-head';
-        head.appendChild(createText('span', 'coo-story-summary-label', '二级摘要'));
+        head.appendChild(createText('span', 'coo-story-summary-label', '天摘要'));
 
         const button = document.createElement('button');
         button.type = 'button';
-        button.dataset.cooFloor = String(floor);
-        button.dataset.cooIndex = String(index);
-        if (valid) {
-            button.className = 'coo-button coo-button-ghost coo-button-sm';
-            button.dataset.cooAction = 'entryRegenerate';
+        button.className = 'coo-button coo-button-ghost coo-button-sm';
+        button.dataset.cooDay = dayKey;
+        if (dayText) {
+            button.dataset.cooAction = 'dayRegenerate';
             button.appendChild(createIcon('fa-solid fa-rotate'));
             button.appendChild(createText('span', 'coo-button-label', '重新生成'));
-            button.title = '重新生成该条目的二级摘要';
-            head.appendChild(button);
+            button.title = '重新生成该天的天摘要';
         } else {
-            button.className = 'coo-button coo-button-ghost coo-button-sm';
-            button.dataset.cooAction = 'entryGenerate';
+            button.dataset.cooAction = 'dayGenerate';
             button.appendChild(createIcon('fa-solid fa-wand-magic-sparkles'));
             button.appendChild(createText('span', 'coo-button-label', '生成摘要'));
-            button.title = '为该条目生成二级摘要';
-            head.appendChild(button);
+            button.title = '为该天生成天摘要';
         }
+        head.appendChild(button);
         box.appendChild(head);
 
-        if (valid) {
-            const time = new Date(valid.t).toLocaleString();
-            box.appendChild(createText('div', 'coo-story-summary-time', time));
-            appendSummaryContent(box, valid.s);
+        if (dayText) {
+            box.appendChild(createText('div', 'coo-story-summary-body', dayText));
         } else {
-            box.appendChild(createText('div', 'coo-role-empty coo-story-summary-empty', '尚未生成二级摘要'));
+            box.appendChild(createText('div', 'coo-role-empty coo-story-summary-empty',
+                emptyText || '尚未生成天摘要'));
         }
         return box;
     }
 
-    function appendSummaryContent(box, s) {
-        if (NS.SubSummary && NS.SubSummary.hasRecallFields(s)) {
-            const addLine = (label, value) => {
-                if (!value) return;
-                const line = document.createElement('div');
-                line.className = 'coo-story-summary-line';
-                line.appendChild(createText('span', 'coo-story-summary-key', label));
-                line.appendChild(createText('span', 'coo-story-summary-val', value));
-                box.appendChild(line);
-            };
-            addLine('人物', Array.isArray(s.actor) ? s.actor.join('、') : '');
-            addLine('地点', Array.isArray(s.location) ? s.location.join(' → ') : '');
-            addLine('事件', typeof s.event === 'string' ? s.event : '');
-            addLine('触发', Array.isArray(s.recall_when) ? s.recall_when.join('；') : '');
-            return;
-        }
-        const json = typeof s === 'string' ? s : JSON.stringify(s);
-        box.appendChild(createText('div', 'coo-story-summary-body', json));
-    }
-
-    // bestFrag → 可读片段来源（user=最新用户消息；fN=窗口第 N 楼层条目；wN=片段序号回退，楼层未知）
-    function fragSourceLabel(bestFrag) {
-        if (!bestFrag) return '';
-        if (bestFrag === 'user') return '用户';
-        const m = String(bestFrag).match(/^([fw])(\d+)$/);
-        if (m) return m[1] === 'f' ? `楼层${m[2]}` : `窗口·第${m[2]}`;
-        return String(bestFrag);
-    }
-
-    // 远端条目 RAG 标记：命中/未命中 + 片段来源（bestFrag）+ 分数明细
-    function buildFarScoreLabel(record) {
-        const parts = record.parts || {};
-        const prefix = record.hit ? 'RAG命中' : 'RAG未命中';
-        const frag = parts.bestFrag ? `（${fragSourceLabel(parts.bestFrag)}）` : '';
-        let label;
-        if (parts.source === 'summary') {
-            label = `${prefix}${frag} 人${parts.actor || '0/0'} 地${parts.location || '0/0'} 语义${Number(parts.semantic || 0).toFixed(2)} → ${Number(record.score || 0).toFixed(2)}`;
-        } else if (parts.source === 'bm25') {
-            label = `${prefix}${frag} BM25 ${Number(record.score || 0).toFixed(2)}`;
-        } else {
-            label = `${prefix}${frag}（无二级摘要）`;
-        }
-        return createText('span', record.hit ? 'coo-rag-hit-score' : 'coo-rag-miss-score', label);
-    }
-
-    function buildStoryEntry(entry, far) {
-        const item = document.createElement('div');
-        item.className = far && far.hit ? 'coo-story-item coo-story-item-hit' : 'coo-story-item';
+    function buildDayGroup(dayKey, label, entries, level, dayText) {
+        const group = document.createElement('div');
+        group.className = 'coo-story-item coo-story-day';
         const head = document.createElement('div');
         head.className = 'coo-story-item-head';
-        head.appendChild(createText('span', 'coo-story-floor', `楼层 ${entry.floor}`));
-        const meta = [entry.天数, entry.时间段, entry.地点].filter(Boolean).join(' · ');
-        head.appendChild(createText('span', 'coo-story-item-meta', meta));
-        if (far) {
-            head.appendChild(buildFarScoreLabel(far));
+        head.appendChild(createText('span', 'coo-story-floor', `${label}（${entries.length} 条）`));
+        head.appendChild(buildLevelBadge(level));
+        group.appendChild(head);
+        group.appendChild(buildDaySummaryBox(dayKey, dayText, level < 0 ? '该天已超出预算被丢弃' : null));
+        for (const entry of entries) {
+            const row = document.createElement('div');
+            row.className = 'coo-story-day-entry';
+            const meta = [`楼层 ${entry.floor}`, entry.时间段, entry.地点].filter(Boolean).join(' · ');
+            row.appendChild(createText('span', 'coo-story-item-meta', meta));
+            if (entry.历程) {
+                row.appendChild(createText('div', 'coo-story-item-body', entry.历程));
+            }
+            group.appendChild(row);
         }
-        item.appendChild(head);
-        if (entry.历程) {
-            item.appendChild(createText('div', 'coo-story-item-body', entry.历程));
-        }
-        item.appendChild(buildStorySummary(entry.floor, entry.index));
-        return item;
+        return group;
     }
 
-    // 单条目摘要块增量更新：只替换该条目的 coo-story-summary 子块，不整列表重绘
-    function updateStoryEntrySummary(scope, floor, index) {
-        const button = scope.querySelector(`.coo-story-item [data-coo-floor="${floor}"][data-coo-index="${index}"]`);
-        if (!button) return;
-        const item = button.closest('.coo-story-item');
-        if (!item) return;
-        const newBox = buildStorySummary(floor, index);
-        const oldBox = item.querySelector('.coo-story-summary');
-        if (oldBox) item.replaceChild(newBox, oldBox);
-        else item.appendChild(newBox);
+    function buildUpperCard(node) {
+        const card = document.createElement('div');
+        card.className = 'coo-story-item coo-story-upper';
+        const head = document.createElement('div');
+        head.className = 'coo-story-item-head';
+        head.appendChild(createText('span', 'coo-story-floor', `L${node.level} · ${node.startLabel}~${node.endLabel}`));
+        head.appendChild(createText('span', 'coo-rag-hit-score', '合并摘要'));
+        card.appendChild(head);
+        card.appendChild(createText('div', 'coo-story-item-body', node.text));
+        return card;
     }
 
-    // 单列表渲染：所有远端（far）条目在原条目上标记 RAG命中/未命中 + 分数明细
+    // 按天分组渲染：天摘要来自 SubSummary 快照，本次装配的折叠层级来自 stats.hier
     function renderStoryList(scope) {
         const info = scope.querySelector('[data-coo-field="storyInfo"]');
         const list = scope.querySelector('[data-coo-field="storyList"]');
         if (!info || !list) return;
-        const onlyBox = scope.querySelector('[data-coo-field="storySelectedOnly"]');
-        const selectedOnly = Boolean(onlyBox && onlyBox.checked);
         const result = Engine.getStoryProgressRange(storyQuery.start, storyQuery.end);
-        const rag = Engine.getStats().rag;
-        // farMap：全部远端条目打分明细（命中+未命中），键 = entryToDocText
-        const farMap = new Map();
-        if (rag) {
-            if (Array.isArray(rag.farScores) && rag.farScores.length > 0) {
-                for (const rec of rag.farScores) {
-                    if (rec && rec.text) farMap.set(rec.text, rec);
-                }
-            } else if (rag.active && Array.isArray(rag.hits)) {
-                for (const hit of rag.hits) {
-                    if (hit && hit.text) farMap.set(hit.text, { text: hit.text, score: hit.score, parts: hit.parts, hit: true });
-                }
+        const hier = Engine.getStats().hier;
+        const levelByDay = new Map();
+        const mergedByDay = new Map();
+        if (hier && Array.isArray(hier.days)) {
+            for (const d of hier.days) {
+                levelByDay.set(d.dayKey, d.level);
+                if (d.mergedInto) mergedByDay.set(d.dayKey, d.mergedInto);
             }
         }
-        const hitCount = [...farMap.values()].filter((rec) => rec.hit).length;
-        info.textContent = `楼层 ${result.startFloor} - ${result.endFloor}，共 ${result.entries.length} 条历程`
-            + (hitCount > 0 ? `，RAG 选中 ${hitCount} 条` : '');
-        list.textContent = '';
-        let shown = 0;
-        for (const entry of result.entries) {
-            const far = farMap.get(Engine.entryToDocText(entry));
-            if (selectedOnly && !(far && far.hit)) continue;
-            list.appendChild(buildStoryEntry(entry, far));
-            shown++;
+        const textByDay = new Map();
+        const validUpper = [];
+        if (NS.SubSummary) {
+            const cov = NS.SubSummary.getCoverage();
+            for (const d of cov.days) {
+                if (d.text) textByDay.set(d.dayKey, d.text);
+            }
+            for (const u of cov.upper) {
+                if (u.text) validUpper.push(u);
+            }
         }
-        if (shown === 0) {
-            list.appendChild(createText('span', 'coo-role-empty',
-                selectedOnly ? '当前没有 RAG 选中条目（RAG 未启用或无命中）' : '该楼层范围内没有新的故事历程'));
+        // 首现顺序按天分组
+        const groups = new Map();
+        for (const entry of result.entries) {
+            const dk = storyDayKey(entry);
+            if (!groups.has(dk)) groups.set(dk, []);
+            groups.get(dk).push(entry);
+        }
+        const folded = hier && hier.active ? hier.foldedDays : 0;
+        const dropped = hier && hier.active ? hier.droppedDays : 0;
+        info.textContent = `楼层 ${result.startFloor} - ${result.endFloor}，共 ${result.entries.length} 条历程，${groups.size} 天`
+            + (hier && hier.active ? `（折叠 ${folded} 天，丢弃 ${dropped} 天，上层 ${validUpper.length} 个）` : '（未折叠，全量原文）');
+        list.textContent = '';
+        if (groups.size === 0) {
+            list.appendChild(createText('span', 'coo-role-empty', '该楼层范围内没有新的故事历程'));
+            return;
+        }
+        for (const u of validUpper) {
+            list.appendChild(buildUpperCard(u));
+        }
+        for (const [dayKey, entries] of groups) {
+            // 被上层合并吞掉的天不单独展示（内容见上层卡片）
+            if (mergedByDay.has(dayKey)) continue;
+            const level = levelByDay.has(dayKey) ? levelByDay.get(dayKey) : 0;
+            list.appendChild(buildDayGroup(dayKey, storyDayLabel(dayKey), entries, level, textByDay.get(dayKey) || null));
         }
     }
 
@@ -631,34 +613,23 @@
         }
     }
 
-    function handleSubGenerateAll(scope) {
-        if (!requireConfigured(scope)) return;
-        const startInput = scope.querySelector('[data-coo-field="storyStart"]');
-        const endInput = scope.querySelector('[data-coo-field="storyEnd"]');
-        const start = startInput ? startInput.value : '1';
-        const end = endInput ? endInput.value : '';
-        NS.SubSummary.generateForRange(start, end, { force: false });
-        updateSubSummaryStatus(scope);
-    }
-
-    function handleEntrySummaryAction(button, force) {
+    function handleDaySummaryAction(button, force) {
         const scope = button.closest ? button.closest('.coo-workspace') : null;
         if (scope && !requireConfigured(scope)) return;
-        const floor = parseInt(button.dataset.cooFloor, 10);
-        const index = parseInt(button.dataset.cooIndex, 10);
-        if (isNaN(floor) || isNaN(index)) return;
-        NS.SubSummary.generateForEntry(floor, index, { force });
+        const dayKey = button.dataset.cooDay;
+        if (!dayKey) return;
+        NS.SubSummary.generateForDay(dayKey, { force });
     }
 
     function handleSubGenerateMissing(scope) {
         if (!requireConfigured(scope)) return;
-        NS.SubSummary.generateForRange(null, null, { force: false, onlyMissing: true });
+        NS.SubSummary.generateMissing();
         updateSubSummaryStatus(scope);
     }
 
     function handleSubForceGenerateAll(scope) {
         if (!requireConfigured(scope)) return;
-        NS.SubSummary.generateForRange(null, null, { force: true });
+        NS.SubSummary.forceRebuild();
         updateSubSummaryStatus(scope);
     }
 
@@ -669,8 +640,8 @@
 
         const overlay = createText('div', 'coo-erase-confirm-overlay');
         const dialog = createText('div', 'coo-erase-confirm-dialog');
-        dialog.appendChild(createText('div', 'coo-erase-confirm-title', '强制擦除全部二级摘要'));
-        dialog.appendChild(createText('div', 'coo-erase-confirm-warn', '将清空全部楼层的二级摘要及相关元数据（摘要 extra、向量库、召回缓存），并关闭二级摘要开关（RAG 切为 off），不影响故事历程原文。此操作不可撤销。'));
+        dialog.appendChild(createText('div', 'coo-erase-confirm-title', '擦除全部层级摘要'));
+        dialog.appendChild(createText('div', 'coo-erase-confirm-warn', '将清空全部天摘要与上层合并摘要，不影响故事历程原文。此操作不可撤销。'));
         const input = document.createElement('input');
         input.type = 'text';
         input.className = 'coo-erase-confirm-input';
@@ -709,12 +680,9 @@
 
     function handleSubEraseAll(scope) {
         showEraseAllConfirm(() => {
-            NS.SubSummary.eraseForRange(null, null);
-            // 全量擦除已将 subSummaryToggle 置 false，同步开关 UI 与向量持久化状态行
-            const toggle = scope.querySelector('[data-coo-field="subSummaryToggle"]');
-            if (toggle) toggle.checked = false;
+            NS.SubSummary.eraseAll();
             updateSubSummaryStatus(scope);
-            updateEmbedStoreStatus(scope);
+            updateHierInfo(scope);
         });
     }
 
@@ -731,23 +699,10 @@
         const allButton = createButton('全部楼层', 'coo-button coo-button-ghost coo-button-sm', 'fa-solid fa-arrows-up-down');
         allButton.dataset.cooAction = 'storyAll';
         allButton.title = '查看全部楼层的故事历程';
-        const subAllButton = createButton('生成全部摘要', 'coo-button coo-button-ghost coo-button-sm', 'fa-solid fa-compress');
-        subAllButton.dataset.cooAction = 'subGenerateAll';
-        subAllButton.title = '为当前楼层范围内的条目生成二级摘要（跳过已有效条目）';
-        const onlyLabel = document.createElement('label');
-        onlyLabel.className = 'coo-story-only-label';
-        const onlyBox = document.createElement('input');
-        onlyBox.type = 'checkbox';
-        onlyBox.dataset.cooField = 'storySelectedOnly';
-        onlyLabel.appendChild(onlyBox);
-        onlyLabel.appendChild(createText('span', 'coo-row-label', '仅显示选中楼层'));
-        onlyLabel.title = '仅显示被 RAG 选中的楼层条目';
-        onlyBox.checked = storySelectedOnly;
-        toolbar.append(queryButton, allButton, subAllButton, onlyLabel);
-        onlyBox.addEventListener('change', () => {
-            storySelectedOnly = onlyBox.checked;
-            renderStoryList(section);
-        });
+        const subMissingButton = createButton('补齐缺失摘要', 'coo-button coo-button-ghost coo-button-sm', 'fa-solid fa-compress');
+        subMissingButton.dataset.cooAction = 'subGenerateMissing';
+        subMissingButton.title = '后台补齐缺失的天摘要与上层合并摘要（不阻塞发送）';
+        toolbar.append(queryButton, allButton, subMissingButton);
         section.appendChild(toolbar);
 
         const subStatus = createText('div', 'coo-subsummary-status', '空闲');
@@ -755,7 +710,7 @@
         section.appendChild(subStatus);
 
         const ragInfo = createText('div', 'coo-rag-info', '');
-        ragInfo.dataset.cooField = 'ragInfo';
+        ragInfo.dataset.cooField = 'hierInfo';
 
         const info = createText('div', 'coo-story-info', '—');
         info.dataset.cooField = 'storyInfo';
@@ -772,163 +727,19 @@
         queryStoryRange(section, 1, '');
     }
 
-    // ------------------------------------------------------------------
-    // 语义打分 tab：输入任意信息 → 全部历程条目的 S_semantic
-    // ------------------------------------------------------------------
-
-    // 语义分徽章：S_semantic 分数或"无二级摘要"
-    function buildSemanticScoreLabel(semantic) {
-        if (semantic === null || semantic === undefined) {
-            return createText('span', 'coo-rag-miss-score', '（无二级摘要）');
-        }
-        return createText('span', 'coo-rag-hit-score', `S_semantic ${Number(semantic).toFixed(2)}`);
-    }
-
-    // 语义分组成分行：事件 / 各触发的实际语义得分（与二级摘要块同款行样式，末尾附分数徽章）
-    function buildSemanticScoreLine(label, value, score) {
-        const line = document.createElement('div');
-        line.className = 'coo-story-summary-line';
-        line.appendChild(createText('span', 'coo-story-summary-key', label));
-        line.appendChild(createText('span', 'coo-story-summary-val', value));
-        line.appendChild(createText('span', 'coo-rag-hit-score', Number(score).toFixed(2)));
-        return line;
-    }
-
-    // 单条历程（与故事历程卡片同构：楼层 + 元信息 + 历程 + 二级摘要块）+ 语义分徽章 + 事件/触发得分明细
-    function buildSemanticEntry(entry) {
-        const item = document.createElement('div');
-        item.className = 'coo-story-item';
-        const head = document.createElement('div');
-        head.className = 'coo-story-item-head';
-        head.appendChild(createText('span', 'coo-story-floor', `楼层 ${entry.floor}`));
-        const meta = [entry.天数, entry.时间段, entry.地点].filter(Boolean).join(' · ');
-        head.appendChild(createText('span', 'coo-story-item-meta', meta));
-        head.appendChild(buildSemanticScoreLabel(entry.semantic));
-        item.appendChild(head);
-        if (entry.历程) {
-            item.appendChild(createText('div', 'coo-story-item-body', entry.历程));
-        }
-        if (entry.semantic !== null && entry.semantic !== undefined) {
-            if (entry.event && entry.event.text) {
-                item.appendChild(buildSemanticScoreLine('事件', entry.event.text, entry.event.score));
-            }
-            if (Array.isArray(entry.recall)) {
-                for (const r of entry.recall) {
-                    if (r && r.text) item.appendChild(buildSemanticScoreLine('触发', r.text, r.score));
-                }
-            }
-        }
-        item.appendChild(buildStorySummary(entry.floor, entry.index));
-        return item;
-    }
-
-    function renderSemanticList(scope) {
-        const status = scope.querySelector('[data-coo-field="semanticStatus"]');
-        const info = scope.querySelector('[data-coo-field="semanticInfo"]');
-        const list = scope.querySelector('[data-coo-field="semanticList"]');
-        if (!info || !list) return;
-        if (!semanticResult) {
-            if (status) { status.textContent = '空闲（请输入信息后点击"计算"）'; status.className = 'coo-subsummary-status'; }
-            info.textContent = '—';
-            list.textContent = '';
-            list.appendChild(createText('span', 'coo-role-empty', '请输入信息并点击"计算"'));
-            return;
-        }
-        if (!semanticResult.embedderReady) {
-            if (status) {
-                status.textContent = '召回嵌入模型未就绪：无法计算 S_semantic（见"二级摘要"选项卡模型状态）';
-                status.className = 'coo-subsummary-status coo-subsummary-status-error';
-            }
-            info.textContent = '—';
-            list.textContent = '';
-            list.appendChild(createText('span', 'coo-role-empty', '嵌入模型就绪后重新点击"计算"'));
-            return;
-        }
-        if (status) { status.textContent = '已完成'; status.className = 'coo-subsummary-status'; }
-        const scored = semanticResult.entries.filter((e) => e.semantic !== null).length;
-        info.textContent = `共 ${semanticResult.entries.length} 条历程，${scored} 条有二级摘要参与语义打分（按 S_semantic 从高到低）`;
-        // 按最终得分降序（无二级摘要者排最后；稳定排序，同分保持楼层时序）
-        const sorted = semanticResult.entries.slice().sort((a, b) => {
-            const av = typeof a.semantic === 'number' ? a.semantic : -1;
-            const bv = typeof b.semantic === 'number' ? b.semantic : -1;
-            return bv - av;
-        });
-        list.textContent = '';
-        for (const entry of sorted) {
-            list.appendChild(buildSemanticEntry(entry));
-        }
-        if (semanticResult.entries.length === 0) {
-            list.appendChild(createText('span', 'coo-role-empty', '当前聊天没有故事历程'));
-        }
-    }
-
-    async function handleSemanticCalc(scope) {
-        const input = scope.querySelector('[data-coo-field="semanticQuery"]');
-        const status = scope.querySelector('[data-coo-field="semanticStatus"]');
-        const button = scope.querySelector('[data-coo-action="semanticCalc"]');
-        const text = input ? input.value.trim() : '';
-        if (!text) {
-            if (status) { status.textContent = '请先输入信息'; status.className = 'coo-subsummary-status coo-subsummary-status-error'; }
-            return;
-        }
-        semanticQuery = text;
-        if (status) { status.textContent = '计算中…'; status.className = 'coo-subsummary-status coo-subsummary-status-running'; }
-        if (button) button.disabled = true;
-        try {
-            semanticResult = await Engine.scoreJourneySemantics(text);
-            renderSemanticList(scope);
-        } catch (e) {
-            console.error('[Chat History Optimization] 语义打分失败:', e);
-            semanticResult = null;
-            if (status) {
-                status.textContent = '计算失败：' + (e && e.message ? e.message : String(e));
-                status.className = 'coo-subsummary-status coo-subsummary-status-error';
-            }
-        } finally {
-            if (button) button.disabled = false;
-        }
-    }
-
-    function renderSemanticTab(panel) {
-        const section = createSection('fa-solid fa-magnifying-glass-chart', '语义打分');
-        section.appendChild(createText('div', 'coo-preview-hint',
-            '输入任意信息（按 user 信息流程编码），与全部楼层故事历程条目的二级摘要计算 S_semantic（事件与各触发文本余弦相似度的最大值）。不受人物/地点命中门槛限制，所有有二级摘要的条目均参与打分。结果按 S_semantic 从高到低排列，并逐条给出事件和各触发的实际语义得分。'));
-        const toolbar = document.createElement('div');
-        toolbar.className = 'coo-story-toolbar';
-        const input = document.createElement('textarea');
-        input.className = 'coo-textarea';
-        input.dataset.cooField = 'semanticQuery';
-        input.rows = 3;
-        input.placeholder = '输入信息（如：陈九提到了码头仓库的货物）';
-        input.value = semanticQuery;
-        const calcButton = createButton('计算', 'coo-button coo-button-sm', 'fa-solid fa-bolt');
-        calcButton.dataset.cooAction = 'semanticCalc';
-        calcButton.title = '计算所有故事历程条目对输入信息的 S_semantic';
-        toolbar.append(input, calcButton);
-        section.appendChild(toolbar);
-        const status = createText('div', 'coo-subsummary-status', '空闲（请输入信息后点击"计算"）');
-        status.dataset.cooField = 'semanticStatus';
-        const embedderStatus = createText('div', 'coo-subsummary-status', '召回嵌入模型：未启动');
-        embedderStatus.dataset.cooField = 'embedderStatus';
-        const info = createText('div', 'coo-story-info', '—');
-        info.dataset.cooField = 'semanticInfo';
-        const list = document.createElement('div');
-        list.className = 'coo-story-list';
-        list.dataset.cooField = 'semanticList';
-        section.append(status, embedderStatus, info, list);
-        updateEmbedderStatus(section);
-        panel.appendChild(section);
-        renderSemanticList(section);
-    }
-
-    function updateSubSummaryBadge(scope) {
-        const field = 'subSummaryPrompt';
+    function updateHierBadge(scope, field, validator) {
         const badge = scope.querySelector(`[data-coo-validity="${field}"]`);
         const textarea = scope.querySelector(`[data-coo-field="${field}"]`);
         if (!badge || !textarea) return;
-        const valid = NS.SubSummary ? NS.SubSummary.validateTemplate(textarea.value) : false;
+        const valid = NS.SubSummary ? validator.call(NS.SubSummary, textarea.value) : false;
         badge.textContent = valid ? '(有效)' : '(无效)';
         badge.className = `coo-badge ${valid ? 'coo-badge-valid' : 'coo-badge-invalid'}`;
+    }
+
+    function updateSubSummaryBadge(scope) {
+        if (!NS.SubSummary) return;
+        updateHierBadge(scope, 'hierDayPrompt', NS.SubSummary.validateDayTemplate);
+        updateHierBadge(scope, 'hierMergePrompt', NS.SubSummary.validateMergeTemplate);
     }
 
     function updateSubSummaryStatus(scope) {
@@ -956,7 +767,7 @@
     function requireConfigured(scope) {
         if (NS.SubSummary && NS.SubSummary.isConfigured()) return true;
         scope.querySelectorAll('[data-coo-field="subSummaryStatus"]').forEach((el) => {
-            el.textContent = '二级摘要未配置：请在"二级摘要"选项卡选择 connection profile，或配置直连的 baseUrl、apiKey 和模型';
+            el.textContent = '分层摘要未配置：请在"分层摘要"选项卡选择 connection profile，或配置直连的 baseUrl、apiKey 和模型';
             el.className = 'coo-subsummary-status coo-subsummary-status-error';
         });
         return false;
@@ -1000,9 +811,9 @@
     }
 
     function renderSubSummaryTab(panel) {
-        const section = createSection('fa-solid fa-compress', '二级摘要');
-        section.appendChild(createSwitchRow('启用二级摘要', 'subSummaryToggle'));
-        section.appendChild(createText('div', 'coo-preview-hint', 'AI 回复生成完成后自动为最新楼层缺失的条目生成二级摘要（"故事历程"选项卡中的手动生成不受此开关限制）'));
+        const section = createSection('fa-solid fa-compress', '分层摘要');
+        section.appendChild(createSwitchRow('启用分层摘要', 'subSummaryToggle'));
+        section.appendChild(createText('div', 'coo-preview-hint', 'AI 回复生成完成后后台补齐缺失的天摘要与上层合并摘要（手动生成不受此开关限制；发送前永不等 LLM，缺失部分用原文兜底）'));
         section.appendChild(createSelectRow('连接方式', '直连走浏览器 fetch；profile 走 SillyTavern Connection Manager（API Key 由服务端解密，不经过浏览器）', 'subSummarySource', [
             { value: 'fetch', label: '直连（fetch）' },
             { value: 'profile', label: 'SillyTavern connection profile' },
@@ -1015,31 +826,29 @@
         section.appendChild(createNumberRow('maxTokens', '（单次生成最大 token 数）', 'subSummaryMaxTokens', { min: 1, step: 1 }));
         section.appendChild(createNumberRow('并行数', '（批量生成同时进行的请求数，1 为串行；API 限流时调小）', 'subSummaryConcurrency', { min: 1, max: 8, step: 1 }));
         section.appendChild(createNumberRow('超时（秒）', '（单次请求超时，超时按失败重试；本地慢模型调大）', 'subSummaryTimeoutSec', { min: 10, max: 600, step: 10 }));
-        section.appendChild(createTemplateBlock('二级摘要模板（{{故事历程}} 为单条目完整 JSON 占位符）', 'subSummaryPrompt', 8, 10));
+        section.appendChild(createNumberRow('合并扇入', '（连续几个同层摘要合并成一条父摘要）', 'hierFanin', { min: 2, max: 10, step: 1 }));
+        section.appendChild(createTemplateBlock('天摘要模板（{{当天历程}} 为当天全部历程占位符，长度由模板措辞控制）', 'hierDayPrompt', 8, 10));
+        section.appendChild(createTemplateBlock('合并摘要模板（{{子摘要列表}} 为连续子摘要占位符，L2 及以上复用）', 'hierMergePrompt', 8, 10));
 
         const status = createText('div', 'coo-subsummary-status', '空闲');
         status.dataset.cooField = 'subSummaryStatus';
         section.appendChild(status);
 
-        const embedderStatus = createText('div', 'coo-subsummary-status', '召回嵌入模型：未启动');
-        embedderStatus.dataset.cooField = 'embedderStatus';
-        section.appendChild(embedderStatus);
-
-        const embedStoreStatus = createText('div', 'coo-subsummary-status', '嵌入向量持久化：未同步');
-        embedStoreStatus.dataset.cooField = 'embedStoreStatus';
-        section.appendChild(embedStoreStatus);
+        const hierInfo = createText('div', 'coo-subsummary-status', '层级：暂无数据');
+        hierInfo.dataset.cooField = 'hierInfo';
+        section.appendChild(hierInfo);
 
         const actions = document.createElement('div');
         actions.className = 'coo-subsummary-actions';
-        const genMissingButton = createButton('生成所有缺失', 'coo-button coo-button-sm', 'fa-solid fa-wand-magic-sparkles');
+        const genMissingButton = createButton('补齐缺失', 'coo-button coo-button-sm', 'fa-solid fa-wand-magic-sparkles');
         genMissingButton.dataset.cooAction = 'subGenerateMissing';
-        genMissingButton.title = '为全部楼层中缺少有效摘要的条目生成二级摘要（已有有效摘要的条目跳过）';
-        const forceGenButton = createButton('强制生成全部', 'coo-button coo-button-sm', 'fa-solid fa-bolt');
+        genMissingButton.title = '后台补齐缺失的天摘要与上层合并摘要（已有有效摘要的跳过）';
+        const forceGenButton = createButton('强制重建全部', 'coo-button coo-button-sm', 'fa-solid fa-bolt');
         forceGenButton.dataset.cooAction = 'subForceGenerateAll';
-        forceGenButton.title = '无视已有摘要，为全部楼层的所有条目重新生成二级摘要';
-        const forceEraseButton = createButton('强制擦除全部', 'coo-button coo-button-ghost coo-button-sm', 'fa-solid fa-eraser');
+        forceGenButton.title = '清空现有层级摘要后全部重新生成';
+        const forceEraseButton = createButton('擦除全部', 'coo-button coo-button-ghost coo-button-sm', 'fa-solid fa-eraser');
         forceEraseButton.dataset.cooAction = 'subEraseAll';
-        forceEraseButton.title = '清空全部楼层的二级摘要及相关元数据（向量库、召回缓存），并关闭二级摘要开关（不影响故事历程原文）';
+        forceEraseButton.title = '清空全部层级摘要（不影响故事历程原文）';
         actions.append(genMissingButton, forceGenButton, forceEraseButton);
         section.appendChild(actions);
 
@@ -1057,53 +866,29 @@
         section.querySelector('[data-coo-field="subSummaryMaxTokens"]').value = settings.subSummaryMaxTokens;
         section.querySelector('[data-coo-field="subSummaryConcurrency"]').value = settings.subSummaryConcurrency;
         section.querySelector('[data-coo-field="subSummaryTimeoutSec"]').value = settings.subSummaryTimeoutSec;
-        section.querySelector('[data-coo-field="subSummaryPrompt"]').value = settings.subSummaryPrompt;
+        section.querySelector('[data-coo-field="hierFanin"]').value = settings.hierFanin;
+        section.querySelector('[data-coo-field="hierDayPrompt"]').value = settings.hierDayPrompt;
+        section.querySelector('[data-coo-field="hierMergePrompt"]').value = settings.hierMergePrompt;
         applySubSummarySourceState(section);
         updateSubSummaryBadge(section);
         updateSubSummaryStatus(section);
-        updateEmbedderStatus(section);
-        updateEmbedStoreStatus(section);
+        updateHierInfo(section);
 
         panel.appendChild(section);
     }
 
-    function updateEmbedderStatus(scope) {
-        scope.querySelectorAll('[data-coo-field="embedderStatus"]').forEach((el) => {
-            const status = NS.Embedder ? NS.Embedder.getStatus() : { state: 'idle', message: '' };
-            if (status.state === 'ready') {
-                el.textContent = '召回嵌入模型：就绪（bge-small-zh 本地' + (status.backend === 'webgpu' ? '，WebGPU' : '') + '）';
-                el.className = 'coo-subsummary-status';
-            } else if (status.state === 'loading') {
-                el.textContent = `召回嵌入模型：${status.message || '加载中'}`;
-                el.className = 'coo-subsummary-status coo-subsummary-status-running';
-            } else if (status.state === 'error') {
-                el.textContent = `召回嵌入模型加载失败（召回降级为纯 BM25）：${status.message}`;
-                el.className = 'coo-subsummary-status coo-subsummary-status-error';
-            } else {
-                el.textContent = '召回嵌入模型：未启动';
-                el.className = 'coo-subsummary-status';
-            }
-        });
-    }
-
-    function updateEmbedStoreStatus(scope) {
-        scope.querySelectorAll('[data-coo-field="embedStoreStatus"]').forEach((el) => {
-            const status = NS.EmbedStore ? NS.EmbedStore.getStatus() : null;
-            if (!status) {
-                el.textContent = '嵌入向量持久化：模块未加载';
+    function updateHierInfo(scope) {
+        scope.querySelectorAll('[data-coo-field="hierInfo"]').forEach((el) => {
+            if (!NS.SubSummary || typeof NS.SubSummary.getCoverage !== 'function') {
+                el.textContent = '层级：模块未加载';
                 el.className = 'coo-subsummary-status';
                 return;
             }
-            if (status.error) {
-                el.textContent = `嵌入向量持久化失败：${status.error}`;
-                el.className = 'coo-subsummary-status coo-subsummary-status-error';
-            } else if (status.running) {
-                el.textContent = `嵌入向量持久化：${status.message || '同步中'}（已存 ${status.persisted} 条）`;
-                el.className = 'coo-subsummary-status coo-subsummary-status-running';
-            } else {
-                el.textContent = `嵌入向量持久化：${status.message || `已持久化 ${status.persisted} 条`}`;
-                el.className = 'coo-subsummary-status';
-            }
+            const cov = NS.SubSummary.getCoverage();
+            const l1 = cov.days.filter((d) => d.text).length;
+            const up = cov.upper.filter((u) => u.text).length;
+            el.textContent = `层级：${cov.days.length} 天（天摘要 ${l1}），上层合并 ${up} 个，扇入 ${cov.fanin}`;
+            el.className = 'coo-subsummary-status';
         });
     }
 
@@ -1132,7 +917,6 @@
         templates: renderTemplatesTab,
         roles: renderRolesTab,
         story: renderStoryTab,
-        semantic: renderSemanticTab,
         subsummary: renderSubSummaryTab,
         preview: renderPreviewTab,
     };
@@ -1179,24 +963,26 @@
             token.textContent = `${count} / ${tokenLimit}`;
             token.classList.toggle('coo-stat-bad', count > tokenLimit);
         });
-        updateRagDisplay(scope, stats.rag);
+        updateHierDisplay(scope, stats.hier);
         renderPreviewText(scope);
     }
 
-    function updateRagDisplay(scope, rag) {
-        const ragInfo = scope.querySelector('[data-coo-field="ragInfo"]');
-        if (!ragInfo) return;
-        if (!rag) {
-            ragInfo.textContent = 'RAG：暂无数据（打开窗口或生成一次后刷新）';
-        } else if (rag.active && Array.isArray(rag.hits) && rag.hits.length > 0) {
-            ragInfo.textContent = `RAG 已启用：中段窗口保留 ${rag.windowCount} 条，远端 ${rag.farCount} 条中命中 ${rag.hits.length} 条`;
-        } else if (rag.willActivate) {
-            ragInfo.textContent = `RAG 将在下次生成时启用（当前 ${rag.windowCount} 条历程超出预算）`;
-        } else {
-            ragInfo.textContent = `RAG 未启用（当前 ${rag.windowCount} 条历程在预算内）`;
+    function updateHierDisplay(scope, hier) {
+        const hierInfo = scope.querySelector('[data-coo-field="hierInfo"]');
+        if (hierInfo) {
+            if (!hier) {
+                hierInfo.textContent = '分层折叠：暂无数据（打开窗口或生成一次后刷新）';
+            } else if (hier.active) {
+                hierInfo.textContent = `分层折叠已启用：折叠 ${hier.foldedDays} 天，丢弃 ${hier.droppedDays} 天`;
+            } else if (hier.willActivate) {
+                hierInfo.textContent = '分层折叠将在下次生成时启用（当前历程超出预算）';
+            } else {
+                hierInfo.textContent = '分层折叠未启用（当前历程在预算内，全量原文）';
+            }
         }
-        // 命中标记画在故事列表原条目上，RAG 数据变化时重绘
+        // 层级徽章画在故事列表的天卡片上，hier 数据变化时重绘
         renderStoryList(scope);
+        updateHierInfo(scope);
     }
 
     function buildRoleTree(container, roleObj) {
@@ -1345,11 +1131,22 @@
                     Settings.set('tokenLimit', isNaN(value) ? 0 : value);
                     break;
                 }
-                case 'ragRatio': {
-                    const value = parseFloat(event.target.value);
-                    Settings.set('ragRatio', isNaN(value) ? Settings.defaultSettings.ragRatio : value);
+                case 'hierFanin': {
+                    const value = parseInt(event.target.value, 10);
+                    const min = (NS.Constants && NS.Constants.HIER_FANIN_MIN) || 2;
+                    const max = (NS.Constants && NS.Constants.HIER_FANIN_MAX) || 10;
+                    const fallback = Settings.defaultSettings.hierFanin;
+                    Settings.set('hierFanin', isNaN(value) ? fallback : Math.min(Math.max(min, value), max));
                     break;
                 }
+                case 'hierDayPrompt':
+                    Settings.set('hierDayPrompt', event.target.value);
+                    updateSubSummaryBadge(workspace);
+                    break;
+                case 'hierMergePrompt':
+                    Settings.set('hierMergePrompt', event.target.value);
+                    updateSubSummaryBadge(workspace);
+                    break;
                 case 'historyPrompt':
                     Settings.set('historyPrompt', event.target.value);
                     updateValidityBadge(workspace, 'historyPrompt');
@@ -1377,6 +1174,7 @@
                 case 'subSummaryModel':
                     Settings.set('subSummaryModel', event.target.value);
                     break;
+
                 case 'subSummaryTemperature': {
                     const value = parseFloat(event.target.value);
                     Settings.set('subSummaryTemperature', isNaN(value) ? Settings.defaultSettings.subSummaryTemperature : value);
@@ -1402,10 +1200,6 @@
                     Settings.set('subSummaryTimeoutSec', isNaN(value) ? fallback : Math.min(Math.max(Math.round(minMs / 1000), value), Math.round(maxMs / 1000)));
                     break;
                 }
-                case 'subSummaryPrompt':
-                    Settings.set('subSummaryPrompt', event.target.value);
-                    updateSubSummaryBadge(workspace);
-                    break;
                 default:
                     break;
             }
@@ -1430,18 +1224,14 @@
                 const action = actionButton.dataset.cooAction;
                 if (action === 'storyAll' || action === 'storyQuery') {
                     handleStoryAction(workspace, action);
-                } else if (action === 'subGenerateAll') {
-                    handleSubGenerateAll(workspace);
                 } else if (action === 'subGenerateMissing') {
                     handleSubGenerateMissing(workspace);
                 } else if (action === 'subForceGenerateAll') {
                     handleSubForceGenerateAll(workspace);
                 } else if (action === 'subEraseAll') {
                     handleSubEraseAll(workspace);
-                } else if (action === 'entryGenerate' || action === 'entryRegenerate') {
-                    handleEntrySummaryAction(actionButton, action === 'entryRegenerate');
-                } else if (action === 'semanticCalc') {
-                    handleSemanticCalc(workspace);
+                } else if (action === 'dayGenerate' || action === 'dayRegenerate') {
+                    handleDaySummaryAction(actionButton, action === 'dayRegenerate');
                 }
                 return;
             }
@@ -1452,7 +1242,7 @@
             if (!textarea) return;
             textarea.value = Settings.defaultSettings[field];
             Settings.set(field, textarea.value);
-            if (field === 'subSummaryPrompt') {
+            if (field === 'hierDayPrompt' || field === 'hierMergePrompt') {
                 updateSubSummaryBadge(workspace);
             } else {
                 updateValidityBadge(workspace, field);
@@ -1475,74 +1265,21 @@
         refreshActiveTabData(shell);
     }
 
-    // 二级摘要状态变化：状态行文本始终原地更新；故事历程 / 语义打分 tab 下，
-    // 单条完成（lastDone 非空）只原地替换该条目的摘要块，
-    // 批次结束（running=false）全量重绘一次，覆盖增量期间未刷新的条目
-    // （如窗口隐藏 / 切换 tab 期间完成的条目）；
-    // 语义打分 tab 下批次结束后用同一输入自动重算，保持分数与新摘要一致。
-    // 不再走 refreshActiveTabData 全量重绘，避免批量生成时逐条重绘导致界面卡死。
+    // 分层摘要状态变化：状态行文本始终原地更新；故事历程 tab 下，
+    // 批次结束（running=false）或单天完成（lastDone 非空）时重绘天分组列表
+    // （天数少，重绘成本低）。
     function onSubSummaryStatusChanged(snapshot) {
         const root = document.getElementById(ROOT_ID);
         const shell = root ? root.querySelector('.coo-shell') : null;
         if (!shell || shell.hidden) return;
         updateSubSummaryStatus(shell);
-        if (activeTabId !== 'story' && activeTabId !== 'semantic') return;
+        updateHierInfo(shell);
+        if (activeTabId !== 'story') return;
         const workspace = shell.querySelector('.coo-workspace');
         if (!workspace) return;
-        const lastDone = snapshot && snapshot.lastDone;
-        if (lastDone && typeof lastDone.floor === 'number' && typeof lastDone.index === 'number') {
-            updateStoryEntrySummary(workspace, lastDone.floor, lastDone.index);
+        if ((snapshot && snapshot.running === false) || (snapshot && snapshot.lastDone)) {
+            renderStoryList(workspace);
         }
-        if (snapshot && snapshot.running === false) {
-            if (activeTabId === 'semantic') {
-                if (semanticQuery) handleSemanticCalc(workspace);
-                else renderSemanticList(workspace);
-            } else {
-                renderStoryList(workspace);
-            }
-        }
-    }
-
-    function onEmbedderStatusChanged() {
-        const root = document.getElementById(ROOT_ID);
-        const shell = root ? root.querySelector('.coo-shell') : null;
-        if (!shell || shell.hidden) return;
-        updateEmbedderStatus(shell);
-    }
-
-    function onEmbedStoreStatusChanged() {
-        const root = document.getElementById(ROOT_ID);
-        const shell = root ? root.querySelector('.coo-shell') : null;
-        if (!shell || shell.hidden) return;
-        updateEmbedStoreStatus(shell);
-    }
-
-    // ------------------------------------------------------------------
-    // 发送前"补漏"二级摘要气泡（NS.RecallCache.onFill 驱动）
-    // ------------------------------------------------------------------
-    const FILL_BUBBLE_ID = 'coo-fill-bubble';
-
-    function showFillBubble(count) {
-        const root = document.getElementById(ROOT_ID) || ensureRoot();
-        let bubble = document.getElementById(FILL_BUBBLE_ID);
-        if (!bubble) {
-            bubble = document.createElement('div');
-            bubble.id = FILL_BUBBLE_ID;
-            bubble.className = 'coo-fill-bubble';
-            root.appendChild(bubble);
-        }
-        bubble.textContent = `正在补漏 ${count} 个二级摘要…`;
-        bubble.hidden = false;
-    }
-
-    function hideFillBubble() {
-        const bubble = document.getElementById(FILL_BUBBLE_ID);
-        if (bubble) bubble.hidden = true;
-    }
-
-    function onFillStatusChanged(state) {
-        if (state && state.filling) showFillBubble(state.count);
-        else hideFillBubble();
     }
 
     // ------------------------------------------------------------------
@@ -1699,9 +1436,6 @@
         bindShell(shell);
         Engine.onStats(onStatsChanged);
         if (NS.SubSummary) NS.SubSummary.onStatus(onSubSummaryStatusChanged);
-        if (NS.Embedder) NS.Embedder.onStatus(onEmbedderStatusChanged);
-        if (NS.EmbedStore) NS.EmbedStore.onStatus(onEmbedStoreStatusChanged);
-        if (NS.RecallCache) NS.RecallCache.onFill(onFillStatusChanged);
         Engine.onParseFail(showParseFailBubble);
         watchConnectionProfiles(root);
         startExtensionEntryRetry();

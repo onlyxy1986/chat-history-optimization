@@ -15,7 +15,6 @@
         roleCardToggle: true, // 角色卡功能开关，默认启用
         keepCount: 3,
         tokenLimit: 50 * 1024,
-        ragRatio: 0.3, // 稀疏远期记忆区段占 tokenLimit 的预算比例
         historyPrompt: `{
     // **注意** 所有时间表述都**必须**用第X天+时间段的表述，如：第3天傍晚
     // 地点: 用.分隔大小地点，如“图书馆.三楼.阅览室”、“酒馆.二楼.卫生间”
@@ -55,7 +54,7 @@
         }
         // ... 其他角色
 }`,
-        subSummaryToggle: true, // 二级摘要总开关（只控制 AI 回复后的自动生成，手动生成不受限）
+        subSummaryToggle: true, // 分层摘要总开关（只控制 AI 回复后的自动生成，手动生成不受限）
         subSummarySource: 'fetch', // 'fetch' = 直连 OpenAI 兼容接口；'profile' = 使用 SillyTavern connection profile（仅 CC 类型）
         subSummaryBaseUrl: '', // OpenAI 兼容 API 的 baseUrl
         subSummaryApiKey: '', // API Key
@@ -63,17 +62,23 @@
         subSummaryProfileId: '', // 选中的 SillyTavern connection profile id（source 为 profile 时生效）
         subSummaryTemperature: 0.3,
         subSummaryMaxTokens: 512,
-        subSummaryConcurrency: 4, // 二级摘要批量生成的并行数（1 = 串行；上限见 Constants.SUBSUMMARY_CONCURRENCY_MAX）
+        subSummaryConcurrency: 4, // 分层摘要批量生成的并行数（1 = 串行；上限见 Constants.SUBSUMMARY_CONCURRENCY_MAX）
         subSummaryTimeoutSec: 120, // 单次 LLM 请求超时（秒），钳制范围见 Constants.SUBSUMMARY_TIMEOUT_MIN/MAX_MS
-        subSummaryPrompt: `你是故事摘要助手。请将以下"故事历程"条目压缩为一条召回特化摘要，只输出一个 JSON 对象，不要输出任何其他内容。
+        hierFanin: 5, // L(k≥2) 合并扇入：连续几个 L(k-1) 节点合并成一条父摘要（钳制范围见 Constants.HIER_FANIN_MIN/MAX）
+        hierDayPrompt: `你是故事摘要助手。请将以下"当天历程"（同一天的全部故事历程条目）压缩为一条天摘要，只输出摘要正文，不要输出任何其他内容。
 要求：
-1. actor: 条目中出现的所有人物（必须用角色名，不要用代词）
-2. location: 条目涉及的地点，按层级从大到小排列，如 ["酒馆", "二楼", "卡座"]
-3. event: 一句话简述：谁在哪里做了什么，结果如何
-4. recall_when: 2~4 条"未来可能想起这件事"的触发条件，写未来对话或情节中可能出现的场景（如"有人提及旧恩怨时"、"再次来到该地点时"），不要复述 event
-格式：{"actor": ["人物1", "人物2"], "location": ["一级地点", "二级地点"], "event": "谁在哪里干了什么结果如何", "recall_when": ["触发条件1", "触发条件2"]}
-条目：
-{{故事历程}}`,
+1. 用词明确，主客体清晰，必须用角色名，不要用代词
+2. 保留所有关键细节：重要动作、人物、物品、地点、时间、数字、承诺、安排等
+3. 相对时间必须转为绝对时间（如"明天"改为"第X天"）
+当天历程：
+{{当天历程}}`,
+        hierMergePrompt: `你是故事摘要助手。请将以下"子摘要列表"（连续若干天的摘要）合并压缩为一条上层摘要，只输出摘要正文，不要输出任何其他内容。
+要求：
+1. 用词明确，主客体清晰，必须用角色名，不要用代词
+2. 保留主线脉络与关键细节，合并重复内容
+3. 相对时间必须转为绝对时间（如"明天"改为"第X天"）
+子摘要列表：
+{{子摘要列表}}`,
     };
 
     function getSettings() {
