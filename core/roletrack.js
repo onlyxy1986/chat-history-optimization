@@ -263,6 +263,89 @@
         return false;
     }
 
+    // 发送前删除 <可变> 标记文本，避免模型将其误解为角色卡内容。
+    // 只删标记本身，保留同一行的其余注释说明。
+    function stripVariableTag(text) {
+        if (typeof text !== 'string' || text === '') return text;
+        return text.split(VARIABLE_TAG).join('');
+    }
+
+    // 原始模板文本 → 保留注释的可变状态模版文本。
+    // 与 extractVariablePaths 同一行一属性假设、同一切分口径（首个 // 为注释起点）：
+    // 有键行：任一键整体可变或通向可变后代即保留整行；无键行：根层骨架保留，
+    // 收尾括号按其所属层级的保留状态取舍，纯注释行仅在可变子树内保留。
+    // 保留行统一删除 <可变> 标记后原样输出（含其余注释）。
+    function buildVariableTemplateText(rawText, variablePaths) {
+        if (typeof rawText !== 'string' || rawText === '') return '';
+        if (!variablePaths || variablePaths.size === 0) return '';
+        const lines = rawText.split('\n');
+        const stack = [];
+        const keepStack = [];
+        const out = [];
+        for (const line of lines) {
+            const commentAt = line.indexOf('//');
+            const jsonPart = commentAt === -1 ? line : line.slice(0, commentAt);
+            const keys = [];
+            const re = /"((?:[^"\\]|\\.)*)"\s*:/g;
+            let m = null;
+            while ((m = re.exec(jsonPart)) !== null) {
+                keys.push(m[1]);
+            }
+            const opens = (jsonPart.match(/[{[]/g) || []).length;
+            const closes = (jsonPart.match(/[}\]]/g) || []).length;
+            const net = opens - closes;
+
+            let keep = false;
+            if (keys.length > 0) {
+                for (const key of keys) {
+                    const full = stack.concat([key]);
+                    if (pathUnderVariable(full, variablePaths) || hasVariableDescendant(full, variablePaths)) {
+                        keep = true;
+                        break;
+                    }
+                }
+            } else if (stack.length === 0) {
+                keep = true;
+            } else if (net < 0) {
+                const n = Math.min(-net, keepStack.length);
+                for (let i = 0; i < n; i++) {
+                    if (keepStack[keepStack.length - 1 - i]) {
+                        keep = true;
+                        break;
+                    }
+                }
+                if (keepStack.length === 0) {
+                    keep = pathUnderVariable(stack, variablePaths) || hasVariableDescendant(stack, variablePaths);
+                }
+            } else if (jsonPart.trim() === '') {
+                keep = pathUnderVariable(stack, variablePaths);
+            } else {
+                keep = pathUnderVariable(stack, variablePaths) || hasVariableDescendant(stack, variablePaths);
+            }
+
+            if (keep) out.push(stripVariableTag(line));
+
+            if (net > 0) {
+                if (keys.length > 0) {
+                    const lastFull = stack.concat([keys[keys.length - 1]]);
+                    const flag = pathUnderVariable(lastFull, variablePaths) || hasVariableDescendant(lastFull, variablePaths);
+                    stack.push(keys[keys.length - 1]);
+                    keepStack.push(flag);
+                    for (let i = 1; i < net; i++) {
+                        stack.push(keys[keys.length - 1]);
+                        keepStack.push(flag);
+                    }
+                }
+            } else if (net < 0) {
+                for (let i = 0; i < -net && stack.length > 0; i++) {
+                    stack.pop();
+                    keepStack.pop();
+                }
+            }
+        }
+        return out.join('\n');
+    }
+
     function hasVariableDescendant(pathArr, variablePaths) {
         if (variablePaths.size === 0) return false;
         if (pathArr.length === 0) return true;
@@ -296,25 +379,29 @@
         return undefined;
     }
 
-    // 只读解析当前角色卡模板 → {hasVariable, paths, template, variableTemplate}。
+    // 只读解析当前角色卡模板 → {hasVariable, paths, template, variableTemplate, variableTemplateText}。
+    // variableTemplate 为过滤后的对象（合并/校验用）；variableTemplateText 为
+    // 同一子树的保留注释文本（发送给 LLM 用，已删除 <可变> 标记）。
     function getVariableInfo() {
         const EngineRef = NS.Engine;
         const raw = Settings.get('characterPrompt');
+        const rawText = typeof raw === 'string' ? raw : '';
         const template = EngineRef && typeof EngineRef.parseTemplate === 'function'
-            ? EngineRef.parseTemplate(typeof raw === 'string' ? raw : '')
+            ? EngineRef.parseTemplate(rawText)
             : null;
         if (!template || typeof template !== 'object' || Array.isArray(template)) {
-            return { hasVariable: false, paths: [], template: null, variableTemplate: null };
+            return { hasVariable: false, paths: [], template: null, variableTemplate: null, variableTemplateText: null };
         }
-        const variablePaths = extractVariablePaths(typeof raw === 'string' ? raw : '');
+        const variablePaths = extractVariablePaths(rawText);
         if (variablePaths.size === 0) {
-            return { hasVariable: false, paths: [], template, variableTemplate: null };
+            return { hasVariable: false, paths: [], template, variableTemplate: null, variableTemplateText: null };
         }
         const variableTemplate = filterVariableValue(template, [], variablePaths);
         if (!variableTemplate || typeof variableTemplate !== 'object' || Object.keys(variableTemplate).length === 0) {
-            return { hasVariable: false, paths: [...variablePaths], template, variableTemplate: null };
+            return { hasVariable: false, paths: [...variablePaths], template, variableTemplate: null, variableTemplateText: null };
         }
-        return { hasVariable: true, paths: [...variablePaths], template, variableTemplate };
+        const variableTemplateText = buildVariableTemplateText(rawText, variablePaths);
+        return { hasVariable: true, paths: [...variablePaths], template, variableTemplate, variableTemplateText };
     }
 
     // ------------------------------------------------------------------
@@ -404,8 +491,14 @@
         return out;
     }
 
-    function floorHash(variableTemplate, floorEntries) {
-        return fnv1a32(JSON.stringify({ v: variableTemplate || null, e: floorEntries || [] }));
+    function floorHash(variableTemplateOrText, floorEntries) {
+        return fnv1a32(JSON.stringify({ v: variableTemplateOrText || null, e: floorEntries || [] }));
+    }
+
+    function hashOfVariableInfo(variableInfo) {
+        return (variableInfo.variableTemplateText && variableInfo.variableTemplateText.trim() !== '')
+            ? variableInfo.variableTemplateText
+            : variableInfo.variableTemplate;
     }
 
     // ------------------------------------------------------------------
@@ -466,7 +559,7 @@
                 if (entries.length === 0) continue;
                 const journeyText = getFloorJourneyText(entries);
                 const roleCards = getFloorRoleCards(journeyText);
-                const hash = variableInfo.hasVariable ? floorHash(variableInfo.variableTemplate, entries) : null;
+                const hash = variableInfo.hasVariable ? floorHash(hashOfVariableInfo(variableInfo), entries) : null;
                 const slot = readFloorSlot(floor, chat);
                 const valid = !!slot && !!hash && slot.h === hash;
                 if (valid) tracked++;
@@ -485,6 +578,7 @@
             hasVariable: variableInfo.hasVariable,
             variableCount: variableInfo.paths.length,
             variableTemplate: variableInfo.variableTemplate ? clone(variableInfo.variableTemplate) : null,
+            variableTemplateText: variableInfo.variableTemplateText || null,
             floors,
             tracked,
             missing,
@@ -686,15 +780,27 @@
     // 生成核心（单楼层）
     // ------------------------------------------------------------------
 
-    function buildPromptContent(variableTemplate, roleCards, journeyText) {
+    function buildPromptContent(variableTemplateOrText, roleCards, journeyText) {
         const template = Settings.get('roleTrackPrompt');
         if (!validateRoleTrackTemplate(template)) {
             throw fatal(`角色状态追踪模板无效（需非空且包含 ${TEMPLATE_PLACEHOLDER}、${ROLELIST_PLACEHOLDER}、${JOURNEY_PLACEHOLDER}）`);
         }
+        const variableText = typeof variableTemplateOrText === 'string'
+            ? variableTemplateOrText
+            : JSON.stringify(variableTemplateOrText, null, 2);
         return String(template)
-            .split(TEMPLATE_PLACEHOLDER).join(JSON.stringify(variableTemplate, null, 2))
+            .split(TEMPLATE_PLACEHOLDER).join(variableText)
             .split(ROLELIST_PLACEHOLDER).join(JSON.stringify(roleCards, null, 2))
             .split(JOURNEY_PLACEHOLDER).join(journeyText);
+    }
+
+    // 可变状态模版的发送文本：保留注释的子树文本（已删 <可变> 标记），
+    // 无文本时回退为对象 JSON（兼容单行模板等极端情况）。
+    function promptVariableText(variableInfo) {
+        if (variableInfo.variableTemplateText && variableInfo.variableTemplateText.trim() !== '') {
+            return variableInfo.variableTemplateText;
+        }
+        return JSON.stringify(variableInfo.variableTemplate, null, 2);
     }
 
     // 单楼层追踪。返回 'ok'（已生成，含空对象）/ 'skip'（已有效且非 force）/
@@ -711,14 +817,14 @@
         }
         const journeyText = getFloorJourneyText(entries);
         const roleCards = getFloorRoleCards(journeyText);
-        const hash = floorHash(variableInfo.variableTemplate, entries);
+        const hash = floorHash(hashOfVariableInfo(variableInfo), entries);
         if (!force && isSlotValid(floor, hash)) return 'skip';
         if (Object.keys(roleCards).length === 0) {
             // 历程中未出现已知角色：记空对象，避免重复入队消耗 LLM。
             writeFloorSlot(floor, {}, hash);
             return 'ok';
         }
-        const content = buildPromptContent(variableInfo.variableTemplate, roleCards, journeyText);
+        const content = buildPromptContent(promptVariableText(variableInfo), roleCards, journeyText);
         const raw = await callLlm(content);
         const states = extractStates(raw);
         writeFloorSlot(floor, states, hash);
@@ -758,7 +864,7 @@
             if (!isAssistantItem(chat[floor])) continue;
             const entries = getFloorEntries(floor);
             if (entries.length === 0) continue;
-            const hash = floorHash(variableInfo.variableTemplate, entries);
+            const hash = floorHash(hashOfVariableInfo(variableInfo), entries);
             if (!isSlotValid(floor, hash)) out.push(floor);
         }
         return out;
@@ -1140,6 +1246,8 @@
         validateExtraParams,
         parseExtraParams,
         extractVariablePaths,
+        stripVariableTag,
+        buildVariableTemplateText,
         getVariableInfo,
         getFloorEntries,
         getFloorJourneyText,

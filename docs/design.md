@@ -116,7 +116,7 @@ AI 回复末尾（由 `getCharPrompt` 注入的模板要求）输出：
 { "故事历程": [ { "天数":"第X天", "时间段":"清晨|上午|中午|下午|傍晚|晚上|深夜|凌晨", "地点":"大地点.小地点", "历程":"..." } ] }
 </NEW_HISTORY>
 <NEW_CHARACTER_CARD>
-{ "角色名": { "角色设定": {...} }, "allowUpdate": false }
+{ "角色名": { "角色设定": {...} } }
 </NEW_CHARACTER_CARD>
 </NEW_STORY_DATA>
 ```
@@ -161,7 +161,7 @@ chat[floor].extra["chat-optimization-v2-roletrack"] = {
 ```
 
 - 逐楼层存 `extra`（随聊天文件持久化，经 `saveChatDebounced` 落盘），不是 `chat_metadata`：追踪是单楼层 L0 的派生物，随楼层走。
-- `h` 覆盖可变模版与本楼层 L0：楼层重写/编辑消息/切换 swipe/模板变更即标脏，只重追该楼层，其余楼层保留。
+- `h` 覆盖可变模版文本（含保留注释，已删 `<可变>`）与本楼层 L0：楼层重写/编辑消息/切换 swipe/模板变更（含注释变更）即标脏，只重追该楼层，其余楼层保留。
 - `states` 为空对象表示"本楼层无角色状态变化"（有效结果，避免重复消耗 LLM）；无历程的楼层不建槽位。
 - 输出截断：单楼层最多 `ROLETRACK_TRACKS_MAX_PER_FLOOR`（默认 10）个角色，超长按返回顺序保留前 N 项。
 
@@ -229,7 +229,7 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
 **在回复最末尾必须生成当前正文的NEW_STORY_DATA信息...**
 <NEW_STORY_DATA>
 <NEW_HISTORY>{historyPrompt 模板}</NEW_HISTORY>
-<NEW_CHARACTER_CARD>{characterPrompt 模板}</NEW_CHARACTER_CARD>
+<NEW_CHARACTER_CARD>{characterPrompt 模板（发送前删除 <可变> 标记文本，其余注释保留）}</NEW_CHARACTER_CARD>
 </NEW_STORY_DATA>
 ```
 
@@ -240,10 +240,8 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
 
 ### 5.3 deepMerge 规则（合并语义的核心）
 
-- **数组 + 字符串 delta**：支持 LLM 发出 `"delete 2-4"` 指令删除数组下标区间（越界则 warn 不删）。这是历程条目修正通道。
-- **数组 + 数组**：源数组中 `JSON.stringify` 与目标重复的条目过滤后 append（**去重键 = 整条 JSON 全等**；摘要哈希键、`getStoryProgressRange` 的 `seen` 去重都与此一致）。
-- **对象合并**：已存在的 key 递归合并；新 key 需通过 `checkPath(path, template)` 校验——模板中存在该路径才接受（模板里 `{{...}}` 动态键允许任意子键），否则 warn 跳过。
-- **角色设定保护**：路径含 `角色设定` 的字符串值，若 `allowUpdate=false`、值不含「未知」、且 key 不是 `处女` → 拒绝更新（不可变核心设定；`allowUpdate` 由 LLM 在 NEW_CHARACTER_CARD 顶层显式声明后删除该字段）。
+- **数组 + 数组**：源数组中 `JSON.stringify` 与目标重复的条目过滤后 append（**去重键 = 整条 JSON 全等**；摘要哈希键、`getStoryProgressRange` 的 `seen` 去重都与此一致）。数组 + 字符串 delta 时无特殊处理（字符串视为标量，按对象合并规则处理）。
+- **对象合并**：已存在的 key 递归合并（后写覆盖先写，无保护字段）；新 key 需通过 `checkPath(path, template)` 校验——模板中存在该路径才接受（模板里 `{{...}}` 动态键允许任意子键），否则 warn 跳过。顶层遗留 `allowUpdate` 字段在 `mergeDataInfo` 中直接丢弃（仅防动态键误收为角色名，不作更新开关）。
 - 合并后空字符串值 `delete`。
 
 ### 5.4 历程渲染（`renderJourneyMarkdown`）
@@ -286,7 +284,8 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
 
 - `extractVariablePaths` 按行解析角色卡模板原文：属性行 `//` 注释含 `<可变>` 即标记该行全部属性键；`{`/`[` 计数维护对象栈（要求模板保持一行一属性的 pretty 格式，与默认模板一致）。
 - 父级标记覆盖整棵子树：`"当前状态": { // <可变>` 下全部子属性自动为可变，无需逐行标记。
-- `getVariableInfo` 用标记路径集过滤 `parseTemplate` 后的模板对象：可变路径（含祖先被标记）整体保留，其余分支只保留通向可变后代的骨架；无标记/模板非法时 `hasVariable=false`，追踪拒绝生成并提示去模板 tab 标记。
+- `getVariableInfo` 用标记路径集过滤 `parseTemplate` 后的模板对象：可变路径（含祖先被标记）整体保留，其余分支只保留通向可变后代的骨架；无标记/模板非法时 `hasVariable=false`，追踪拒绝生成并提示去模板 tab 标记。同时 `buildVariableTemplateText` 按同样口径过滤原始文本行，生成保留原树对应行注释的可变状态模版文本（根骨架/可变子树内纯注释行保留，其余丢弃；保留行统一删除 `<可变>` 标记文本后原样输出）。
+- `{{可变状态模版}}` 占位符填入的是上述保留注释的文本（已删 `<可变>`，无文本时回退对象 JSON）；`h` 哈希同样基于该文本，模板注释变更即标脏。`getCharPrompt` 发送原角色卡模板时同样删除 `<可变>` 标记文本（其余注释保留），避免模型误解。
 - 默认角色卡模板已带示例可变分区 `"当前状态"`（地点/穿着/身体状态/持有物/与主角关系，均 `<可变>` 标记）。老用户已保存的旧模板不受影响（设置按鍵合并），需点模板重置或手工加标记才能用追踪。
 
 ### 9.2 单楼层输入输出

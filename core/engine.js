@@ -196,29 +196,7 @@
         return false; // 所有 term 的出现都被吞掉
     }
 
-    function deepMerge(merged, delta, path = [], allowUpdate = false, template = null) {
-        // 检查target是否为数组并且source是否为字符串
-        if (Array.isArray(merged) && typeof delta === 'string') {
-            // 使用正则表达式匹配 "delete start-end" 格式
-            const regex = /delete\s+(\d+)\s*-\s*(\d+)/i;
-            const match = delta.match(regex);
-
-            if (match) {
-                const start = parseInt(match[1]);
-                const end = parseInt(match[2]);
-
-                // 验证索引范围是否有效
-                if (start >= 0 && end < merged.length && start <= end) {
-                    // 创建新数组，不包含指定范围的元素
-                    return [
-                        ...merged.slice(0, start),
-                        ...merged.slice(end + 1)
-                    ];
-                } else {
-                    console.warn(`Invalid index range ${start}-${end} for array of length ${merged.length}. No items deleted.`);
-                }
-            }
-        }
+    function deepMerge(merged, delta, path = [], template = null) {
         if (Array.isArray(merged) && Array.isArray(delta)) {
             // 过滤 source 中 target 已经存在的 item，比较方式是 JSON.stringify
             const targetStrSet = new Set(merged.map(item => JSON.stringify(item)));
@@ -229,15 +207,12 @@
         if (typeof delta !== 'object' || delta === null) return merged;
         for (const key of Object.keys(delta)) {
             if (key in merged) {
-                if (!allowUpdate && path.concat(key).includes("角色设定") && merged[key] && typeof merged[key] === 'string' && !merged[key].includes("未知") && key != "处女") {
-                    continue;
-                }
-                merged[key] = deepMerge(merged[key], delta[key], path.concat(key), allowUpdate, template);
+                merged[key] = deepMerge(merged[key], delta[key], path.concat(key), template);
             } else if (checkPath(path.concat(key), template)) {
                 if (Array.isArray(delta[key])) {
-                    merged[key] = deepMerge([], delta[key], path.concat(key), allowUpdate, template);
+                    merged[key] = deepMerge([], delta[key], path.concat(key), template);
                 } else if (typeof delta[key] === 'object') {
-                    merged[key] = deepMerge({}, delta[key], path.concat(key), allowUpdate, template);
+                    merged[key] = deepMerge({}, delta[key], path.concat(key), template);
                 } else {
                     merged[key] = delta[key];
                 }
@@ -287,7 +262,7 @@
                         if (objMatch) {
                             try {
                                 const historyObj = JSON.parse(objMatch[0]);
-                                historyData = deepMerge(historyData, historyObj, [], false, historyTemplate);
+                                historyData = deepMerge(historyData, historyObj, [], historyTemplate);
                                 item.messageCount = 0;
                                 if (historyObj.故事历程) {
                                     item.messageCount = historyObj.故事历程.length;
@@ -312,9 +287,10 @@
                             if (objMatch) {
                                 try {
                                     const charObj = JSON.parse(objMatch[0]);
-                                    let allowUpdate = charObj.allowUpdate || false;
+                                    // 遗留字段清理：旧版 LLM 输出可能带顶层 allowUpdate，
+                                    // 此处直接丢弃，防止被动态键模板误收为角色名。
                                     delete charObj.allowUpdate;
-                                    characterData = deepMerge(characterData, charObj, [], allowUpdate, characterTemplate);
+                                    characterData = deepMerge(characterData, charObj, [], characterTemplate);
                                 } catch (e) {
                                     console.error(`[Chat History Optimization] NEW_CHARACTER_CARD JSON parse error at chat[${j}]:`, e);
                                     console.error(`[Chat History Optimization] NEW_CHARACTER_CARD content:`, objMatch[0]);
@@ -587,7 +563,15 @@
 
     /**
      * 构建注入 prompt。historyData.前文 已是最终装配文本（RAG 远端条目+中段+正文）。
+     * 角色卡模板原样发送时会删除 <可变> 标记文本（保留其余注释），
+     * 避免模型将其误解为角色卡生成内容。
      */
+    function stripVariableTag(text) {
+        if (typeof text !== 'string' || text === '') return text;
+        const tag = (NS.RoleTrack && NS.RoleTrack.VARIABLE_TAG) || '<可变>';
+        return text.split(tag).join('');
+    }
+
     function getCharPrompt(historyData, characterData) {
         // 浅拷贝：不修改调用方的 historyData（前文需保留给统计/日志/预览）
         const history = { ...(historyData || {}) };
@@ -599,7 +583,7 @@
         // 角色卡功能关闭时，不注入角色卡区段与模板
         const roleCardEnabled = isRoleCardEnabled();
         const newHistoryTemplate = Settings.get('historyPrompt');
-        const newCharacterCardTemplate = roleCardEnabled ? Settings.get('characterPrompt') : '';
+        const newCharacterCardTemplate = roleCardEnabled ? stripVariableTag(Settings.get('characterPrompt')) : '';
 
         const prompt = `
 <STORY_DATA>

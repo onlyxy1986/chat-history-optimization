@@ -978,7 +978,10 @@
                 el.textContent = '可变状态模版：未检测到 <可变> 标记';
                 return;
             }
-            el.textContent = `可变状态模版（${cov.variableCount} 个可变属性）：${JSON.stringify(cov.variableTemplate)}`;
+            const preview = (cov.variableTemplateText && cov.variableTemplateText.trim() !== '')
+                ? cov.variableTemplateText
+                : JSON.stringify(cov.variableTemplate);
+            el.textContent = `可变状态模版（${cov.variableCount} 个可变属性）：${preview}`;
         });
     }
 
