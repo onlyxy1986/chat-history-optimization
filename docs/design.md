@@ -217,7 +217,7 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
      - `midBudget = contentLimit - tailTok`；中段按天分组（首现顺序，天为原子单位），从最旧侧折叠：
        - **Phase A**：最旧天 L0 → 有效 L1（须完全落在中段内；部分被正文覆盖的天永不折叠），直到估算装下。
        - **Phase B**：仍超则把连续同层天按上层节点 span 换成父摘要（逐层上升；span 必须整体完全落在中段内，防正文重复）。
-      - **精确计数丢弃**：折叠后渲染做 `getTokenCountAsync` 精确计数；仍超则从最旧槽位逐个丢弃（被合并吞掉的天不占预算，不参与丢弃；整跨度父槽位被丢即整段消失），直至 ≤ midBudget（无次数上限，保证硬上限）。`spanFullyInside` 只要求 span 内实际存在的天全部落在中段内，数字断层直接跳过（v2.23.1 修复：此前缺一天即整父永不可用，非连续时间线白生成）。
+      - **精确计数兜底（v2.23.3 修复估算偏乐观丢整天）**：估算口径（`EST_CHARS_PER_TOKEN=1.5`）与真实 tokenizer 不一致时可能"该折的没折"（如只超 1k 却要丢 5k 的整天）。故折叠后渲染做 `getTokenCountAsync` 精确计数；仍超则按序兜底：①最旧可折叠 L0→L1、②上层合并（与 Phase B 同判定、可复用 `tryApplyUpper`）、③都不可行才从最旧槽位逐个丢弃（被合并吞掉的天不占预算，不参与丢弃；整跨度父槽位被丢即整段消失），直至 ≤ midBudget（无次数上限，保证硬上限）。`spanFullyInside` 只要求 span 内实际存在的天全部落在中段内，数字断层直接跳过（v2.23.1 修复：此前缺一天即整父永不可用，非连续时间线白生成）。
      - 发送前永不等 LLM：只读 `SubSummary.getCoverage()` 快照，缺失摘要的天保持原文（Phase A 跳过），折叠抛错 → 回退全量中段。
      - `hier = {active, willActivate, days:[{dayKey,label,count,level,text,endKey,mergedInto}], upper, foldedDays, droppedDays}`（level 0=原文，1=天摘要，≥2=上层合并，-1=已丢弃），供 UI 按天展示层级。
 8. **装配前文**：`historyData.前文 = joinNonEmpty([midMarkdown, tailText])`（中段已是折叠结果，不再分召回段/窗口段）。

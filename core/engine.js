@@ -847,6 +847,32 @@ ${newCharacterCardTemplate}
                 }
             }
         }
+        // 单个上层节点尝试合并：调用方保证 level 顺序（逐层上升），返回是否合并成功。
+        // 精确裁剪阶段复用同一判定（span 完全落在中段内 + 被覆盖天全部处于 level-1），
+        // 避免估算偏乐观时"该合的没合就直接丢整天"。
+        const tryApplyUpper = (u) => {
+            // span 必须整体完全落在中段内（防正文重复），且 span 内中段天
+            // 必须全部处于 level-1 且未丢弃
+            if (!spanFullyInside(u.startKey, u.endKey, fullDayCounts, midDayCounts)) return false;
+            const covered = days.filter((d) => !d.dropped && dayKeyInSpan(d.dayKey, u.startKey, u.endKey, order));
+            if (covered.length <= 1) return false;
+            if (!covered.every((d) => d.level === u.level - 1)) return false;
+            if (!covered.every((d) => fullyInside.has(d.dayKey))) return false;
+            const first = covered[0];
+            first.level = u.level;
+            first.text = u.text;
+            first.endKey = u.endKey;
+            // 合并地点；被吞掉的天标记 mergedInto（与精确裁剪的丢弃区分）
+            for (const d of covered.slice(1)) {
+                for (const loc of d.locations) {
+                    if (loc && !first.locations.includes(loc)) first.locations.push(loc);
+                }
+                d.dropped = true;
+                d.mergedInto = u.key;
+                d.mergedLevel = u.level;
+            }
+            return true;
+        };
         // Phase B：从最旧侧把连续同层天换成父节点（逐层上升）
         if (totalEst() > midBudgetEst) {
             const maxLevel = (typeof Constants.HIER_MAX_LEVELS === 'number' && Constants.HIER_MAX_LEVELS >= 2)
@@ -856,30 +882,11 @@ ${newCharacterCardTemplate}
                 for (const u of validUpper) {
                     if (u.level !== level) continue;
                     if (totalEst() <= midBudgetEst) break;
-                    // span 必须整体完全落在中段内（防正文重复），且 span 内中段天
-                    // 必须全部处于 level-1 且未丢弃
-                    if (!spanFullyInside(u.startKey, u.endKey, fullDayCounts, midDayCounts)) continue;
-                    const covered = days.filter((d) => !d.dropped && dayKeyInSpan(d.dayKey, u.startKey, u.endKey, order));
-                    if (covered.length <= 1) continue;
-                    if (!covered.every((d) => d.level === level - 1)) continue;
-                    if (!covered.every((d) => fullyInside.has(d.dayKey))) continue;
-                    const first = covered[0];
-                    first.level = level;
-                    first.text = u.text;
-                    first.endKey = u.endKey;
-                    // 合并地点；被吞掉的天标记 mergedInto（与精确裁剪的丢弃区分）
-                    for (const d of covered.slice(1)) {
-                        for (const loc of d.locations) {
-                            if (loc && !first.locations.includes(loc)) first.locations.push(loc);
-                        }
-                        d.dropped = true;
-                        d.mergedInto = u.key;
-                        d.mergedLevel = level;
-                    }
+                    tryApplyUpper(u);
                 }
             }
         }
-        return { days, upperUsed: validUpper.length };
+        return { days, upperUsed: validUpper.length, l1ByDay, validUpper, fullyInside, order, tryApplyUpper };
     }
 
     // 槽位 → 统一 markdown 条目列（原文与摘要伪条目同形，一次渲染）
@@ -1016,9 +1023,47 @@ ${newCharacterCardTemplate}
                 const plan = planFoldSlots(midEntries, fullDayCounts, midDayCounts, coverage, midBudget);
                 const renderPlan = () => renderJourneyMarkdown(slotsToEntries(plan.days), midMaxDay);
                 midMarkdown = renderPlan();
-                // 精确计数：超预算则从最旧槽位逐个丢弃，直到 ≤ midBudget（无次数上限，保证硬上限）
+                // 精确计数：估算（EST_CHARS_PER_TOKEN）偏乐观时可能"该折的没折"，
+                // 直接丢整天会把有 L1 的天整个丢掉（如超 1k 却丢 5k）。故超预算时
+                // 优先把最旧可折叠 L0 折成 L1、再试上层合并，都不行才丢最旧槽位，
+                // 直到 ≤ midBudget（无次数上限，保证硬上限）。
                 let tok = await getTokenCountAsync(midMarkdown);
+                const maxLevel = (typeof Constants.HIER_MAX_LEVELS === 'number' && Constants.HIER_MAX_LEVELS >= 2)
+                    ? Math.floor(Constants.HIER_MAX_LEVELS) : 4;
                 while (tok > midBudget) {
+                    // 1. 最旧可折叠 L0 → L1（须完全落在中段内且有有效天摘要）
+                    const foldIdx = plan.days.findIndex((d) => !d.dropped && d.level === 0
+                        && plan.fullyInside && plan.fullyInside.has(d.dayKey)
+                        && plan.l1ByDay && plan.l1ByDay.has(d.dayKey));
+                    if (foldIdx !== -1) {
+                        const d = plan.days[foldIdx];
+                        d.level = 1;
+                        d.text = plan.l1ByDay.get(d.dayKey);
+                        d.endKey = d.dayKey;
+                        midMarkdown = renderPlan();
+                        tok = await getTokenCountAsync(midMarkdown);
+                        continue;
+                    }
+                    // 2. 上层合并（逐层上升，复用与 Phase B 同一判定）
+                    let merged = false;
+                    if (plan.tryApplyUpper && Array.isArray(plan.validUpper)) {
+                        for (let level = 2; level <= maxLevel; level++) {
+                            if (tok <= midBudget) break;
+                            for (const u of plan.validUpper) {
+                                if (u.level !== level) continue;
+                                if (tok <= midBudget) break;
+                                if (plan.tryApplyUpper(u)) {
+                                    merged = true;
+                                    midMarkdown = renderPlan();
+                                    tok = await getTokenCountAsync(midMarkdown);
+                                    if (tok <= midBudget) break;
+                                }
+                            }
+                            if (tok <= midBudget) break;
+                        }
+                    }
+                    if (merged) continue;
+                    // 3. 都不行才丢最旧槽位
                     const idx = plan.days.findIndex((d) => !d.dropped);
                     if (idx === -1) break;
                     plan.days[idx].dropped = true;
