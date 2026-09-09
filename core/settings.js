@@ -88,7 +88,7 @@
         roleTrackMaxTokens: 512,
         roleTrackConcurrency: 4, // 批量补齐缺失追踪时的并行数（1 = 串行；上限见 Constants.ROLETRACK_CONCURRENCY_MAX）
         roleTrackTimeoutSec: 120, // 单次 LLM 请求超时（秒），钳制范围复用 SUBSUMMARY_TIMEOUT_MIN/MAX_MS
-        roleTrackPrompt: `你是角色状态追踪助手。请根据"本次故事历程"推断各角色可变状态的变化，只输出 JSON 数组，不要输出任何其他内容。
+        roleTrackPrompt: `你是角色状态追踪助手。请根据"本次故事历程"推断各角色可变状态的变化，只输出 JSON Object，不要输出任何其他内容。
 要求：
 1. 只输出在本次故事历程中有状态变化的角色，无变化的角色不要输出；若均无变化则输出 {}。
 2. 数组每一项为一个有状态变化的角色的"可变状态模版"（与下方"可变状态模版"同树形，角色名键替换为实际角色名），只探测"可变状态模版"中列出的属性变化。
