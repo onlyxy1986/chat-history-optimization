@@ -259,8 +259,16 @@
         return out;
     }
 
+    // L1 脏检查只看语义内容（天数/时间段/地点/历程），不含 floor/index：
+    // 删楼层会导致后续楼层下标整体前移，含 floor 会误伤未改的天（全变脏）。
     function dayChildHash(day) {
-        return fnv1a32(JSON.stringify(day.entries));
+        const content = (day.entries || []).map((e) => ({
+            天数: e.天数 || '',
+            时间段: e.时间段 || '',
+            地点: e.地点 || '',
+            历程: e.历程 || '',
+        }));
+        return fnv1a32(JSON.stringify(content));
     }
 
     function dayLocations(day) {
@@ -297,6 +305,13 @@
         if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return freshStore();
         if (!raw.l1 || typeof raw.l1 !== 'object' || Array.isArray(raw.l1)) return freshStore();
         if (!raw.upper || typeof raw.upper !== 'object' || Array.isArray(raw.upper)) return freshStore();
+        // fanin 变化整树重建上层：上层键 span 依赖 fanin 切分，旧键在新规划下永不命中，
+        // 留着只会占存储 + 在 UI 切回旧 fanin 前一直是隐形垃圾；L1 与 fanin 无关予以保留。
+        if (raw.fanin !== getFanin()) {
+            raw.upper = {};
+            raw.fanin = getFanin();
+            if (typeof NS.bridge.saveMetadataDebounced === 'function') NS.bridge.saveMetadataDebounced();
+        }
         return raw;
     }
 
@@ -309,6 +324,48 @@
         return true;
     }
 
+    // 删除孤儿：L1 只保留当前仍存在的日子；upper 只保留当前规划内的键。
+    // 规划随天数/fanin 变化，旧 span（如 L3:1~6 → L3:1~7）永不再命中，不删即永久堆积。
+    function pruneStore() {
+        const meta = getMetadata();
+        if (!meta) return false;
+        const store = meta[HIER_METADATA_KEY];
+        if (!store || typeof store !== 'object' || Array.isArray(store)) return false;
+        if (!store.l1 || typeof store.l1 !== 'object' || !store.upper || typeof store.upper !== 'object') return false;
+        let dayKeys = [];
+        try {
+            dayKeys = getDayGroups().map((g) => g.dayKey);
+        } catch (e) {
+            return false;
+        }
+        const daySet = new Set(dayKeys);
+        let planSet = new Set();
+        try {
+            planSet = new Set(planUpperTree(dayKeys).map((n) => n.key));
+        } catch (e) {
+            return false;
+        }
+        let changed = false;
+        for (const k of Object.keys(store.l1)) {
+            if (!daySet.has(k)) {
+                delete store.l1[k];
+                changed = true;
+            }
+        }
+        for (const k of Object.keys(store.upper)) {
+            if (!planSet.has(k)) {
+                delete store.upper[k];
+                changed = true;
+            }
+        }
+        if (store.fanin !== getFanin()) {
+            store.fanin = getFanin();
+            changed = true;
+        }
+        if (changed && typeof NS.bridge.saveMetadataDebounced === 'function') NS.bridge.saveMetadataDebounced();
+        return changed;
+    }
+
     // ------------------------------------------------------------------
     // 上层树规划：按天序把同层节点按 fanin 从最旧侧切块
     // ------------------------------------------------------------------
@@ -317,44 +374,68 @@
         return `L${level}:${startKey}~${endKey}`;
     }
 
+    // 上层键 span 解析：L1 dayKey 自身即 span；上层键 Lx:s~e 取 s/e。
+    function spanOfKey(key) {
+        if (typeof key !== 'string') return { start: key, end: key };
+        if (key[0] !== 'L' || key.indexOf(':') === -1) return { start: key, end: key };
+        const after = key.split(':')[1] || '';
+        const parts = after.split('~');
+        return { start: parts[0], end: parts[1] };
+    }
+
     // 按当前天序 + fanin 规划全树结构（不含文本）：
-    // 返回 [{level, key, startKey, endKey, startLabel, endLabel, childKeys: [L1 dayKey | 下层 upperKey]}]
+    // 返回 [{level, key, startKey, endKey, startLabel, endLabel, childKeys}]
+    // 严格整组合并：同层连续节点凑满 fanin 才建父，不满整组的尾巴全部直接晋升
+    // （不满组提前合并会导致尾巴每来一天 key 就变，旧卡变孤儿致 UI 闪现又消失）。
+    // 不同层节点永不混入同一父（混层父在装配层 spanFullyInside + 同层检查下永不可用，
+    // 生成只是浪费 LLM）。
     function planUpperTree(dayKeys) {
         const fanin = getFanin();
         const maxLevels = getMaxLevels();
         const nodes = [];
         if (dayKeys.length <= 1) return nodes;
-        let prevKeys = dayKeys.slice();
+        let prev = dayKeys.map((k) => ({ key: k, level: 1 }));
         for (let level = 2; level <= maxLevels; level++) {
-            if (prevKeys.length <= 1) break;
-            const curKeys = [];
-            for (let i = 0; i < prevKeys.length; i += fanin) {
-                const chunk = prevKeys.slice(i, i + fanin);
-                if (chunk.length <= 1) {
-                    // 落单节点直接晋升（不生成摘要，沿用子节点）
-                    curKeys.push(chunk[0]);
+            if (prev.length <= 1) break;
+            const cur = [];
+            let made = false;
+            let i = 0;
+            while (i < prev.length) {
+                if (prev[i].level !== level - 1) {
+                    // 非本层输入（低层落单晋升上来的尾巴），原样晋升，不参与本层合并
+                    cur.push(prev[i]);
+                    i++;
                     continue;
                 }
-                const first = chunk[0];
-                const last = chunk[chunk.length - 1];
-                const startKey = first.indexOf('~') !== -1 || first[0] === 'L'
-                    ? first.split(':')[1].split('~')[0] : first;
-                const endKey = last.indexOf('~') !== -1 || last[0] === 'L'
-                    ? last.split(':')[1].split('~')[1] : last;
-                const key = upperKey(level, startKey, endKey);
-                nodes.push({
-                    level,
-                    key,
-                    startKey,
-                    endKey,
-                    startLabel: dayLabel(startKey),
-                    endLabel: dayLabel(endKey),
-                    childKeys: chunk.slice(),
-                });
-                curKeys.push(key);
+                let j = i;
+                while (j < prev.length && prev[j].level === level - 1) j++;
+                for (let k = i; k < j; k += fanin) {
+                    const chunk = prev.slice(k, Math.min(k + fanin, j));
+                    if (chunk.length < fanin) {
+                        // 不满整组直接晋升（不生成摘要，沿用子节点）：尾巴凑满前保持 L(k-1) 原样，
+                        // key 稳定无闪现；代价是尾巴压缩延迟，极端预算下靠 L1/丢弃顶（见设计）。
+                        for (const c of chunk) cur.push(c);
+                        continue;
+                    }
+                    const startKey = spanOfKey(chunk[0].key).start;
+                    const endKey = spanOfKey(chunk[chunk.length - 1].key).end;
+                    const key = upperKey(level, startKey, endKey);
+                    nodes.push({
+                        level,
+                        key,
+                        startKey,
+                        endKey,
+                        startLabel: dayLabel(startKey),
+                        endLabel: dayLabel(endKey),
+                        childKeys: chunk.map((c) => c.key),
+                    });
+                    cur.push({ key, level });
+                    made = true;
+                }
+                i = j;
             }
-            if (curKeys.length === prevKeys.length) break;
-            prevKeys = curKeys;
+            if (!made) break;
+            prev = cur;
         }
         return nodes;
     }
@@ -485,9 +566,13 @@
         const cov = getCoverage();
         let n = 0;
         for (const d of cov.days) if (!d.text) n++;
+        // 上层缺失只计子齐备的（子不齐时生成也无意义，与 collectLevelTargets 口径一致）
+        const readyL1 = new Set(cov.days.filter((d) => d.text).map((d) => d.dayKey));
+        const readyUpper = new Set(cov.upper.filter((u) => u.text).map((u) => u.key));
         for (const u of cov.upper) {
-            // 上层缺失只计子齐备的（子不齐时生成也无意义）
-            if (!u.text) n++;
+            if (u.text) continue;
+            const ready = (u.childKeys || []).every((ck) => (ck[0] === 'L' ? readyUpper.has(ck) : readyL1.has(ck)));
+            if (ready) n++;
         }
         return n;
     }
@@ -877,6 +962,12 @@
                     if (targets.length > 0) {
                         await executeLevel(targets, force, counter);
                     }
+                }
+                // 批次结束清孤儿（规划随天数变化，旧 span 不删即永久堆积 + 切回旧天数时幽灵出现）
+                try {
+                    pruneStore();
+                } catch (e) {
+                    console.error('[Chat History Optimization] 清理孤儿摘要失败', e);
                 }
                 if (counter.done > 0 && typeof NS.bridge.saveMetadataDebounced === 'function') NS.bridge.saveMetadataDebounced();
             } finally {

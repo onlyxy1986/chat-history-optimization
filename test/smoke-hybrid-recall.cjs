@@ -124,6 +124,23 @@ function buildChat(numDays, userMes, perDay) {
     return entries;
 }
 
+// 按指定天号数组建聊天（断层时间线，如 [1,2,10,11]），口径与 buildChat 一致
+function buildChatDays(dayNums, perDay) {
+    chat.length = 0;
+    for (const k of Object.keys(metadata)) delete metadata[k];
+    chat.push({ mes: '开场', is_user: true });
+    const n = perDay || 1;
+    for (const d of dayNums) {
+        const journey = [];
+        for (let k = 0; k < n; k++) {
+            journey.push(makeEntry(`第${d}天`, TIMES[(d + k) % TIMES.length], `地点${d}`, `第${d}天发生了重要事件${d}-${k}，人物甲与人物乙在地点${d}达成了关键约定${d}-${k}。`));
+        }
+        chat.push(makeFloor(journey));
+        chat.push({ mes: '好', is_user: true });
+    }
+    chat.push({ mes: '继续', is_user: true });
+}
+
 function check(name, cond, extra) {
     if (cond) { console.log('PASS', name); }
     else { console.log('FAIL', name, extra !== undefined ? JSON.stringify(extra) : ''); process.exitCode = 1; }
@@ -199,12 +216,13 @@ async function measureFullTokens() {
     check('B: 天为原子单位（同天条目同进退）', statsB.hier.days.every(d => typeof d.level === 'number'), statsB.hier.days);
 
     // 场景 C（上层合并）：20 天 fanin 3 → L2 参与折叠；实际渲染槽位从旧到新层级非递增
+    // 整组合并：20 = 6×3 + 尾巴 2（尾巴晋升），故 6 个 L2
     buildChat(20, null, 3);
     NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings({ hierFanin: 3 });
     await quiet(NS.SubSummary.generateMissing());
     const covC = NS.SubSummary.getCoverage();
     const l2Count = covC.upper.filter(u => u.level === 2 && u.text).length;
-    check('C: 20 天 fanin3 生成 7 个 L2', l2Count === 7, covC.upper.map(u => [u.key, !!u.text]));
+    check('C: 20 天 fanin3 生成 6 个 L2', l2Count === 6, covC.upper.map(u => [u.key, !!u.text]));
     const fullTokensC = await quiet(measureFullTokens());
     buildChat(20, null, 3);
     NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings({ hierFanin: 3 });
@@ -255,6 +273,61 @@ async function measureFullTokens() {
     check('F: fanin 下限钳制到 2', NS.SubSummary.getFanin() === 2, NS.SubSummary.getFanin());
     NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings({ hierFanin: 99 });
     check('F: fanin 上限钳制到 10', NS.SubSummary.getFanin() === 10, NS.SubSummary.getFanin());
+
+    // 场景 I（L1 哈希不含 floor/index）：删首楼层致后续楼层前移，未改内容的天仍有效
+    buildChat(4);
+    NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings();
+    await quiet(NS.SubSummary.generateMissing());
+    chat.splice(1, 2); // 删除第 1 天楼层 + 其后用户消息，后续楼层下标前移
+    const covI = NS.SubSummary.getCoverage();
+    check('I: 删楼层后剩余天 L1 仍有效', covI.days.length === 3 && covI.days.every(d => d.text), covI.days.map(d => [d.dayKey, !!d.text]));
+
+    // 场景 J（整组合并）：不满 fanin 的尾巴晋升，上层子节点同层；fanin 切换清上层留 L1
+    buildChat(6);
+    NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings({ hierFanin: 5 });
+    await quiet(NS.SubSummary.generateMissing());
+    const covJ6 = NS.SubSummary.getCoverage();
+    check('J: 6 天 fanin5 仅 L2:1~5（尾巴 6 晋升）', covJ6.upper.length === 1 && covJ6.upper[0].key === 'L2:1~5', covJ6.upper.map(u => u.key));
+    buildChat(7);
+    NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings({ hierFanin: 5 });
+    await quiet(NS.SubSummary.generateMissing());
+    const covJ7 = NS.SubSummary.getCoverage();
+    const j7ok = covJ7.upper.every(u => (u.level === 2 && u.childKeys.every(k => k[0] !== 'L')) || (u.level >= 3 && u.childKeys.every(k => k[0] === 'L')));
+    check('J: 上层子节点同层（L2 子为天、L3+ 子为上层）', j7ok, covJ7.upper.map(u => [u.key, u.childKeys]));
+    check('J: 7 天仍仅 L2:1~5（尾巴 6~7 不满组晋升、无 L3）', covJ7.upper.length === 1 && covJ7.upper[0].key === 'L2:1~5' && !!covJ7.upper[0].text, covJ7.upper.map(u => [u.key, !!u.text]));
+    buildChat(10);
+    NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings({ hierFanin: 5 });
+    await quiet(NS.SubSummary.generateMissing());
+    const covJ10 = NS.SubSummary.getCoverage();
+    check('J: 10 天两组 L2、无 L3（L3 需 5 个 L2，即 25 天）', covJ10.upper.length === 2 && covJ10.upper.every(u => u.level === 2 && !!u.text), covJ10.upper.map(u => [u.key, !!u.text]));
+    buildChat(4);
+    NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings({ hierFanin: 2 });
+    await quiet(NS.SubSummary.generateMissing());
+    const covJ4 = NS.SubSummary.getCoverage();
+    check('J: 4 天 fanin2 出 L3:1~4（2 个 L2 凑满）', covJ4.upper.some(u => u.key === 'L3:1~4' && u.text), covJ4.upper.map(u => [u.key, !!u.text]));
+    buildChat(7);
+    NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings({ hierFanin: 5 });
+    await quiet(NS.SubSummary.generateMissing());
+    NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings({ hierFanin: 2 });
+    const covJfanin = NS.SubSummary.getCoverage();
+    check('J: fanin 切换清上层', covJfanin.upper.every(u => !u.text), covJfanin.upper.map(u => [u.key, !!u.text]));
+    check('J: fanin 切换保留 L1', covJfanin.days.length === 7 && covJfanin.days.every(d => d.text), covJfanin.days.map(d => [d.dayKey, !!d.text]));
+
+    // 场景 K（断层时间线）：规划按存在天数的顺序切块，span 含数字断层；折叠跳过缺的天，跨洞父可用
+    buildChatDays([1, 2, 10, 11, 12, 13], 3);
+    NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings({ hierFanin: 3 });
+    await quiet(NS.SubSummary.generateMissing());
+    const covK = NS.SubSummary.getCoverage();
+    check('K: 跨洞 L2:1~10 按位置成组', covK.upper.some(u => u.key === 'L2:1~10' && u.text), covK.upper.map(u => [u.key, !!u.text]));
+    const fullTokensK = await quiet(measureFullTokens());
+    buildChatDays([1, 2, 10, 11, 12, 13], 3);
+    NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings({ hierFanin: 3 });
+    await quiet(NS.SubSummary.generateMissing());
+    NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings({ hierFanin: 3, tokenLimit: fullTokensK - 400 });
+    const statsK = await quiet(runAssemble());
+    const kMerged = statsK.hier.days.filter(d => d.mergedInto === 'L2:1~10');
+    check('K: 跨洞父参与折叠（2 天被 L2:1~10 合并）', kMerged.length === 2, statsK.hier.days.map(d => [d.dayKey, d.level, d.endKey, d.mergedInto]));
+    check('K: 最终不超 tokenLimit', statsK.tokenCount <= fullTokensK - 400, { tokenCount: statsK.tokenCount, limit: fullTokensK - 400 });
 
     // 场景 G（解析失败气泡总线，事件驱动）：楼层 2 的 NEW_HISTORY JSON 损坏
     const brokenMes = '损坏楼层\n<NEW_STORY_DATA>\n<NEW_HISTORY>\n{ "故事历程": [ { 损坏\n</NEW_HISTORY>\n</NEW_STORY_DATA>';

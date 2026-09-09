@@ -764,8 +764,10 @@ ${newCharacterCardTemplate}
         return pos >= Math.min(s, e) && pos <= Math.max(s, e);
     }
 
-    // 上层节点整个 span 的天必须全部完全落在中段内：
-    // 否则父文本会覆盖正文 verbatim 区的条目造成重复，或覆盖不存在的天。
+    // 上层节点 span 内实际存在的天必须全部完全落在中段内：
+    // 否则父文本会覆盖正文 verbatim 区的条目造成重复。
+    // 数字断层（缺的天，如 1~10 缺 5~9）直接跳过：没有条目就 nothing to cover，
+    // 此前 `f === 0 → false` 导致非连续时间线的所有跨洞父永不可用（生成白花、只能靠 L1/丢弃）。
     function spanFullyInside(startKey, endKey, fullDayCounts, midDayCounts) {
         if (startKey === 'unknown' || endKey === 'unknown') {
             return startKey === 'unknown' && endKey === 'unknown'
@@ -780,7 +782,7 @@ ${newCharacterCardTemplate}
         for (let n = lo; n <= hi; n++) {
             const k = String(n);
             const f = fullDayCounts.get(k) || 0;
-            if (f === 0) return false;
+            if (f === 0) continue;
             if ((midDayCounts.get(k) || 0) !== f) return false;
         }
         return true;
