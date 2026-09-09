@@ -565,8 +565,12 @@
     function getMissingCount() {
         const cov = getCoverage();
         let n = 0;
-        for (const d of cov.days) if (!d.text) n++;
+        // L1 缺失计已封天（未封天自动补齐会跳过，见 openDayKeyOf）；
         // 上层缺失只计子齐备的（子不齐时生成也无意义，与 collectLevelTargets 口径一致）
+        const open = openDayKeyOf(cov.days.map((d) => d.dayKey));
+        for (const d of cov.days) {
+            if (!d.text && d.dayKey !== open) n++;
+        }
         const readyL1 = new Set(cov.days.filter((d) => d.text).map((d) => d.dayKey));
         const readyUpper = new Set(cov.upper.filter((u) => u.text).map((u) => u.key));
         for (const u of cov.upper) {
@@ -921,13 +925,32 @@
         }
     }
 
+    // 未封天：数字最大的那天（仍在进行中）。自动补齐（force=false）跳过它：
+    // 当天每多一条历程哈希就脏一次，跟一次 LLM 还连带整条祖先链重算，而它在装配层
+    // 大概率用不上（正文覆盖区永不折叠）；等次日历程出现（数字更大）即自动转正。
+    // 手动（force=true 的强制重建 / 故事 tab 单天按钮）不受限。'unknown' 无法判断
+    // 封天，始终按可生成处理（否则永无摘要）。
+    function openDayKeyOf(dayKeys) {
+        let max = null;
+        for (const k of dayKeys) {
+            if (k === UNKNOWN_KEY) continue;
+            const n = parseInt(k, 10);
+            if (isNaN(n)) continue;
+            if (max === null || n > max) max = n;
+        }
+        return max === null ? null : String(max);
+    }
+
     // 收集指定层级的缺失/脏节点：上层节点只在子齐备时收集。
     // 调用方按 L1→L2→… 逐层收集执行（每层执行后重算快照），保证父输入依赖子文本。
+    // 上层无需显式封天过滤：覆盖未封天的父因开放天 L1 缺失而子不齐备，自然收不到。
     function collectLevelTargets(level, force) {
         const cov = getCoverage();
         if (level === 1) {
+            const open = openDayKeyOf(cov.days.map((d) => d.dayKey));
             const out = [];
             for (const d of cov.days) {
+                if (!force && d.dayKey === open) continue;
                 if (force || !d.text) out.push({ kind: 'L1', dayKey: d.dayKey });
             }
             return out;

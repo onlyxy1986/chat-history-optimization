@@ -148,6 +148,7 @@ chat_metadata["chat-optimization-v2-hier"] = {
 - **哈希失效**：L1 读时重算当天条目语义哈希（仅天数/时间段/地点/历程，不含 floor/index；删楼层致后续楼层下标前移不再误伤），不匹配即视为缺失；上层节点读时重算子文本串哈希，不匹配即视为缺失。某天条目变化只脏该天 L1 + 覆盖该天的祖先链，不清整树。失效场景：楼层重新生成、手动编辑消息、切换 swipe。
 - 上层节点键为 span（`L<level>:<startKey>~<endKey>`）而非下标：严格整组 + 只合并同层连续节点，不满组/落单尾巴直接晋升（v2.23.1 起；此前提前合并 + 混层父在装配层永不可用，还会在加天时变孤儿致 UI 闪现又消失）；新增天只追加尾部节点，已凑满的旧节点键稳定。
 - **孤儿清理**：批次结束 `pruneStore()` 删除已不存在日子的 L1 与不在当前规划内的 upper；`fanin` 变化清空 upper（L1 与 fanin 无关保留），`loadStore` 读到旧 fanin 即清。
+- **封天**：数字最大的那天视为未封天（仍在进行中），自动补齐（`ensureMissing(false)`）跳过它的 L1（`openDayKeyOf`；`'unknown'` 无法判断封天，始终可生成）；覆盖未封天的上层因子的 L1 缺失而子不齐备，自然收不到。次日历程出现（更大天数）即自动转正。强制重建（`force=true`）与故事 tab 单天按钮不受限。
 - 旧版 `extra["chat-optimization-v2"]` 逐条目摘要与 `chat_metadata["chat-optimization-v2-embed"]` 向量库已删除，不做迁移。
 
 ### 4.5 角色状态追踪存储（v2.23.0）
@@ -274,8 +275,8 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
 ## 8. 分层摘要模块（subsummary.js，v2.21.0 重写）
 
 - 存储见 §4.4；`getCoverage()` 返回校验后的只读快照 `{fanin, days, upper}`（装配层与 UI 共用，不触发 LLM）。
-- 生成单元：L1 按天；上层按规划树节点。`ensureMissing(force)` 经 `batchChain` 串行，按 L1→L2→… 逐层收集（子齐备才收集父）执行；层内 worker 池并行（并发数 = `subSummaryConcurrency`，钳制 `SUBSUMMARY_CONCURRENCY_MAX`）；批次结束 `pruneStore()` 清孤儿。
-- `getMissingCount()` 只计可执行缺失（上层需子齐备，与 `collectLevelTargets` 同口径）。
+- 生成单元：L1 按天（自动跳过未封天，见 §4.4）；上层按规划树节点。`ensureMissing(force)` 经 `batchChain` 串行，按 L1→L2→… 逐层收集（子齐备才收集父）执行；层内 worker 池并行（并发数 = `subSummaryConcurrency`，钳制 `SUBSUMMARY_CONCURRENCY_MAX`）；批次结束 `pruneStore()` 清孤儿。
+- `getMissingCount()` 只计可执行缺失（L1 限已封天，上层需子齐备，与 `collectLevelTargets` 同口径）。
 - LLM 调用（fetch / profile 双通道、超时、重试、状态节流）沿用旧二级摘要实现；输出为纯文本（兼容 code fence 包裹），空即失败。
 - 触发：`GENERATION_ENDED` 后台补齐（`subSummaryToggle` 开且已配置）；手动 `generateMissing()` / `forceRebuild()` / `generateForDay(dayKey)` / `eraseAll()`（擦除只清摘要，不动开关与原文）。
 - 发送前永不等 LLM：`buildPromptData` 只读快照（见 §5.2-7），缺失即原文兜底。
@@ -322,7 +323,7 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
 ### 10.2 单节点生成（`runOne`）
 
 1. `isConfigured()` 否则抛错（UI 状态行提示去配置）。
-2. L1：当天分组（`getDayGroups`，经 `Engine.getStoryProgressRange` 全局去重后按天聚合）→ 非 force 且语义哈希命中即 `'skip'`（哈希不含 floor/index，v2.23.1 起删楼层不再误伤后续天）；模板 `hierDayPrompt` 须含 `{{当天历程}}`，占位符替换为当天条目 `entryToDocText` 串（`split/join` 防 `$` 模式）。
+2. L1：当天分组（`getDayGroups`，经 `Engine.getStoryProgressRange` 全局去重后按天聚合）→ 非 force 且语义哈希命中即 `'skip'`（哈希不含 floor/index，v2.23.1 起删楼层不再误伤后续天）；自动收集跳过未封天（v2.23.2 起，`generateForDay` 单天按钮不受限）；模板 `hierDayPrompt` 须含 `{{当天历程}}`，占位符替换为当天条目 `entryToDocText` 串（`split/join` 防 `$` 模式）。
 3. 上层：子文本必须齐备（`getCoverage` 实时重算），模板 `hierMergePrompt` 须含 `{{子摘要列表}}`，占位符替换为 `【子摘要i】` 标注的子串。
 4. 调 LLM → 纯文本（兼容 code fence 包裹，空即失败）。单次请求超时（设置项 `subSummaryTimeoutSec` 默认 120 秒，钳制 10~600 秒）：fetch 通道 Abort 中断建连/等包/读 body 全程，无 AbortController 的老环境退化为竞态；profile 通道传 AbortSignal + 超时竞态双保险（服务端忽略 signal 也不 hang）。超时按普通失败走重试。
 5. 写 `chat_metadata["chat-optimization-v2-hier"]` → `saveMetadataDebounced()`。
@@ -532,6 +533,7 @@ node test/smoke-roletrack.cjs
 
 | 版本 | 内容 |
 |---|---|
+| 2.23.2 | **天摘要封天**：自动补齐跳过数字最大天（未封天），次日历程出现即转正；覆盖未封天的上层因子不齐备自然跳过。 Steady-state 同天回复零 LLM 调用（此前每条回复跟一次当天 L1＋祖先链）；强制重建与单天按钮不受限；冒烟新增 L 场景，B/I/J 断言按封天更新 |
 | 2.23.1 | **分层摘要稳定性修复**：`planUpperTree` 严格整组合并 + 只合并同层连续节点（不满 `fanin` 的尾巴全部晋升，如 7 天 fanin5 仅 `L2:1~5`；此前 `L2:6~7`/`L3:1~6=[L2:1~5,6]` 在装配层永不可用，还会在加天时变孤儿致 UI 出现又消失；代价是 L3 需 25 天、尾巴压缩延迟，极端预算靠 L1/丢弃顶）；L1 脏哈希只看语义字段（去 floor/index，删楼层不再误伤后续天）；批次结束 `pruneStore()` 清孤儿 + `fanin` 切换清空 upper（L1 保留）；`getMissingCount` 只计子齐备缺失；冒烟新增 I（删楼层不误伤）/J（整组合并 + fanin 切换）/K（断层跨洞父可用）场景，C 改 20 天 fanin3 为 6 个 L2 |
 | 2.23.0 | **角色状态追踪**：角色卡模板 `// <可变>` 标记按同样树形组成可变状态模版；每次助手回复后后台对本楼层 L0 调独立 LLM 连接（`roleTrack*` 设置），输入为模版 + 本楼层 L0 + 出场角色完整角色卡，输出单个 JSON 对象（以模版为树形参考）存楼层 `extra`（哈希标脏），角色卡装配时按楼层顺序合并（追踪赢、未知键跳过、不复活淘汰角色）；新增「角色状态」tab（独立连接配置 + 模版预览 + 逐楼层卡片 + 单楼层生成）；`Engine.getKnownRoleCards/getKnownRoles` + `deepMerge` 导出；默认角色卡模板新增示例可变分区 `当前状态`；冒烟测试新增 `smoke-roletrack.cjs`（11 场景） |
 | 2.22.0 | **profile 附加参数**：`subSummaryExtraParams`（JSON 对象）经 `sendRequest` 第 5 参数 `overridePayload` 发往 ST 服务端，白名单采样字段直达上游，CUSTOM 源另支持 `custom_include_body` / `custom_include_headers`（YAML）；temperature 设置项优先；配置类错误（未配置/模板无效/非法 JSON）`noRetry` 不重试；冒烟测试新增 H 场景（透传 + 覆盖优先级 + 非法 JSON） |

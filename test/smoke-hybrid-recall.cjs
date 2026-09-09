@@ -193,7 +193,7 @@ async function measureFullTokens() {
     NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings();
     await quiet(NS.SubSummary.generateMissing());
     const covB = NS.SubSummary.getCoverage();
-    check('B: 6 天 L1 全部生成', covB.days.length === 6 && covB.days.every(d => d.text), covB.days.map(d => [d.dayKey, !!d.text]));
+    check('B: 6 天已封天 L1 生成、未封天跳过', covB.days.length === 6 && covB.days.filter(d => d.dayKey !== '6').every(d => d.text) && !covB.days.find(d => d.dayKey === '6').text, covB.days.map(d => [d.dayKey, !!d.text]));
     const fullTokensB = await quiet(measureFullTokens());
     buildChat(6, null, 3);
     NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings();
@@ -280,7 +280,7 @@ async function measureFullTokens() {
     await quiet(NS.SubSummary.generateMissing());
     chat.splice(1, 2); // 删除第 1 天楼层 + 其后用户消息，后续楼层下标前移
     const covI = NS.SubSummary.getCoverage();
-    check('I: 删楼层后剩余天 L1 仍有效', covI.days.length === 3 && covI.days.every(d => d.text), covI.days.map(d => [d.dayKey, !!d.text]));
+    check('I: 删楼层后剩余已封天 L1 仍有效、未封天跳过', covI.days.length === 3 && covI.days.filter(d => d.dayKey !== '4').every(d => d.text) && !covI.days.find(d => d.dayKey === '4').text, covI.days.map(d => [d.dayKey, !!d.text]));
 
     // 场景 J（整组合并）：不满 fanin 的尾巴晋升，上层子节点同层；fanin 切换清上层留 L1
     buildChat(6);
@@ -295,23 +295,37 @@ async function measureFullTokens() {
     const j7ok = covJ7.upper.every(u => (u.level === 2 && u.childKeys.every(k => k[0] !== 'L')) || (u.level >= 3 && u.childKeys.every(k => k[0] === 'L')));
     check('J: 上层子节点同层（L2 子为天、L3+ 子为上层）', j7ok, covJ7.upper.map(u => [u.key, u.childKeys]));
     check('J: 7 天仍仅 L2:1~5（尾巴 6~7 不满组晋升、无 L3）', covJ7.upper.length === 1 && covJ7.upper[0].key === 'L2:1~5' && !!covJ7.upper[0].text, covJ7.upper.map(u => [u.key, !!u.text]));
-    buildChat(10);
+    buildChat(11);
     NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings({ hierFanin: 5 });
     await quiet(NS.SubSummary.generateMissing());
     const covJ10 = NS.SubSummary.getCoverage();
-    check('J: 10 天两组 L2、无 L3（L3 需 5 个 L2，即 25 天）', covJ10.upper.length === 2 && covJ10.upper.every(u => u.level === 2 && !!u.text), covJ10.upper.map(u => [u.key, !!u.text]));
-    buildChat(4);
+    check('J: 11 天两组 L2、无 L3（已封天 1~10 凑满两组，未封天 11 跳过；L3 需 5 个 L2）', covJ10.upper.length === 2 && covJ10.upper.every(u => u.level === 2 && !!u.text), covJ10.upper.map(u => [u.key, !!u.text]));
+    buildChat(5);
     NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings({ hierFanin: 2 });
     await quiet(NS.SubSummary.generateMissing());
     const covJ4 = NS.SubSummary.getCoverage();
-    check('J: 4 天 fanin2 出 L3:1~4（2 个 L2 凑满）', covJ4.upper.some(u => u.key === 'L3:1~4' && u.text), covJ4.upper.map(u => [u.key, !!u.text]));
+    check('J: 5 天 fanin2 出 L3:1~4（已封天 1~4 凑满 2 个 L2，未封天 5 跳过）', covJ4.upper.some(u => u.key === 'L3:1~4' && u.text), covJ4.upper.map(u => [u.key, !!u.text]));
     buildChat(7);
     NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings({ hierFanin: 5 });
     await quiet(NS.SubSummary.generateMissing());
     NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings({ hierFanin: 2 });
     const covJfanin = NS.SubSummary.getCoverage();
     check('J: fanin 切换清上层', covJfanin.upper.every(u => !u.text), covJfanin.upper.map(u => [u.key, !!u.text]));
-    check('J: fanin 切换保留 L1', covJfanin.days.length === 7 && covJfanin.days.every(d => d.text), covJfanin.days.map(d => [d.dayKey, !!d.text]));
+    check('J: fanin 切换保留已封天 L1、未封天仍跳过', covJfanin.days.length === 7 && covJfanin.days.filter(d => d.dayKey !== '7').every(d => d.text) && !covJfanin.days.find(d => d.dayKey === '7').text, covJfanin.days.map(d => [d.dayKey, !!d.text]));
+
+    // 场景 L（封天）：自动补齐跳过数字最大天，新天出现后旧天自动转正
+    buildChat(3);
+    NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings();
+    await quiet(NS.SubSummary.generateMissing());
+    const covL1 = NS.SubSummary.getCoverage();
+    check('L: 未封天跳过（第 3 天缺失）', covL1.days.length === 3 && covL1.days[0].text && covL1.days[1].text && !covL1.days[2].text, covL1.days.map(d => [d.dayKey, !!d.text]));
+    // 追加第 4 天楼层（插到末尾用户消息前，不清 metadata，模拟次日历程出现）
+    chat.splice(chat.length - 1, 0, makeFloor([makeEntry('第4天', '上午', '地点4', '第4天发生了重要事件4。')]), { mes: '好', is_user: true });
+    await quiet(NS.SubSummary.generateMissing());
+    const covL2 = NS.SubSummary.getCoverage();
+    const l3 = covL2.days.find(d => d.dayKey === '3');
+    const l4 = covL2.days.find(d => d.dayKey === '4');
+    check('L: 新天出现后旧天转正、新天仍跳过', l3 && !!l3.text && l4 && !l4.text, covL2.days.map(d => [d.dayKey, !!d.text]));
 
     // 场景 K（断层时间线）：规划按存在天数的顺序切块，span 含数字断层；折叠跳过缺的天，跨洞父可用
     buildChatDays([1, 2, 10, 11, 12, 13], 3);

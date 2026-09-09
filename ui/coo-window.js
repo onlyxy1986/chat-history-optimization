@@ -827,7 +827,7 @@
     function renderSubSummaryTab(panel) {
         const section = createSection('fa-solid fa-compress', '分层摘要');
         section.appendChild(createSwitchRow('启用分层摘要', 'subSummaryToggle'));
-        section.appendChild(createText('div', 'coo-preview-hint', 'AI 回复生成完成后后台补齐缺失的天摘要与上层合并摘要（手动生成不受此开关限制；发送前永不等 LLM，缺失部分用原文兜底）'));
+        section.appendChild(createText('div', 'coo-preview-hint', 'AI 回复生成完成后后台补齐缺失的天摘要与上层合并摘要（手动生成不受此开关限制；当天未封天自动跳过，次日出现即转正；发送前永不等 LLM，缺失部分用原文兜底）'));
         section.appendChild(createSelectRow('连接方式', '直连走浏览器 fetch；profile 走 SillyTavern Connection Manager（API Key 由服务端解密，不经过浏览器）', 'subSummarySource', [
             { value: 'fetch', label: '直连（fetch）' },
             { value: 'profile', label: 'SillyTavern connection profile' },
