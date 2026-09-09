@@ -600,10 +600,10 @@ ${charsInfoJsonStr}
 
 **在回复最末尾必须生成当前正文的NEW_STORY_DATA信息。若本次回复没有新角色出现或角色信息无变化，可省略NEW_CHARACTER_CARD区段。**
 <NEW_STORY_DATA>
-<NEW_HISTORY> // **新HISTORY信息的模板**
+<NEW_HISTORY> // **新HISTORY信息的模板,每条消息都要输出**
 ${newHistoryTemplate}
 </NEW_HISTORY>
-${roleCardEnabled ? `<NEW_CHARACTER_CARD> // **新CHARACTER_CARD信息的模板**
+${roleCardEnabled ? `<NEW_CHARACTER_CARD> // **新CHARACTER_CARD信息的模板,仅新角色出现时输出**
 ${newCharacterCardTemplate}
 </NEW_CHARACTER_CARD>
 ` : ''}

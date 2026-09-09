@@ -465,19 +465,27 @@
         return text;
     }
 
+    // 已知角色卡全集单次获取（Engine.getKnownRoleCards 每次深拷贝全聊天并全量
+    // mergeDataInfo，直接在循环内调用即 O(楼层²)）。同步循环内 chat 不可变，
+    // 调用方只读过滤，故单次快照复用与逐次获取结果一致。
+    function getKnownCardsOnce() {
+        const EngineRef = NS.Engine;
+        if (!EngineRef || typeof EngineRef.getKnownRoleCards !== 'function') return {};
+        try {
+            return EngineRef.getKnownRoleCards() || {};
+        } catch (e) {
+            return {};
+        }
+    }
+
     // 本楼层历程中出现的角色的完整角色卡（已知全集按文本过滤，含消歧义）。
     // 返回 {角色名: 角色卡}，无匹配时返回空对象。
-    function getFloorRoleCards(journeyText) {
+    // knownCards 可选：传入时直接复用（getCoverage 批量路径），不传入时单次获取
+    // （单楼层 runOne 路径，保持向后兼容）。返回值为对全集值的引用，调用方只读勿改。
+    function getFloorRoleCards(journeyText, knownCards) {
         const EngineRef = NS.Engine;
         if (!EngineRef || typeof EngineRef.nameMatches !== 'function') return {};
-        let cards = {};
-        if (EngineRef && typeof EngineRef.getKnownRoleCards === 'function') {
-            try {
-                cards = EngineRef.getKnownRoleCards() || {};
-            } catch (e) {
-                cards = {};
-            }
-        }
+        const cards = (knownCards !== undefined) ? knownCards : getKnownCardsOnce();
         if (!isPlainObject(cards)) return {};
         const names = Object.keys(cards);
         if (names.length === 0) return {};
@@ -548,6 +556,7 @@
     function getCoverage(chatRef) {
         const chat = chatRef || getChat();
         const variableInfo = getVariableInfo();
+        const knownCards = getKnownCardsOnce();
         const floors = [];
         let tracked = 0;
         let missing = 0;
@@ -558,7 +567,7 @@
                 const entries = getFloorEntries(floor);
                 if (entries.length === 0) continue;
                 const journeyText = getFloorJourneyText(entries);
-                const roleCards = getFloorRoleCards(journeyText);
+                const roleCards = getFloorRoleCards(journeyText, knownCards);
                 const hash = variableInfo.hasVariable ? floorHash(hashOfVariableInfo(variableInfo), entries) : null;
                 const slot = readFloorSlot(floor, chat);
                 const valid = !!slot && !!hash && slot.h === hash;

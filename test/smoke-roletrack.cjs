@@ -115,6 +115,18 @@ function cardFor(name) {
     return card;
 }
 
+// 机制场景（C–K）用的显式角色卡模板，不依赖 settings 默认值：
+// 父级 <可变> 覆盖整棵 当前状态 子树（子行无标记也被覆盖），静态 角色设定 剔除。
+const TRACK_CHARACTER_PROMPT = `{
+    "{{角色名}}": {
+        "角色设定": { "角色名": "{{角色名}}" },
+        "当前状态": { // <可变>
+            "地点": "{{地点}}",
+            "穿着": "{{穿着}}"
+        }
+    }
+}`;
+
 // 三个助手楼层：楼层1/2/3（数组下标1/3/5），各一条历程，均出现爱丽丝
 function buildChat3() {
     chat.length = 0;
@@ -143,16 +155,20 @@ function sleep(ms) {
 }
 
 (async () => {
-    // 场景 A（模版解析）：默认模板含 <可变>，过滤后只剩可变子树
+    // 场景 A（模版解析）：默认模板仅 职业 为 <可变>；
+    // 父级 <可变> 覆盖整棵子树的行为用显式模板覆盖（不依赖默认值）
     NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings();
     const varInfo = NS.RoleTrack.getVariableInfo();
     check('A: 检测到可变标记', varInfo.hasVariable === true, varInfo);
-    check('A: 可变路径含当前状态', varInfo.paths.some(p => p.indexOf('当前状态') !== -1), varInfo.paths);
-    check('A: 模版保留当前状态', !!(varInfo.variableTemplate && varInfo.variableTemplate['{{角色名}}'] && varInfo.variableTemplate['{{角色名}}']['当前状态']), varInfo.variableTemplate);
-    check('A: 模版剔除角色设定', !(varInfo.variableTemplate['{{角色名}}'] && varInfo.variableTemplate['{{角色名}}']['角色设定']), varInfo.variableTemplate);
-    // 父级 <可变> 覆盖整棵子树：整段 当前状态 即使子行无标记也保留（地点/穿着都在）
-    const sub = varInfo.variableTemplate['{{角色名}}']['当前状态'];
-    check('A: 子树整体保留', !!sub['地点'] && !!sub['穿着'], sub);
+    check('A: 可变路径仅职业', varInfo.paths.length === 1 && varInfo.paths[0] === '{{角色名}}\u0000职业', varInfo.paths);
+    check('A: 模版保留职业', !!(varInfo.variableTemplate && varInfo.variableTemplate['{{角色名}}'] && varInfo.variableTemplate['{{角色名}}']['职业']), varInfo.variableTemplate);
+    check('A: 模版剔除不可变字段', !(varInfo.variableTemplate['{{角色名}}'] && (varInfo.variableTemplate['{{角色名}}']['年龄'] || varInfo.variableTemplate['{{角色名}}']['身体特征'])), varInfo.variableTemplate);
+    NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings({ characterPrompt: TRACK_CHARACTER_PROMPT });
+    const varInfoSub = NS.RoleTrack.getVariableInfo();
+    check('A: 父级标记覆盖子树', varInfoSub.hasVariable === true, varInfoSub.paths);
+    const sub = varInfoSub.variableTemplate && varInfoSub.variableTemplate['{{角色名}}'] && varInfoSub.variableTemplate['{{角色名}}']['当前状态'];
+    check('A: 子树整体保留', !!(sub && sub['地点'] && sub['穿着']), sub);
+    check('A: 子树外静态字段剔除', !(varInfoSub.variableTemplate['{{角色名}}'] && varInfoSub.variableTemplate['{{角色名}}']['角色设定']), varInfoSub.variableTemplate);
 
     // 场景 B（无标记模板）：去掉 <可变> 后 hasVariable 为 false
     NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings({
@@ -162,7 +178,7 @@ function sleep(ms) {
     check('B: 无标记时 hasVariable=false', varInfoB.hasVariable === false, varInfoB);
 
     // 场景 C（逐楼层追踪 + extra 存储）
-    NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings();
+    NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings({ characterPrompt: TRACK_CHARACTER_PROMPT });
     buildChat3();
     fetchCallCount = 0;
     const resC = await quiet(NS.RoleTrack.generateMissing());
@@ -188,6 +204,7 @@ function sleep(ms) {
 
     // 场景 F（applyToCharacterData：追踪赢 + 不复活淘汰角色 + 跳过未知键）
     // 手工给楼层 5 的 states 注入终值与幻觉键
+    NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings({ characterPrompt: TRACK_CHARACTER_PROMPT });
     chat[5].extra['chat-optimization-v2-roletrack'].states = { '爱丽丝': { '当前状态': { '地点': '终点', '幻觉属性': 'xxx' } } };
     const cardF = { '爱丽丝': { '角色设定': { '角色名': '爱丽丝' }, '当前状态': { '地点': '旧', '穿着': '常服' } }, '鲍勃': { '角色设定': { '角色名': '鲍勃' } } };
     NS.RoleTrack.applyToCharacterData(cardF, chat);
@@ -203,7 +220,7 @@ function sleep(ms) {
 
     // 场景 G（无角色楼层记空对象，不调 LLM）
     buildChat3();
-    NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings();
+    NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings({ characterPrompt: TRACK_CHARACTER_PROMPT });
     chat.push(makeFloor([journeyEntry('第2天', '中午', '荒野', '一阵风', '吹过荒野。')], null));
     chat.push({ mes: '继续', is_user: true });
     fetchCallCount = 0;
@@ -223,7 +240,7 @@ function sleep(ms) {
     // 场景 I（自动触发：新助手回复到达后后台追踪）
     buildChat3();
     NS.RoleTrack.eraseAll();
-    NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings();
+    NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings({ characterPrompt: TRACK_CHARACTER_PROMPT });
     fetchCallCount = 0;
     // 模拟 3 条助手回复逐条到达
     fireEvent('message_received', 1);
@@ -241,6 +258,7 @@ function sleep(ms) {
 
     // 场景 J（擦除）
     buildChat3();
+    NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings({ characterPrompt: TRACK_CHARACTER_PROMPT });
     await quiet(NS.RoleTrack.generateMissing());
     const erased = NS.RoleTrack.eraseAll();
     check('J: 擦除 3 个楼层', erased === 3, erased);
@@ -248,7 +266,7 @@ function sleep(ms) {
 
     // 场景 K（端到端：拦截器装配的角色卡含顺序合并后的最终状态）
     buildChat3();
-    NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings({ tokenLimit: 1000000 });
+    NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings({ tokenLimit: 1000000, characterPrompt: TRACK_CHARACTER_PROMPT });
     await quiet(NS.RoleTrack.generateMissing());
     const statsK = await quiet(globalThis.replaceChatHistoryWithDetailsV2(chat, 4096, null, 0));
     const lastMsg = NS.Engine.getStats().lastMessage;
