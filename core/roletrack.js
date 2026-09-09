@@ -16,7 +16,7 @@
 //   不阻塞发送；编辑/swipe 导致的过期由手动补齐覆盖。
 // 存储：各楼层 extra[EXTRA_KEY] = {v: 2, h, states, t}，states 为输出对象，
 //   h 为（可变模版+本楼层 L0）哈希；楼层重写/模板变更即标脏，只重追该楼层。
-// 合并：Engine.buildPromptData 在角色卡淘汰/蒸馏后调 applyToCharacterData，
+// 合并：Engine.buildPromptData 在角色卡淘汰后调 applyToCharacterData，
 //   按楼层顺序把各楼层 states 对象合并为最终可变状态并覆盖（追踪赢；淘汰掉的
 //   角色不复活；未知键按模板校验跳过）。
 // 连接：独立于分层摘要的配置（roleTrackSource/Profile/BaseUrl/ApiKey/
@@ -404,8 +404,31 @@
         return { hasVariable: true, paths: [...variablePaths], template, variableTemplate, variableTemplateText };
     }
 
+    // 可变模板解析缓存：UI 快照（getCoverage）高频调用，模板文本不变时
+    // 直接复用上次结果，避免每次重复 parseTemplate + 行级扫描。
+    // 生成路径（runOne/collectMissingFloors）仍按需实时解析，不走缓存，
+    // 语义不变。缓存对象只读，调用方需 clone 后再对外返回。
+    let cachedVarRaw = null;
+    let cachedVarInfo = null;
+
+    function getVariableInfoCached() {
+        let rawText = '';
+        try {
+            const raw = Settings.get('characterPrompt');
+            rawText = typeof raw === 'string' ? raw : '';
+        } catch (e) {
+            rawText = '';
+        }
+        if (cachedVarInfo && cachedVarRaw === rawText) return cachedVarInfo;
+        const info = getVariableInfo();
+        cachedVarRaw = rawText;
+        cachedVarInfo = info;
+        return info;
+    }
+
     // ------------------------------------------------------------------
-    // 楼层 L0 读取与角色列表
+    // 楼层 L0 读取与角色列表（注意：UI 快照 getCoverage 不走角色匹配，
+    // 只读 extra + hash；角色匹配仅生成路径 runOne 按需调用）
     // ------------------------------------------------------------------
 
     function getChat() {
@@ -550,13 +573,16 @@
     }
 
     // ------------------------------------------------------------------
-    // 只读快照：各楼层追踪覆盖（UI 与合并共用，不触发 LLM）
+    // 只读快照：各楼层追踪覆盖（UI 与合并共用，不触发 LLM）。
+    // 轻量口径：只读 extra + hash（可变模板缓存 + 楼层故事块缓存），
+    // 不做全聊天深拷贝、不做角色名匹配。roles 直接取已存 states 的键
+    // （缺失/无效楼层为空数组，不再预览“待追踪谁”）；生成路径 runOne
+    // 仍按需调 getFloorRoleCards 计算出场角色，不受影响。
     // ------------------------------------------------------------------
 
     function getCoverage(chatRef) {
         const chat = chatRef || getChat();
-        const variableInfo = getVariableInfo();
-        const knownCards = getKnownCardsOnce();
+        const variableInfo = getVariableInfoCached();
         const floors = [];
         let tracked = 0;
         let missing = 0;
@@ -566,18 +592,17 @@
                 if (!isAssistantItem(item)) continue;
                 const entries = getFloorEntries(floor);
                 if (entries.length === 0) continue;
-                const journeyText = getFloorJourneyText(entries);
-                const roleCards = getFloorRoleCards(journeyText, knownCards);
                 const hash = variableInfo.hasVariable ? floorHash(hashOfVariableInfo(variableInfo), entries) : null;
                 const slot = readFloorSlot(floor, chat);
                 const valid = !!slot && !!hash && slot.h === hash;
                 if (valid) tracked++;
                 else missing++;
+                const states = slot ? clone(slotStates(slot)) : null;
                 floors.push({
                     floor,
                     count: entries.length,
-                    roles: Object.keys(roleCards),
-                    states: slot ? clone(slotStates(slot)) : null,
+                    roles: (valid && states) ? Object.keys(states) : [],
+                    states,
                     valid,
                     t: (slot && typeof slot.t === 'number') ? slot.t : 0,
                 });
@@ -1175,7 +1200,7 @@
         return acc;
     }
 
-    // Engine.buildPromptData 在淘汰/蒸馏后调用：追踪赢，但不复活已淘汰角色。
+    // Engine.buildPromptData 在淘汰后调用：追踪赢，但不复活已淘汰角色。
     function applyToCharacterData(characterData, chatRef) {
         if (!characterData || typeof characterData !== 'object' || Array.isArray(characterData)) return characterData;
         let states = null;

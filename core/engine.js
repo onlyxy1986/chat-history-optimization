@@ -646,9 +646,9 @@ ${newCharacterCardTemplate}
     }
 
     /**
-     * 角色卡淘汰与蒸馏：槽位上限 Constants.ROLE_CARD_MAX_SLOTS
+     * 角色卡淘汰：槽位上限 Constants.ROLE_CARD_MAX_SLOTS
      * 当前 prompt 提到的角色得分 Constants.ROLE_CARD_MENTION_SCORE（保证保留）；其余按最后出现索引计分
-     * 超过 Constants.ROLE_CARD_STALE_DISTANCE 条消息未活跃（且非当前提问提及）的角色只保留核心设定
+     * 超过 Constants.ROLE_CARD_STALE_DISTANCE 条消息未活跃（且非当前提问提及）的角色直接丢弃
      * @param {object} characterData - 角色卡映射 { 角色名: {...} }
      * @param {object[]} chat - 原始聊天记录
      * @returns {object} 精简后的角色卡映射
@@ -693,17 +693,14 @@ ${newCharacterCardTemplate}
             const roleName = item.name;
             const originalData = characterData[roleName];
 
-            // 4. 特征蒸馏：如果角色虽然保留在槽位内，但距离上次活跃已超过
+            // 4. 久未活跃丢弃：距离上次活跃已超过
             // ROLE_CARD_STALE_DISTANCE 条消息（且非当前提问提及）
-            // 则只保留核心设定，剔除角色状态（穿戴、物品、技能等动态高消耗字段）
+            // 则直接丢弃，不保留空壳（旧版曾只保留核心设定，易产生模板已删除字段的空对象）。
             const distance = chat.length - 1 - item.score;
             if (item.score < Constants.ROLE_CARD_MENTION_SCORE && distance > Constants.ROLE_CARD_STALE_DISTANCE) {
-                newRoleCards[roleName] = {
-                    "角色设定": originalData.角色设定 || {}
-                };
-            } else {
-                newRoleCards[roleName] = originalData;
+                continue;
             }
+            newRoleCards[roleName] = originalData;
         }
 
         // 5. 替换为精简后的角色集合（物理删除不在槽位内的角色）

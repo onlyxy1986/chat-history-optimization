@@ -12,7 +12,7 @@
 
 1. **结构化剧情协议**：要求 AI 每次回复末尾输出 `<NEW_STORY_DATA>` 块（含 `NEW_HISTORY` 故事历程 JSON、可选 `NEW_CHARACTER_CARD` 角色卡 JSON）。插件把全部楼层的这些块解析、合并、去重，形成全局「故事历程」数组和「角色卡」映射。
 2. **分层注入**：把最终 prompt 装配为三层——`RAG 远端召回段 + 中段历程窗口 + 正文 verbatim 尾部`，在 `tokenLimit` 预算内最大化保留上下文；超预算时用检索从远期条目中挑回相关条目。
-3. **角色卡管理**：槽位上限淘汰 + 蒸馏（久未出场角色只保留核心设定），阈值见 `core/constant.js`；v2.23.0 起叠加角色状态追踪的顺序合并（追踪赢）。
+3. **角色卡管理**：槽位上限淘汰 + 久未活跃丢弃（超 `ROLE_CARD_STALE_DISTANCE` 条消息未出场且非当前提问提及的角色直接丢弃，不保留空壳），阈值见 `core/constant.js`；v2.23.0 起叠加角色状态追踪的顺序合并（追踪赢）。
 4. **分层摘要（v2.21.0 起，替代逐条目二级摘要 + 混合召回）**：L0 历程条目 → L1 天摘要（一 key 一条）→ L(k≥2) 连续 `hierFanin` 个同层节点合并，纯文本摘要持久化在 `chat_metadata`，父节点以子文本哈希校验。超预算时从最旧侧折叠（高层永远在远端），token 够用时零压缩；发送前永不等 LLM，缺失部分用原文兜底。
 5. **角色状态追踪（v2.23.0 起）**：角色卡模板中属性行 `//` 注释含 `<可变>` 标签的属性按同样树形组成可变状态模版；每次助手回复后以后台对本楼层 L0（该回复的 NEW_HISTORY 条目）调一次独立 LLM 连接，输入为可变状态模版 + 本楼层 L0 + 本楼层出现角色的完整角色卡（`{角色名: 角色卡}`），输出为一个 JSON 对象（以可变状态模版为树形参考，键为有状态变化的角色名），存该楼层 `extra`，装配角色卡时按楼层顺序合并为最终可变状态。
 
@@ -196,12 +196,12 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
 2. **mergeDataInfo**：遍历楼层 1..n 的 assistant 消息，提取每层 `NEW_HISTORY`/`NEW_CHARACTER_CARD`，用 `deepMerge` 累积成全局 `historyData`（含 `故事历程` 数组）与 `characterData`（角色名→角色卡）。同时：
    - 每层写入 `item.messageCount = historyObj.故事历程.length`（该层贡献的历程条数，供正文覆盖计算）；
     - 任何一层缺块/解析失败 → `failedFloors.push(j)`，并记录 `failedDetails` 原因（见 §4.2）。
-3. **processCharacterData 角色卡淘汰与蒸馏**：
+3. **processCharacterData 角色卡淘汰**：
    - `MAX_SLOTS = 10`。
    - 打分：最新用户消息（`chat[chat.length-1].mes`）中 `nameMatches` 命中 → `Constants.ROLE_CARD_MENTION_SCORE`（必保）；否则取**最后一次出现**的消息下标作为分数；都没出现 → `-1`。
        - `nameMatches`：角色名按 `()`/`（）`/`·`/`.` 拆出所有别名 term（`getNameSearchTerms`），任一 term 命中即可；**消歧义**：若 term 是另一个更长角色名的子串（「沈梦」⊂「沈梦瑶」），逐次出现检查是否被长名「吞掉」，至少一次独立出现才算命中。
    - 按分数降序取前 10，其余物理删除。
-   - **蒸馏**：分数 < `ROLE_CARD_MENTION_SCORE` 且距最后出现 > `ROLE_CARD_STALE_DISTANCE`（30）条消息的角色，只保留 `{角色设定}`（丢弃穿戴/物品/技能等动态字段）。
+    - **久未活跃丢弃**：分数 < `ROLE_CARD_MENTION_SCORE` 且距最后出现 > `ROLE_CARD_STALE_DISTANCE`（100）条消息的角色直接丢弃（不保留蒸馏空壳，避免模板已删除字段的空对象污染 prompt）。
 4. **正文尾部（verbatim）**：
    - `assistantIdxArr` = 所有非用户消息下标；取倒数第 `keepCount` 条 assistant 起，到末尾，过滤出非用户消息的 `mes` 拼接为 `tailText`。
    - `tailCovered` = 这些 assistant 消息 `messageCount` 之和（正文已原文覆盖的历程条数）。
@@ -305,9 +305,14 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
 
 ### 9.4 顺序合并（计算角色卡时）
 
-- `Engine.buildPromptData` 在 `processCharacterData` 淘汰/蒸馏**之后**调 `NS.RoleTrack.applyToCharacterData(characterData, chatCopy)`（`NS` 调用时查找，未加载跳过）。
+- `Engine.buildPromptData` 在 `processCharacterData` 淘汰**之后**调 `NS.RoleTrack.applyToCharacterData(characterData, chatCopy)`（`NS` 调用时查找，未加载跳过）。
 - `getMergedStates` 按楼层从旧到新遍历各楼层 `states` 对象：同一角色的后楼层覆盖前楼层（对象递归合并，其余含数组整体覆盖——状态快照语义）；未知键按当前角色卡模板校验跳过并 warn（防 LLM 幻觉污染）。
-- 合并只作用于传入 `characterData` 中已存在的角色：被槽位淘汰的角色不复活；蒸馏掉的可变字段会被追踪状态重新补回（追踪赢，token 代价见 §13）。
+- 合并只作用于传入 `characterData` 中已存在的角色：被淘汰/丢弃的角色不复活（追踪赢，但不复活）。
+
+### 9.5 UI 快照轻量口径
+
+- `getCoverage()` 只读 extra + hash：可变模板走 `getVariableInfoCached()`（`characterPrompt` 文本不变直接复用，不重复 `parseTemplate` + 行级扫描）；每楼层只做 `getFloorEntries`（`Engine.getFloorStoryBlock` 缓存命中）+ `floorHash` + `readFloorSlot` 对比。不做全聊天深拷贝（`getKnownRoleCards`）、不拼 `journeyText`、不做 `nameMatches` 角色匹配。
+- `floors[].roles` 取已存 `states` 的键（缺失/无效楼层为空数组，不再预览“待追踪谁”）；生成路径 `runOne` 仍按需调 `getFloorRoleCards` 计算出场角色，语义不变。
 
 
 
@@ -370,7 +375,7 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
 - **模板**：historyPrompt / characterPrompt textarea + JSON 有效性徽章 + 重置按钮（回 `Settings.defaultSettings`）。
 - **角色查看**：角色下拉（活跃角色标 `<活跃角色>`）+ `buildRoleTree` 递归树渲染。
 - **故事历程**：楼层范围查询（起始/结束，空=全部）；上层合并卡片（Lx · 起止天 + 摘要正文）置顶；按天分组卡片：天标签 + 条目数 + 层级徽章（原文/天摘要/Lx合并/已丢弃，来自 `stats.hier`）+ 天摘要块（有效→正文 +「重新生成」；无效→「生成摘要」按钮）+ 天内条目（楼层 + 时间段|地点 + 历程正文）；被上层合并吞掉的天不单独展示；「补齐缺失摘要」按钮后台补齐。
-- **角色状态**：结构同分层摘要 tab（开关、独立连接配置、profile 下拉、三占位符模板 textarea + 有效性徽章、状态行 ×2、补齐缺失 / 强制重建全部 / 擦除全部口令确认）；另有可变状态模版预览行（可变属性数 + JSON）与逐楼层卡片列表（楼层号 + 历程条数 + 已追踪/缺失徽章 + 涉及角色 + 各角色状态树 + 单楼层生成/重新生成按钮）。`CONNECTION_PROFILE_*` 事件同时刷新两套 profile 下拉。
+- **角色状态**：结构同分层摘要 tab（开关、独立连接配置、profile 下拉、三占位符模板 textarea + 有效性徽章、状态行 ×2、补齐缺失 / 强制重建全部 / 擦除全部口令确认）；另有可变状态模版预览行（可变属性数 + JSON）与逐楼层卡片列表（楼层号 + 历程条数 + 已追踪/缺失徽章 + 各角色状态树 + 单楼层生成/重新生成按钮；已追踪楼层的角色名由状态树标题给出，不再单独显示按历程匹配的“涉及角色”行）。`CONNECTION_PROFILE_*` 事件同时刷新两套 profile 下拉。
 ### 11.2.1 解析失败气泡（v2.10.2，v2.11.1 检查时机改为消息事件驱动）
 
 - 检查时机：`engine.js` 订阅 ST 消息事件——`MESSAGE_RECEIVED`（回复到达）/`MESSAGE_EDITED`/`MESSAGE_UPDATED`（消息修改）/`MESSAGE_SWIPED`（切 swipe）触发 `checkParseFailures()`；`MESSAGE_DELETED`/`CHAT_CHANGED`/`CHAT_LOADED` 触发**静默重建基线**（`silent` 模式：只更新 `lastStats.failedFloors` 不广播、不通知 UI，避免楼层下标错位导致误报/漏报）。不在生成拦截器（发送时）检查——发送时最新回复尚未到达，检查必然滞后一轮。
@@ -379,8 +384,9 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
 
 ### 11.3 刷新链路
 
-- 打开/切换窗口 → `Engine.refreshStats()`（只读深拷贝 + 完整装配，**不改 ST chat**）→ `notifyStats` → `onStatsChanged` → `refreshActiveTabData`（stats 值、折叠信息行、层级统计、预览文本、故事天分组列表重绘）。
+- 打开/切换窗口 → `Engine.refreshStats()`（只读深拷贝 + 完整装配，**不改 ST chat**）→ `notifyStats` → `onStatsChanged` → `refreshActiveTabData`（只刷轻量行：stats 值、折叠信息行、层级统计、预览文本、故事天分组列表、分层摘要/角色状态的状态行文本；不再触发角色状态覆盖扫描）。
 - `SubSummary.onStatus` → 刷新状态行 + 层级统计；批次结束或单天完成（`lastDone` 非空）时重绘故事天分组列表（天数少，重绘成本低）。
+- `RoleTrack.onStatus` → 中间进度 tick 只原地更新状态行文本（零扫描）；批次结束或单楼层完成（`running==false || lastDone`）且当前为角色状态 tab 时，才做一次 `getCoverage` 快照刷统计行 + 楼层卡片列表（`refreshRoleTrackPanel` 内统计行与列表共用同一快照）。tab 打开时同样单次快照（`renderRoleTrackTab` → `refreshRoleTrackPanel`）。
 - 侧边栏状态（失败楼层/tokenCount）随 `updateStatsValues` 更新；「将发送词元数」行显示为 `当前 / tokenLimit`，超限时标红（`coo-stat-bad`）。
 
 ---
@@ -443,7 +449,7 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
 | 追踪存楼层 extra 而非 chat_metadata | 追踪是单楼层 L0 的派生物，随楼层走；删楼层即删其追踪，楼层重写只脏本楼层 |
 | 追踪用独立 LLM 连接 | 与分层摘要的成本/模型解耦：追踪输出 JSON 对模型指令遵循要求更高，允许配不同模型与参数 |
 | 本次历程 = 本楼层 L0 而非全量 | 增量语义：每楼层只判断本回复带来的状态变化，全局最终状态由顺序合并得出 |
-| 合并在淘汰/蒸馏之后、追踪赢 | 追踪是最新事实源；代价是久未出场角色的蒸馏节 token 效果被部分抵消（状态补回），角色多且上下文紧时可关追踪或调小可变分区 |
+| 合并在淘汰之后、追踪赢 | 追踪是最新事实源；角色多且上下文紧时可关追踪或调小可变分区 |
 | 合并未知键跳过、不复活淘汰角色 | LLM 幻觉键不污染角色卡；淘汰语义（槽位上限）不受追踪影响 |
 | 摘要长度只由模板措辞控制 | 代码不改写不截断摘要文本，只做整节点取舍；长度要求写进模板 |
 | 发送前永不等 LLM | 缺失摘要的天保持原文兜底；超时/失败不阻塞发送，后台补齐下次生效 |

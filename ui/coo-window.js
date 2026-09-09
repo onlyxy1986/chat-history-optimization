@@ -952,14 +952,15 @@
         });
     }
 
-    function updateRoleTrackInfo(scope) {
+    // 角色状态统计行 + 可变模板预览共用一次 getCoverage 快照（调用方可传入已算好的 cov，避免一次刷新扫三遍）。
+    function updateRoleTrackInfo(scope, covOpt) {
+        const cov = covOpt || ((NS.RoleTrack && typeof NS.RoleTrack.getCoverage === 'function') ? NS.RoleTrack.getCoverage() : null);
         scope.querySelectorAll('[data-coo-field="roleTrackInfo"]').forEach((el) => {
-            if (!NS.RoleTrack || typeof NS.RoleTrack.getCoverage !== 'function') {
+            if (!cov) {
                 el.textContent = '追踪：模块未加载';
                 el.className = 'coo-subsummary-status';
                 return;
             }
-            const cov = NS.RoleTrack.getCoverage();
             if (!cov.hasVariable) {
                 el.textContent = '追踪：角色卡模板中未检测到 <可变> 标记（请在模板 tab 的属性行 // 注释中标记）';
                 el.className = 'coo-subsummary-status coo-subsummary-status-error';
@@ -969,11 +970,10 @@
             el.className = 'coo-subsummary-status';
         });
         scope.querySelectorAll('[data-coo-field="roleTrackVarInfo"]').forEach((el) => {
-            if (!NS.RoleTrack || typeof NS.RoleTrack.getCoverage !== 'function') {
+            if (!cov) {
                 el.textContent = '可变状态模版：模块未加载';
                 return;
             }
-            const cov = NS.RoleTrack.getCoverage();
             if (!cov.hasVariable) {
                 el.textContent = '可变状态模版：未检测到 <可变> 标记';
                 return;
@@ -1013,9 +1013,8 @@
         }
         head.appendChild(button);
         card.appendChild(head);
-        if (floorInfo.roles && floorInfo.roles.length > 0) {
-            card.appendChild(createText('div', 'coo-story-item-meta', `涉及角色：${floorInfo.roles.join('、')}`));
-        }
+        // 轻量口径：不再显示按历程文本匹配的“涉及角色”预览行。
+        // 已追踪楼层的角色名直接由下方 states 树标题给出；缺失楼层只显示“尚未追踪”。
         const states = floorInfo.states;
         if (!floorInfo.valid || !states) {
             card.appendChild(createText('div', 'coo-role-empty coo-story-summary-empty', '尚未追踪'));
@@ -1033,7 +1032,7 @@
         return card;
     }
 
-    function renderRoleTrackList(scope) {
+    function renderRoleTrackList(scope, covOpt) {
         const list = scope.querySelector('[data-coo-field="roleTrackList"]');
         if (!list) return;
         list.textContent = '';
@@ -1041,7 +1040,7 @@
             list.appendChild(createText('span', 'coo-role-empty', '模块未加载'));
             return;
         }
-        const cov = NS.RoleTrack.getCoverage();
+        const cov = covOpt || NS.RoleTrack.getCoverage();
         if (cov.floors.length === 0) {
             list.appendChild(createText('span', 'coo-role-empty',
                 cov.hasVariable ? '暂无有历程的助手楼层' : '未检测到 <可变> 标记，无法追踪'));
@@ -1118,12 +1117,23 @@
         updateRoleTrackStatus(scope);
     }
 
+    // 角色状态面板一次快照刷完统计行 + 楼层卡片（打开/批次结束/擦除时调用；中间进度 tick 只刷状态行，不调此函数）。
+    function refreshRoleTrackPanel(scope) {
+        if (!NS.RoleTrack || typeof NS.RoleTrack.getCoverage !== 'function') {
+            updateRoleTrackInfo(scope, null);
+            renderRoleTrackList(scope, null);
+            return;
+        }
+        const cov = NS.RoleTrack.getCoverage();
+        updateRoleTrackInfo(scope, cov);
+        renderRoleTrackList(scope, cov);
+    }
+
     function handleRoleTrackEraseAll(scope) {
         showEraseAllConfirm('擦除全部角色状态追踪', '将清空全部楼层 extra 中的状态追踪，不影响故事历程原文与角色卡。此操作不可撤销。', '输入「确认全部擦除」以确认', () => {
             NS.RoleTrack.eraseAll();
             updateRoleTrackStatus(scope);
-            updateRoleTrackInfo(scope);
-            renderRoleTrackList(scope);
+            refreshRoleTrackPanel(scope);
         });
     }
 
@@ -1196,8 +1206,7 @@
         applyRoleTrackSourceState(section);
         updateRoleTrackBadge(section);
         updateRoleTrackStatus(section);
-        updateRoleTrackInfo(section);
-        renderRoleTrackList(section);
+        refreshRoleTrackPanel(section);
 
         panel.appendChild(section);
     }
@@ -1368,22 +1377,18 @@
         buildRoleTree(info, role);
     }
 
-    // 故事历程 tab 的列表重绘统一由 updateStatsValues → updateRagDisplay → renderStoryList
-    // 承担（此处不再二次 queryStoryRange，避免同一次刷新重绘两遍）；
-    // 楼层范围输入框只在点击「查看/全部楼层」时（queryStoryRange）生效。
+    // Engine stats 只刷轻量行（状态文本/预览/故事列表）；角色状态的覆盖扫描
+    // 只由角色状态自身的完成事件（onRoleTrackStatusChanged）与 tab 打开驱动，
+    // 避免每次生成统计都全量扫一遍 extra + hash。
     function refreshActiveTabData(shell) {
         const workspace = shell.querySelector('.coo-workspace');
         if (!workspace) return;
         updateStatsValues(shell);
         updateSubSummaryStatus(shell);
         updateRoleTrackStatus(shell);
-        updateRoleTrackInfo(shell);
         if (activeTabId === 'roles') {
             renderRoleSelect(workspace);
             renderRoleInfo(workspace);
-        }
-        if (activeTabId === 'roletrack') {
-            renderRoleTrackList(workspace);
         }
     }
 
@@ -1664,20 +1669,19 @@
         }
     }
 
-    // 角色状态追踪状态变化：状态行与统计行始终原地更新；角色状态 tab 下，
-    // 批次结束或单楼层完成时重绘楼层卡片列表。
+    // 角色状态追踪状态变化：中间进度 tick 只原地更新状态行文本（零扫描）；
+    // 批次结束或单楼层完成时才做一次快照刷统计行 + 楼层卡片列表。
     function onRoleTrackStatusChanged(snapshot) {
         const root = document.getElementById(ROOT_ID);
         const shell = root ? root.querySelector('.coo-shell') : null;
         if (!shell || shell.hidden) return;
         updateRoleTrackStatus(shell);
-        updateRoleTrackInfo(shell);
+        const finished = (snapshot && snapshot.running === false) || (snapshot && snapshot.lastDone);
+        if (!finished) return;
         if (activeTabId !== 'roletrack') return;
         const workspace = shell.querySelector('.coo-workspace');
         if (!workspace) return;
-        if ((snapshot && snapshot.running === false) || (snapshot && snapshot.lastDone)) {
-            renderRoleTrackList(workspace);
-        }
+        refreshRoleTrackPanel(workspace);
     }
 
     // ------------------------------------------------------------------
