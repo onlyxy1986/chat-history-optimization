@@ -966,7 +966,9 @@
                 el.className = 'coo-subsummary-status coo-subsummary-status-error';
                 return;
             }
-            el.textContent = `追踪：已追踪 ${cov.tracked} / 共 ${cov.floors.length} 个有历程楼层（缺失 ${cov.missing}），可变属性 ${cov.variableCount} 个`;
+            const stale = (typeof cov.stale === 'number') ? cov.stale : 0;
+            const untracked = (typeof cov.untracked === 'number') ? cov.untracked : Math.max(0, cov.missing - stale);
+            el.textContent = `追踪：已追踪 ${cov.tracked} / 共 ${cov.floors.length} 个有历程楼层（过期 ${stale}，从未追踪 ${untracked}），可变属性 ${cov.variableCount} 个`;
             el.className = 'coo-subsummary-status';
         });
         scope.querySelectorAll('[data-coo-field="roleTrackVarInfo"]').forEach((el) => {
@@ -985,14 +987,23 @@
         });
     }
 
+    function describeRoleTrackDirtyReason(floorInfo) {
+        if (floorInfo.dirtyReason === 'template') return '可变模板已变更';
+        if (floorInfo.dirtyReason === 'story') return '本楼层历程已变更';
+        return '模板或历程已变更';
+    }
+
     function buildRoleTrackFloorCard(floorInfo) {
         const card = document.createElement('div');
         card.className = 'coo-story-item';
         const head = document.createElement('div');
         head.className = 'coo-story-item-head';
         head.appendChild(createText('span', 'coo-story-floor', `楼层${floorInfo.floor}（${floorInfo.count} 条历程）`));
+        const isStale = Boolean(!floorInfo.valid && (floorInfo.stale || (floorInfo.hasSlot && floorInfo.states)));
         if (floorInfo.valid) {
             head.appendChild(createText('span', 'coo-rag-hit-score', '已追踪'));
+        } else if (isStale) {
+            head.appendChild(createText('span', 'coo-rag-miss-score', '已过期'));
         } else {
             head.appendChild(createText('span', 'coo-rag-miss-score', '缺失'));
         }
@@ -1000,7 +1011,7 @@
         button.type = 'button';
         button.className = 'coo-button coo-button-ghost coo-button-sm';
         button.dataset.cooFloor = String(floorInfo.floor);
-        if (floorInfo.valid) {
+        if (floorInfo.valid || isStale) {
             button.dataset.cooAction = 'roleTrackFloorRegenerate';
             button.appendChild(createIcon('fa-solid fa-rotate'));
             button.appendChild(createText('span', 'coo-button-label', '重新生成'));
@@ -1014,13 +1025,24 @@
         head.appendChild(button);
         card.appendChild(head);
         // 轻量口径：不再显示按历程文本匹配的“涉及角色”预览行。
-        // 已追踪楼层的角色名直接由下方 states 树标题给出；缺失楼层只显示“尚未追踪”。
+        // 已追踪楼层的角色名直接由下方 states 树标题给出；从未追踪的楼层只显示“尚未追踪”。
+        // 已过期的楼层保留存档展示（存档仍参与最终合并），并提示过期原因，避免
+        // “页面全缺失但合并仍生效”的困惑。
         const states = floorInfo.states;
-        if (!floorInfo.valid || !states) {
+        if (!floorInfo.valid && !isStale) {
             card.appendChild(createText('div', 'coo-role-empty coo-story-summary-empty', '尚未追踪'));
+        } else if (!states) {
+            card.appendChild(createText('div', 'coo-role-empty coo-story-summary-empty', isStale ? '存档读取失败，建议重新生成' : '尚未追踪'));
         } else if (Object.keys(states).length === 0) {
-            card.appendChild(createText('div', 'coo-role-empty coo-story-summary-empty', '本楼层无角色状态变化'));
+            if (isStale) {
+                card.appendChild(createText('div', 'coo-subsummary-status', `${describeRoleTrackDirtyReason(floorInfo)}，存档为“本楼层无变化”（仍参与合并），可重新生成确认`));
+            } else {
+                card.appendChild(createText('div', 'coo-role-empty coo-story-summary-empty', '本楼层无角色状态变化'));
+            }
         } else {
+            if (isStale) {
+                card.appendChild(createText('div', 'coo-subsummary-status', `${describeRoleTrackDirtyReason(floorInfo)}，以下为过期存档（仍参与最终合并），建议重新生成`));
+            }
             for (const roleName of Object.keys(states)) {
                 card.appendChild(createText('div', 'coo-story-item-meta', roleName));
                 const tree = document.createElement('div');

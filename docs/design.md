@@ -157,13 +157,15 @@ chat_metadata["chat-optimization-v2-hier"] = {
 chat[floor].extra["chat-optimization-v2-roletrack"] = {
     v: 2,
     h: "<可变模版 + 本楼层 L0 条目 JSON 串哈希>",
+    th: "<可变模版单项哈希（v2.23.4 起写入，用于过期原因诊断）>",
+    eh: "<本楼层 L0 单项哈希（v2.23.4 起写入，用于过期原因诊断）>",
     states: { "<实际角色名>": { /* 以可变状态模版为树形参考的可变子树 */ } },
     t: <ms>
 }
 ```
 
 - 逐楼层存 `extra`（随聊天文件持久化，经 `saveChatDebounced` 落盘），不是 `chat_metadata`：追踪是单楼层 L0 的派生物，随楼层走。
-- `h` 覆盖可变模版文本（含保留注释，已删 `<可变>`）与本楼层 L0：楼层重写/编辑消息/切换 swipe/模板变更（含注释变更）即标脏，只重追该楼层，其余楼层保留。
+- `h` 覆盖可变模版文本（含保留注释，已删 `<可变>`）与本楼层 L0：楼层重写/编辑消息/切换 swipe/模板变更（含注释变更）即标脏（stale），只重追该楼层，其余楼层保留。stale 存档仍参与最终合并（显式擦除前不丢数据），UI 以“已过期”展示存档与原因（`th` 不匹配=可变模板已变更，`eh` 不匹配=本楼层历程已变更，旧存档无 `th/eh` 时记 unknown），而非“尚未追踪”。
 - `states` 为空对象表示"本楼层无角色状态变化"（有效结果，避免重复消耗 LLM）；无历程的楼层不建槽位。
 - 输出截断：单楼层最多 `ROLETRACK_TRACKS_MAX_PER_FLOOR`（默认 10）个角色，超长按返回顺序保留前 N 项。
 
@@ -306,13 +308,14 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
 ### 9.4 顺序合并（计算角色卡时）
 
 - `Engine.buildPromptData` 在 `processCharacterData` 淘汰**之后**调 `NS.RoleTrack.applyToCharacterData(characterData, chatCopy)`（`NS` 调用时查找，未加载跳过）。
-- `getMergedStates` 按楼层从旧到新遍历各楼层 `states` 对象：同一角色的后楼层覆盖前楼层（对象递归合并，其余含数组整体覆盖——状态快照语义）；未知键按当前角色卡模板校验跳过并 warn（防 LLM 幻觉污染）。
+- `getMergedStates` 按楼层从旧到新遍历各楼层 `states` 对象：同一角色的后楼层覆盖前楼层（对象递归合并，其余含数组整体覆盖——状态快照语义）；未知键按当前角色卡模板校验跳过并 warn（防 LLM 幻觉污染）。有意合并全部存档（含哈希过期的 stale）：过期是“需要重追”的提示信号，不是“已丢弃”，丢弃只由 `eraseAll`/`forceRebuild` 显式执行。
 - 合并只作用于传入 `characterData` 中已存在的角色：被淘汰/丢弃的角色不复活（追踪赢，但不复活）。
 
 ### 9.5 UI 快照轻量口径
 
 - `getCoverage()` 只读 extra + hash：可变模板走 `getVariableInfoCached()`（`characterPrompt` 文本不变直接复用，不重复 `parseTemplate` + 行级扫描）；每楼层只做 `getFloorEntries`（`Engine.getFloorStoryBlock` 缓存命中）+ `floorHash` + `readFloorSlot` 对比。不做全聊天深拷贝（`getKnownRoleCards`）、不拼 `journeyText`、不做 `nameMatches` 角色匹配。
-- `floors[].roles` 取已存 `states` 的键（缺失/无效楼层为空数组，不再预览“待追踪谁”）；生成路径 `runOne` 仍按需调 `getFloorRoleCards` 计算出场角色，语义不变。
+- 状态三分：`valid`=已追踪有效；`stale`=有存档但哈希过期（`hasSlot && !valid`，附 `dirtyReason`：`template`=可变模板已变更 / `story`=本楼层历程已变更 / `unknown`=旧存档无细分哈希）；无存档=从未追踪。`missing` 保持“非有效”总数（`stale + untracked`，向后兼容），新增 `stale/untracked` 供 UI 展示细分（`已追踪 X / 共 Y（过期 Z，从未追踪 W）`）。
+- `floors[].roles` 取已存 `states` 的键（含 stale 存档，从未追踪的楼层为空数组，不再预览“待追踪谁”）；生成路径 `runOne` 仍按需调 `getFloorRoleCards` 计算出场角色，语义不变。楼层卡片三态：已追踪 / 已过期（展示过期存档树 + 原因 + “仍参与最终合并”提示，按钮为重新生成）/ 缺失（尚未追踪）。
 
 
 

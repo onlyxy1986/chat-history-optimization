@@ -14,8 +14,11 @@
 //
 // 触发：助手新回复到达（MESSAGE_RECEIVED 且非用户消息）后后台追踪本楼层，
 //   不阻塞发送；编辑/swipe 导致的过期由手动补齐覆盖。
-// 存储：各楼层 extra[EXTRA_KEY] = {v: 2, h, states, t}，states 为输出对象，
-//   h 为（可变模版+本楼层 L0）哈希；楼层重写/模板变更即标脏，只重追该楼层。
+// 存储：各楼层 extra[EXTRA_KEY] = {v: 2, h, th, eh, states, t}，states 为输出对象，
+//   h 为（可变模版+本楼层 L0）组合哈希（旧存档仅有 h，仍按 h 校验）；th/eh 为
+//   模板与历程的细分哈希（新存档写入，用于过期原因诊断）；楼层重写/模板变更即
+//   标脏（stale），只重追该楼层。stale 存档仍参与最终合并（显式擦除前不丢数据），
+//   UI 以“已过期”展示存档与原因，而非“尚未追踪”。
 // 合并：Engine.buildPromptData 在角色卡淘汰后调 applyToCharacterData，
 //   按楼层顺序把各楼层 states 对象合并为最终可变状态并覆盖（追踪赢；淘汰掉的
 //   角色不复活；未知键按模板校验跳过）。
@@ -532,6 +535,16 @@
             : variableInfo.variableTemplate;
     }
 
+    // 细分哈希：模板与历程分开存，用于过期原因诊断（模板已变更 / 本楼层历程已变更）。
+    // h 保持组合哈希不变（向后兼容旧存档）；th/eh 为新增字段，旧存档缺失时原因记 unknown。
+    function templateHashOf(variableInfo) {
+        return fnv1a32(JSON.stringify(hashOfVariableInfo(variableInfo) || null));
+    }
+
+    function entriesHashOf(floorEntries) {
+        return fnv1a32(JSON.stringify(floorEntries || []));
+    }
+
     // ------------------------------------------------------------------
     // 楼层 extra 读写
     // ------------------------------------------------------------------
@@ -549,13 +562,16 @@
         return slot;
     }
 
-    function writeFloorSlot(floor, states, hash) {
+    function writeFloorSlot(floor, states, hash, hashesOpt) {
         const chat = getChat();
         if (!chat || !Array.isArray(chat) || floor < 1 || floor >= chat.length) return false;
         const item = chat[floor];
         if (!item || typeof item !== 'object') return false;
         if (!item.extra || typeof item.extra !== 'object' || Array.isArray(item.extra)) item.extra = {};
-        item.extra[EXTRA_KEY] = { v: 2, h: hash, states: clone(states) || {}, t: Date.now() };
+        const slot = { v: 2, h: hash, states: clone(states) || {}, t: Date.now() };
+        if (hashesOpt && typeof hashesOpt.th === 'string') slot.th = hashesOpt.th;
+        if (hashesOpt && typeof hashesOpt.eh === 'string') slot.eh = hashesOpt.eh;
+        item.extra[EXTRA_KEY] = slot;
         if (typeof NS.bridge.saveChatDebounced === 'function') NS.bridge.saveChatDebounced();
         return true;
     }
@@ -575,17 +591,24 @@
     // ------------------------------------------------------------------
     // 只读快照：各楼层追踪覆盖（UI 与合并共用，不触发 LLM）。
     // 轻量口径：只读 extra + hash（可变模板缓存 + 楼层故事块缓存），
-    // 不做全聊天深拷贝、不做角色名匹配。roles 直接取已存 states 的键
-    // （缺失/无效楼层为空数组，不再预览“待追踪谁”）；生成路径 runOne
+    // 不做全聊天深拷贝、不做角色名匹配。roles 取已存 states 的键
+    // （从未追踪的楼层为空数组，不再预览“待追踪谁”；已过期的楼层保留
+    // 存档键以便 UI 展示过期存档）；生成路径 runOne
     // 仍按需调 getFloorRoleCards 计算出场角色，不受影响。
+    // 状态三分：valid=已追踪有效；stale=有存档但哈希过期（模板/历程已变更，
+    // 存档仍参与最终合并，UI 必须展示而非报“尚未追踪”）；无存档=从未追踪。
+    // missing 保持“非有效”总数（stale + untracked，向后兼容）；
+    // 新增 stale/untracked 供 UI 展示细分。
     // ------------------------------------------------------------------
 
     function getCoverage(chatRef) {
         const chat = chatRef || getChat();
         const variableInfo = getVariableInfoCached();
+        const curTh = variableInfo.hasVariable ? templateHashOf(variableInfo) : null;
         const floors = [];
         let tracked = 0;
-        let missing = 0;
+        let stale = 0;
+        let untracked = 0;
         if (chat && Array.isArray(chat)) {
             for (let floor = 1; floor < chat.length; floor++) {
                 const item = chat[floor];
@@ -593,17 +616,36 @@
                 const entries = getFloorEntries(floor);
                 if (entries.length === 0) continue;
                 const hash = variableInfo.hasVariable ? floorHash(hashOfVariableInfo(variableInfo), entries) : null;
+                const curEh = entriesHashOf(entries);
                 const slot = readFloorSlot(floor, chat);
                 const valid = !!slot && !!hash && slot.h === hash;
+                const hasSlot = !!slot;
+                const isStale = hasSlot && !valid;
+                let dirtyReason = null;
+                if (isStale) {
+                    if (typeof slot.th === 'string' && typeof slot.eh === 'string' && curTh !== null) {
+                        const thMatch = slot.th === curTh;
+                        const ehMatch = slot.eh === curEh;
+                        if (!thMatch) dirtyReason = 'template';
+                        else if (!ehMatch) dirtyReason = 'story';
+                        else dirtyReason = 'unknown';
+                    } else {
+                        dirtyReason = 'unknown';
+                    }
+                }
                 if (valid) tracked++;
-                else missing++;
+                else if (isStale) stale++;
+                else untracked++;
                 const states = slot ? clone(slotStates(slot)) : null;
                 floors.push({
                     floor,
                     count: entries.length,
-                    roles: (valid && states) ? Object.keys(states) : [],
+                    roles: states ? Object.keys(states) : [],
                     states,
                     valid,
+                    hasSlot,
+                    stale: isStale,
+                    dirtyReason,
                     t: (slot && typeof slot.t === 'number') ? slot.t : 0,
                 });
             }
@@ -615,7 +657,9 @@
             variableTemplateText: variableInfo.variableTemplateText || null,
             floors,
             tracked,
-            missing,
+            stale,
+            untracked,
+            missing: stale + untracked,
         };
     }
 
@@ -852,16 +896,17 @@
         const journeyText = getFloorJourneyText(entries);
         const roleCards = getFloorRoleCards(journeyText);
         const hash = floorHash(hashOfVariableInfo(variableInfo), entries);
+        const hashes = { th: templateHashOf(variableInfo), eh: entriesHashOf(entries) };
         if (!force && isSlotValid(floor, hash)) return 'skip';
         if (Object.keys(roleCards).length === 0) {
             // 历程中未出现已知角色：记空对象，避免重复入队消耗 LLM。
-            writeFloorSlot(floor, {}, hash);
+            writeFloorSlot(floor, {}, hash, hashes);
             return 'ok';
         }
         const content = buildPromptContent(promptVariableText(variableInfo), roleCards, journeyText);
         const raw = await callLlm(content);
         const states = extractStates(raw);
-        writeFloorSlot(floor, states, hash);
+        writeFloorSlot(floor, states, hash, hashes);
         return 'ok';
     }
 
@@ -1176,6 +1221,10 @@
     }
 
     // chatRef 缺省读实时 chat；Engine.buildPromptData 传入其深拷贝以保证一致性。
+    // 注意：此处有意合并全部存档（含哈希过期的 stale）：过期存档是“需要重追”的
+    // 提示信号，不是“已丢弃”——丢弃只由 eraseAll/forceRebuild 显式执行。
+    // UI 的 getCoverage 用 valid/stale/untracked 三分展示，stale 卡片会明确提示
+    // “存档仍参与最终合并”，避免“页面全缺失但合并仍生效”的困惑。
     function getMergedStates(chatRef) {
         const acc = {};
         const chat = chatRef || getChat();
