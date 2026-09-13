@@ -588,7 +588,7 @@
         const prompt = `
 <STORY_DATA>
 
-<HISTORY> // **已经发生的事情，正文如有回忆时必须严格限定在此范围内，不得随意杜撰未发生过的事情**
+<HISTORY> // **已发送的剧情，禁止杜撰没有发生过的事情**
 ${historyContent}
 </HISTORY>
 
