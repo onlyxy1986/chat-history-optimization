@@ -738,10 +738,31 @@ ${newCharacterCardTemplate}
         return `第${dayKey}天`;
     }
 
+    // 摘要伪条目地点：取时间范围内出现次数最多的前 Constants.SUMMARY_LOCATIONS_MAX 个
+    // （次数相同按首现顺序，order 提供），用 "," 连接并在末尾追加"等地点"，
+    // 避免跨天父摘要把全部地点铺开撑大 token。
+    function formatSummaryLocations(locationCounts, order) {
+        const counts = (locationCounts && typeof locationCounts === 'object') ? locationCounts : {};
+        const keys = Object.keys(counts).filter((k) => counts[k] > 0);
+        if (keys.length === 0) return '';
+        const pos = new Map();
+        (order || []).forEach((k, i) => { if (!pos.has(k)) pos.set(k, i); });
+        keys.sort((a, b) => {
+            const diff = (counts[b] || 0) - (counts[a] || 0);
+            if (diff !== 0) return diff;
+            const pa = pos.has(a) ? pos.get(a) : Number.MAX_SAFE_INTEGER;
+            const pb = pos.has(b) ? pos.get(b) : Number.MAX_SAFE_INTEGER;
+            return pa - pb;
+        });
+        const max = (typeof Constants.SUMMARY_LOCATIONS_MAX === 'number' && Constants.SUMMARY_LOCATIONS_MAX > 0)
+            ? Math.floor(Constants.SUMMARY_LOCATIONS_MAX) : 5;
+        return keys.slice(0, max).join(',') + '等地点';
+    }
+
     // 摘要伪条目：与 L0 同形（天数|时间段|地点 + 历程），复用 renderJourneyMarkdown。
     // 摘要原文原样使用，不走 extractItemProcess 的补句号逻辑。
-    function summaryToEntry(dayKey, endKey, text, locations) {
-        const loc = (locations || []).filter(Boolean).join('、');
+    function summaryToEntry(dayKey, endKey, text, locations, locationCounts) {
+        const loc = formatSummaryLocations(locationCounts, locations);
         if (endKey && endKey !== dayKey) {
             return { 天数: `${dayLabelOf(dayKey)}~${dayLabelOf(endKey)}`, 时间段: '多日', 地点: loc, 历程: text };
         }
@@ -802,14 +823,18 @@ ${newCharacterCardTemplate}
             const dk = dayKeyOf(entry);
             let d = dayIdx.has(dk) ? days[dayIdx.get(dk)] : null;
             if (!d) {
-                d = { dayKey: dk, label: dayLabelOf(dk), count: 0, entries: [], locations: [], level: 0, text: null, endKey: dk, dropped: false };
+                d = { dayKey: dk, label: dayLabelOf(dk), count: 0, entries: [], locations: [], locationCounts: {}, level: 0, text: null, endKey: dk, dropped: false };
                 dayIdx.set(dk, days.length);
                 days.push(d);
             }
             d.entries.push(entry);
             d.count++;
             const loc = String(entry.地点 || '').trim();
-            if (loc && !d.locations.includes(loc)) d.locations.push(loc);
+            if (loc) {
+                // locations 保持首现顺序（top 计数并列时的 tie-break）；locationCounts 记出现次数
+                if (!d.locations.includes(loc)) d.locations.push(loc);
+                d.locationCounts[loc] = (d.locationCounts[loc] || 0) + 1;
+            }
         }
         // 完全落在中段内的天（才允许折叠/参与上层合并）
         const fullyInside = new Set();
@@ -832,21 +857,10 @@ ${newCharacterCardTemplate}
         const dayEst = (d) => {
             if (d.dropped) return 0;
             if (d.level === 0) return estChars(renderJourneyMarkdown(d.entries, 0));
-            return estChars(renderJourneyMarkdown([summaryToEntry(d.dayKey, d.endKey, d.text, d.locations)], 0));
+            return estChars(renderJourneyMarkdown([summaryToEntry(d.dayKey, d.endKey, d.text, d.locations, d.locationCounts)], 0));
         };
         const totalEst = () => days.reduce((a, d) => a + dayEst(d), 0);
 
-        // Phase A：从最旧天开始把 L0 换成 L1（有有效天摘要且完全落在中段内才可折）
-        for (const d of days) {
-            if (totalEst() <= midBudgetEst) break;
-            if (d.level === 0 && fullyInside.has(d.dayKey)) {
-                const t = l1ByDay.get(d.dayKey);
-                if (t) {
-                    d.level = 1;
-                    d.text = t;
-                }
-            }
-        }
         // 单个上层节点尝试合并：调用方保证 level 顺序（逐层上升），返回是否合并成功。
         // 精确裁剪阶段复用同一判定（span 完全落在中段内 + 被覆盖天全部处于 level-1），
         // 避免估算偏乐观时"该合的没合就直接丢整天"。
@@ -862,10 +876,12 @@ ${newCharacterCardTemplate}
             first.level = u.level;
             first.text = u.text;
             first.endKey = u.endKey;
-            // 合并地点；被吞掉的天标记 mergedInto（与精确裁剪的丢弃区分）
+            // 合并地点计数（父摘要按 span 内出现次数取 top）；被吞掉的天标记 mergedInto
             for (const d of covered.slice(1)) {
                 for (const loc of d.locations) {
-                    if (loc && !first.locations.includes(loc)) first.locations.push(loc);
+                    if (!loc) continue;
+                    if (!first.locations.includes(loc)) first.locations.push(loc);
+                    first.locationCounts[loc] = (first.locationCounts[loc] || 0) + (d.locationCounts[loc] || 0);
                 }
                 d.dropped = true;
                 d.mergedInto = u.key;
@@ -873,10 +889,17 @@ ${newCharacterCardTemplate}
             }
             return true;
         };
-        // Phase B：从最旧侧把连续同层天换成父节点（逐层上升）
-        if (totalEst() > midBudgetEst) {
-            const maxLevel = (typeof Constants.HIER_MAX_LEVELS === 'number' && Constants.HIER_MAX_LEVELS >= 2)
-                ? Math.floor(Constants.HIER_MAX_LEVELS) : 4;
+        // 折叠优先序（从最旧侧压实，最大化保留较新天的 L0 原文）：
+        //   ① 尽量把最旧侧完整的同层组并成父节点（fanin 个 L1 → L2，fanin 个 L2 → L3…）；
+        //   ② 没有可合并的完整同层组时，才把最旧 L0 折成 L1。
+        // 与精确计数兜底（buildPromptData）保持同一优先序：老天先压紧，让预算优先由
+        // 高层摘要腾出，从而把较新的天尽量留成 L0。validUpper 由 planUpperTree 按层序
+        // 生成（同层内最旧优先），顺序遍历即最旧优先。
+        const maxLevel = (typeof Constants.HIER_MAX_LEVELS === 'number' && Constants.HIER_MAX_LEVELS >= 2)
+            ? Math.floor(Constants.HIER_MAX_LEVELS) : 4;
+        let foldGuard = days.length + validUpper.length + 1;
+        while (totalEst() > midBudgetEst && foldGuard-- > 0) {
+            // ① 上层合并（逐层上升；最旧优先）
             for (let level = 2; level <= maxLevel; level++) {
                 if (totalEst() <= midBudgetEst) break;
                 for (const u of validUpper) {
@@ -885,6 +908,14 @@ ${newCharacterCardTemplate}
                     tryApplyUpper(u);
                 }
             }
+            if (totalEst() <= midBudgetEst) break;
+            // ② 无完整同层组可并，才折最旧可折叠 L0 → L1
+            const foldDay = days.find((d) => !d.dropped && d.level === 0
+                && fullyInside.has(d.dayKey) && l1ByDay.has(d.dayKey));
+            if (!foldDay) break;
+            foldDay.level = 1;
+            foldDay.text = l1ByDay.get(foldDay.dayKey);
+            foldDay.endKey = foldDay.dayKey;
         }
         return { days, upperUsed: validUpper.length, l1ByDay, validUpper, fullyInside, order, tryApplyUpper };
     }
@@ -897,7 +928,7 @@ ${newCharacterCardTemplate}
             if (d.level === 0) {
                 for (const e of d.entries) out.push(e);
             } else {
-                out.push(summaryToEntry(d.dayKey, d.endKey, d.text, d.locations));
+                out.push(summaryToEntry(d.dayKey, d.endKey, d.text, d.locations, d.locationCounts));
             }
         }
         return out;
@@ -1025,26 +1056,16 @@ ${newCharacterCardTemplate}
                 midMarkdown = renderPlan();
                 // 精确计数：估算（EST_CHARS_PER_TOKEN）偏乐观时可能"该折的没折"，
                 // 直接丢整天会把有 L1 的天整个丢掉（如超 1k 却丢 5k）。故超预算时
-                // 优先把最旧可折叠 L0 折成 L1、再试上层合并，都不行才丢最旧槽位，
+                // 优先把最旧侧完整的同层组并成父节点（fanin 个 L1 → L2，fanin 个 L2 → L3…），
+                // 其次才折最旧 L0 → L1，都不行才丢最旧槽位，
                 // 直到 ≤ midBudget（无次数上限，保证硬上限）。
                 let tok = await getTokenCountAsync(midMarkdown);
                 const maxLevel = (typeof Constants.HIER_MAX_LEVELS === 'number' && Constants.HIER_MAX_LEVELS >= 2)
                     ? Math.floor(Constants.HIER_MAX_LEVELS) : 4;
                 while (tok > midBudget) {
-                    // 1. 最旧可折叠 L0 → L1（须完全落在中段内且有有效天摘要）
-                    const foldIdx = plan.days.findIndex((d) => !d.dropped && d.level === 0
-                        && plan.fullyInside && plan.fullyInside.has(d.dayKey)
-                        && plan.l1ByDay && plan.l1ByDay.has(d.dayKey));
-                    if (foldIdx !== -1) {
-                        const d = plan.days[foldIdx];
-                        d.level = 1;
-                        d.text = plan.l1ByDay.get(d.dayKey);
-                        d.endKey = d.dayKey;
-                        midMarkdown = renderPlan();
-                        tok = await getTokenCountAsync(midMarkdown);
-                        continue;
-                    }
-                    // 2. 上层合并（逐层上升，复用与 Phase B 同一判定）
+                    // 1. 上层合并优先（逐层上升，复用与估算阶段同一判定）：
+                    //    先把最旧侧完整的同层组并成父节点，把老天压紧，
+                    //    从而让较新的天尽量保留 L0 原文
                     let merged = false;
                     if (plan.tryApplyUpper && Array.isArray(plan.validUpper)) {
                         for (let level = 2; level <= maxLevel; level++) {
@@ -1063,6 +1084,20 @@ ${newCharacterCardTemplate}
                         }
                     }
                     if (merged) continue;
+                    // 2. 没有可合并的完整同层组，才把最旧可折叠 L0 折成 L1
+                    //    （须完全落在中段内且有有效天摘要）
+                    const foldIdx = plan.days.findIndex((d) => !d.dropped && d.level === 0
+                        && plan.fullyInside && plan.fullyInside.has(d.dayKey)
+                        && plan.l1ByDay && plan.l1ByDay.has(d.dayKey));
+                    if (foldIdx !== -1) {
+                        const d = plan.days[foldIdx];
+                        d.level = 1;
+                        d.text = plan.l1ByDay.get(d.dayKey);
+                        d.endKey = d.dayKey;
+                        midMarkdown = renderPlan();
+                        tok = await getTokenCountAsync(midMarkdown);
+                        continue;
+                    }
                     // 3. 都不行才丢最旧槽位
                     const idx = plan.days.findIndex((d) => !d.dropped);
                     if (idx === -1) break;
