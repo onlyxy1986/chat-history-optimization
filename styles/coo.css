@@ -1033,6 +1033,23 @@
     gap: 8px;
 }
 
+#coo-root .coo-story-toolbar-group {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    border: 1px dashed var(--coo-border-soft);
+    border-radius: 8px;
+}
+
+#coo-root .coo-story-toolbar-label {
+    flex: 0 0 auto;
+    font-size: 11px;
+    color: var(--coo-muted);
+    user-select: none;
+}
+
 #coo-root .coo-story-range-field {
     display: flex;
     align-items: center;
@@ -1077,6 +1094,23 @@
 
 #coo-root .coo-story-day-entry .coo-story-item-body {
     margin-top: 4px;
+}
+
+#coo-root .coo-story-floor-card {
+    background: transparent;
+    border-style: dashed;
+    padding: 8px 10px;
+    margin-top: 8px;
+}
+
+#coo-root .coo-story-day .coo-story-floor-card:first-of-type {
+    margin-top: 8px;
+}
+
+#coo-root .coo-story-floor-roles {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px dashed var(--coo-border-soft);
 }
 
 #coo-root .coo-story-only-label {

@@ -194,7 +194,7 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
 
 ### 5.2 buildPromptData 逐步骤
 
-1. **模板解析**：`parseTemplate(historyPrompt)`；`roleCardToggle` 开时还需 `parseTemplate(characterPrompt)`。解析失败仅 console.error，不中断（生成可能异常，UI 模板 tab 有有效性徽章）。
+1. **模板解析**：`parseTemplate(historyPrompt)`；`roleCardToggle` 开时还需 `parseTemplate(characterPrompt)`。解析失败仅 console.error，不中断（生成可能异常，UI 基础设置 tab 模板块有有效性徽章）。
 2. **mergeDataInfo**：遍历楼层 1..n 的 assistant 消息，提取每层 `NEW_HISTORY`/`NEW_CHARACTER_CARD`，用 `deepMerge` 累积成全局 `historyData`（含 `故事历程` 数组）与 `characterData`（角色名→角色卡）。同时：
    - 每层写入 `item.messageCount = historyObj.故事历程.length`（该层贡献的历程条数，供正文覆盖计算）；
     - 任何一层缺块/解析失败 → `failedFloors.push(j)`，并记录 `failedDetails` 原因（见 §4.2）。
@@ -289,7 +289,7 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
 
 - `extractVariablePaths` 按行解析角色卡模板原文：属性行 `//` 注释含 `<可变>` 即标记该行全部属性键；`{`/`[` 计数维护对象栈（要求模板保持一行一属性的 pretty 格式，与默认模板一致）。
 - 父级标记覆盖整棵子树：`"当前状态": { // <可变>` 下全部子属性自动为可变，无需逐行标记。
-- `getVariableInfo` 用标记路径集过滤 `parseTemplate` 后的模板对象：可变路径（含祖先被标记）整体保留，其余分支只保留通向可变后代的骨架；无标记/模板非法时 `hasVariable=false`，追踪拒绝生成并提示去模板 tab 标记。同时 `buildVariableTemplateText` 按同样口径过滤原始文本行，生成保留原树对应行注释的可变状态模版文本（根骨架/可变子树内纯注释行保留，其余丢弃；保留行统一删除 `<可变>` 标记文本后原样输出）。
+- `getVariableInfo` 用标记路径集过滤 `parseTemplate` 后的模板对象：可变路径（含祖先被标记）整体保留，其余分支只保留通向可变后代的骨架；无标记/模板非法时 `hasVariable=false`，追踪拒绝生成并提示去基础设置 tab 标记。同时 `buildVariableTemplateText` 按同样口径过滤原始文本行，生成保留原树对应行注释的可变状态模版文本（根骨架/可变子树内纯注释行保留，其余丢弃；保留行统一删除 `<可变>` 标记文本后原样输出）。
 - `{{可变状态模版}}` 占位符填入的是上述保留注释的文本（已删 `<可变>`，无文本时回退对象 JSON）；`h` 哈希同样基于该文本，模板注释变更即标脏。`getCharPrompt` 发送原角色卡模板时同样删除 `<可变>` 标记文本（其余注释保留），避免模型误解。
 - 默认角色卡模板仅 `"{{角色名}}"."职业"` 带 `<可变>` 标记（最小示例）。老用户已保存的旧模板不受影响（设置按鍵合并），需点模板重置或手工加标记才能用追踪。
 
@@ -365,20 +365,19 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
 
 - 入口：wand 扩展菜单（`#extensionsMenu`）顶部插入菜单项「剧情角色档案」；`#extensionsMenu` 不存在时回退插入 `#top-settings-holder` 顶部；DOM 未就绪时 500ms 间隔重试最多 30 次，并监听 `#extensionsMenuButton` 点击后重挂。
 - 浮动窗口（`#coo-root > .coo-shell`）：顶栏（标题+版本+关闭）+ 左侧栏（tab 导航 + 底部运行状态：失败楼层/Token 数）+ 工作区。侧边栏可折叠（localStorage `coo_sidebar_collapsed`）。
-- **7 个 tab**（`TABS`）：`settings` 基础设置 / `subsummary` 分层摘要 / `roletrack` 角色状态 / `templates` 模板 / `roles` 角色查看 / `story` 故事历程 / `preview` 发送预览。激活 tab 记 localStorage `coo_active_tab`。
+- **6 个 tab**（`TABS`）：`settings` 基础设置 / `subsummary` 分层摘要 / `roletrack` 角色状态 / `roles` 角色查看 / `story` 故事历程 / `preview` 发送预览。激活 tab 记 localStorage `coo_active_tab`（读取时校验 tab 存在性，失效值回退 `settings`）。
 - **DOM 全部 `createElement` 构建，无 HTML 字符串、无 jQuery**（硬约束）。
 - 事件全委托到 workspace：`input`（按 `data-coo-field` switch 分发到 `Settings.set`）、`change`（roleSelect）、`click`（按 `data-coo-action` / `data-coo-reset` 分发）。Esc 关窗。
 - **布局与响应式**：workspace `overflow-y: auto`（内容高于窗口即滚动）；`.coo-tab-panel > .coo-section` 为 `flex: 1 0 auto`（永不压缩低于内容高）；模板 textarea 块 `.coo-template-block` 为 `flex: 1 1 auto`——**basis 必须是内容高**（v2.11.0 修复：旧值 `flex: 1 1 0` + `min-height: 0` 在窗口矮、section 无剩余空间时把块塌缩到 0px，内部 textarea（min-height 96px）溢出绘制到下方状态行/按钮上；二级摘要/模板 tab 均受影响）；高窗口时块按 `createTemplateBlock` 的 `flexGrow` 内联参数分配剩余空间撑满。`.coo-subsummary-actions` `flex-wrap: wrap`（窄窗换行）；`@media (max-width: 760px)` 侧栏缩为 56px 纯图标栏、窗口全屏、行内输入框缩窄。
 
 ### 11.2 各 tab 要点
 
-- **基础设置**：extensionToggle / roleCardToggle / keepCount / tokenLimit。
-- **分层摘要**：开关、连接方式 select（fetch/profile 互斥禁用对应输入区）、profile 下拉（`getProfileOptions` 过滤 CC 类型）、baseUrl/apiKey/password/model/temperature/maxTokens/concurrency/timeout、合并扇入 hierFanin、三模板 textarea（profile 附加参数 JSON 徽章 + `{{当天历程}}` / `{{子摘要列表}}` 徽章）、状态行 ×2（生成状态 / 层级统计）、按钮：补齐缺失 / 强制重建全部 / 擦除全部（口令确认弹层；只清摘要，不动开关与原文）。配置类错误（未配置连接/模板无效/附加参数非法 JSON）记 `noRetry`，失败即停不再重试。
+- **基础设置**：extensionToggle / roleCardToggle / keepCount / tokenLimit + 故事历程/角色卡 JSON 模板块（textarea + JSON 有效性徽章 + 重置按钮回 `Settings.defaultSettings`；v2.25.0 起由模板 tab 并入，角色卡模板块标题为「角色卡 JSON 模板(属性注释中加入<可变>开启该属性的状态追踪)」）。
+- **分层摘要**（v2.25.0 起为纯设置页）：开关、连接方式 select（fetch/profile 互斥禁用对应输入区）、profile 下拉（`getProfileOptions` 过滤 CC 类型）、baseUrl/apiKey/password/model/temperature/maxTokens/concurrency/timeout、合并扇入 hierFanin、三模板 textarea（profile 附加参数 JSON 徽章 + `{{当天历程}}` / `{{子摘要列表}}` 徽章）。生成状态行、层级统计行、补齐缺失 / 强制重建全部 / 擦除全部按钮与摘要结果展示全部移至「故事历程」tab。配置类错误（未配置连接/模板无效/附加参数非法 JSON）记 `noRetry`，失败即停不再重试。
   - profile 下拉监听 `CONNECTION_PROFILE_LOADED/CREATED/UPDATED/DELETED` 事件刷新；已保存 id 失效时自动清空设置。
-- **模板**：historyPrompt / characterPrompt textarea + JSON 有效性徽章 + 重置按钮（回 `Settings.defaultSettings`）。
 - **角色查看**：角色下拉（活跃角色标 `<活跃角色>`）+ `buildRoleTree` 递归树渲染。
-- **故事历程**：楼层范围查询（起始/结束，空=全部）；上层合并卡片（Lx · 起止天 + 摘要正文）置顶；按天分组卡片：天标签 + 条目数 + 层级徽章（原文/天摘要/Lx合并/已丢弃，来自 `stats.hier`）+ 天摘要块（有效→正文 +「重新生成」；无效→「生成摘要」按钮）+ 天内条目（楼层 + 时间段|地点 + 历程正文）；被上层合并吞掉的天不单独展示；「补齐缺失摘要」按钮后台补齐。
-- **角色状态**：结构同分层摘要 tab（开关、独立连接配置、profile 下拉、三占位符模板 textarea + 有效性徽章、状态行 ×2、补齐缺失 / 强制重建全部 / 擦除全部口令确认）；另有可变状态模版预览行（可变属性数 + JSON）与逐楼层卡片列表（楼层号 + 历程条数 + 已追踪/缺失徽章 + 各角色状态树 + 单楼层生成/重新生成按钮；已追踪楼层的角色名由状态树标题给出，不再单独显示按历程匹配的“涉及角色”行）。`CONNECTION_PROFILE_*` 事件同时刷新两套 profile 下拉。
+- **故事历程**（v2.25.0 起为全部结果的统一展示页）：顶部分组工具栏（虚线框分组）——「楼层范围」（起始/结束，空=全部 + 查看/全部楼层，楼层范围查询同时作用于历程条目与角色状态）、「分层摘要」（补齐缺失/强制重建全部/擦除全部口令确认，后台补齐）、「角色状态」（补齐缺失/强制重建全部/擦除全部口令确认）；工具栏下状态行：分层摘要生成状态、角色状态追踪状态、层级统计、追踪统计、可变状态模版预览（可变属性数 + JSON）；其下统一楼层列表：上层合并卡片（Lx · 起止天 + 摘要正文）置顶 → 按天分组卡片（天标签 + 条目数 + 层级徽章（原文/天摘要/Lx合并/已丢弃，来自 `stats.hier`）+ 天摘要块（有效→正文 +「重新生成天摘要」；无效→「生成天摘要」按钮））→ 天内按楼层统一卡片（`buildStoryFloorCard`：楼层号 + 历程条数 + 角色状态已追踪/角色状态已过期/角色状态未追踪徽章 + 生成/重新生成角色状态追踪按钮 + 楼层内条目（楼层 + 时间段|地点 + 历程正文）+ 角色状态区（仅在有变化时显示：整对象单行 JSON `{ "角色名":{…}, "角色名2":{…} }`，不树形格式化；空/未追踪不显示）；因不再独占「角色状态」专页，徽章/按钮/状态行/统计行文案均带功能前缀（角色状态追踪…/分层摘要…/分层摘要统计…）避免歧义，天摘要按钮同步明确为「生成天摘要/重新生成天摘要」）；被上层合并吞掉的天不单独展示，但其内“有追踪覆盖、无新增历程（条目去重）”的楼层卡片按 SubSummary 天→楼层映射归位到所属天（该天标记 orphanOnly 保留展示）。角色状态单次快照（`RoleTrack.getCoverage`，轻量口径：只读 extra + hash，不走 LLM）只保留查询范围内楼层。
+- **角色状态**（v2.25.0 起为纯设置页）：开关、独立连接配置（fetch/profile 互斥禁用对应输入区）、profile 下拉、三占位符模板 textarea + 有效性徽章。追踪状态行、统计行、可变状态模版预览、补齐/重建/擦除按钮与逐楼层角色状态全部移至「故事历程」tab。`CONNECTION_PROFILE_*` 事件同时刷新两套 profile 下拉。
 ### 11.2.1 解析失败气泡（v2.10.2，v2.11.1 检查时机改为消息事件驱动）
 
 - 检查时机：`engine.js` 订阅 ST 消息事件——`MESSAGE_RECEIVED`（回复到达）/`MESSAGE_EDITED`/`MESSAGE_UPDATED`（消息修改）/`MESSAGE_SWIPED`（切 swipe）触发 `checkParseFailures()`；`MESSAGE_DELETED`/`CHAT_CHANGED`/`CHAT_LOADED` 触发**静默重建基线**（`silent` 模式：只更新 `lastStats.failedFloors` 不广播、不通知 UI，避免楼层下标错位导致误报/漏报）。不在生成拦截器（发送时）检查——发送时最新回复尚未到达，检查必然滞后一轮。
@@ -387,9 +386,9 @@ UI 的「发送预览」与窗口打开时的 `Engine.refreshStats()` 走**同�
 
 ### 11.3 刷新链路
 
-- 打开/切换窗口 → `Engine.refreshStats()`（只读深拷贝 + 完整装配，**不改 ST chat**）→ `notifyStats` → `onStatsChanged` → `refreshActiveTabData`（只刷轻量行：stats 值、折叠信息行、层级统计、预览文本、故事天分组列表、分层摘要/角色状态的状态行文本；不再触发角色状态覆盖扫描）。
-- `SubSummary.onStatus` → 刷新状态行 + 层级统计；批次结束或单天完成（`lastDone` 非空）时重绘故事天分组列表（天数少，重绘成本低）。
-- `RoleTrack.onStatus` → 中间进度 tick 只原地更新状态行文本（零扫描）；批次结束或单楼层完成（`running==false || lastDone`）且当前为角色状态 tab 时，才做一次 `getCoverage` 快照刷统计行 + 楼层卡片列表（`refreshRoleTrackPanel` 内统计行与列表共用同一快照）。tab 打开时同样单次快照（`renderRoleTrackTab` → `refreshRoleTrackPanel`）。
+- 打开/切换窗口 → `Engine.refreshStats()`（只读深拷贝 + 完整装配，**不改 ST chat**）→ `notifyStats` → `onStatsChanged` → `refreshActiveTabData`（只刷轻量行：stats 值、折叠信息行、预览文本、分层摘要/角色状态的状态行文本；状态行 DOM 只存在于故事历程 tab，其他 tab 下查询无匹配自然跳过；不再触发角色状态覆盖扫描）。
+- `SubSummary.onStatus` → 刷新状态行 + 层级统计；批次结束或单天完成（`lastDone` 非空）且当前为故事历程 tab 时重绘统一楼层列表（天数少，重绘成本低）。
+- `RoleTrack.onStatus` → 中间进度 tick 只原地更新状态行文本（零扫描）；批次结束或单楼层完成（`running==false || lastDone`）且当前为故事历程 tab 时，才做一次 `updateRoleTrackInfo` 快照刷统计行 + `renderStoryList` 重绘统一楼层列表。tab 打开时同样单次快照（`renderStoryTab` → `updateRoleTrackInfo` + `queryStoryRange` → `renderStoryList`）。
 - 侧边栏状态（失败楼层/tokenCount）随 `updateStatsValues` 更新；「将发送词元数」行显示为 `当前 / tokenLimit`，超限时标红（`coo-stat-bad`）。
 
 ---
@@ -529,9 +528,9 @@ node test/smoke-roletrack.cjs
 
 1. wand 菜单出现「剧情角色档案」，打开窗口 7 个 tab 正常，控制台无红错。
 2. 开 `extensionToggle`，正常聊天 → 控制台看 `全量 X tokens…分层折叠将启用/不启用`、`Final last message`；发送预览与之一致。
-3. 超预算 → 折叠激活，故事历程 tab 按天分组卡片出现层级徽章（原文/天摘要/Lx合并/已丢弃），上层合并卡片置顶；越新的天层级越低。
-4. 配置分层摘要（fetch 或 profile），发消息 → 后台自动补齐天摘要并落盘（刷新仍在）；手动 补齐缺失/强制重建/擦除（口令）行为正确；发送时缺失摘要不阻塞（用原文兜底）。
-5. （v2.23.0）配置角色状态（独立连接），发消息 → 新助手楼层后台自动追踪并写入 extra（刷新仍在）；角色状态 tab 楼层卡片显示已追踪/缺失与状态树；发送预览的 CHARACTER_CARD 中可变字段为顺序合并后的最终值；模板去掉 `<可变>` 后 tab 提示去标记且追踪拒绝生成。
+3. 超预算 → 折叠激活，故事历程 tab 按天分组卡片出现层级徽章（原文/天摘要/Lx合并/已丢弃），上层合并卡片置顶；越新的天层级越低；（v2.25.0）天内按楼层统一卡片显示该楼层历程条目 + 角色状态区。
+4. 配置分层摘要（fetch 或 profile），发消息 → 后台自动补齐天摘要并落盘（刷新仍在）；故事历程 tab 工具栏「分层摘要」分组手动 补齐缺失/强制重建/擦除（口令）行为正确，状态行/层级统计在故事历程 tab 原地刷新；发送时缺失摘要不阻塞（用原文兜底）。
+5. （v2.23.0）配置角色状态（独立连接），发消息 → 新助手楼层后台自动追踪并写入 extra（刷新仍在）；（v2.25.0）故事历程 tab 统一楼层卡片显示已追踪/已过期/缺失徽章与角色状态（有变化时单行 JSON，空不显示），工具栏「角色状态」分组 补齐缺失/强制重建/擦除（口令）行为正确；徽章/按钮/状态行/统计行均带功能前缀（角色状态追踪…/分层摘要…）可区分；发送预览的 CHARACTER_CARD 中可变字段为顺序合并后的最终值；模板去掉 `<可变>` 后故事历程 tab 追踪统计行提示去标记且追踪拒绝生成。
 5. 编辑某旧楼层消息 → 仅该天 L1 失效（故事 tab 该天显示未生成），其余天摘要保留；后台自动重建。
 6. 配置不允许 CORS 的 API → 状态行 + console 明确报错，metadata 不被污染。
 7. （v2.11.1）解析失败气泡时机：让某次回复的 `<NEW_STORY_DATA>` JSON 损坏 → **回复到达即**弹出红色气泡（无需再发一条消息）；手动编辑修复该楼层后气泡不再出现、侧栏失败楼层消失；再次编辑弄坏 → 重新弹出；删除消息/切换聊天不产生误报气泡。
@@ -542,6 +541,7 @@ node test/smoke-roletrack.cjs
 
 | 版本 | 内容 |
 |---|---|
+| 2.25.0 | **UI 重组：故事历程 tab 成为全部结果的统一展示页**：「分层摘要」「角色状态」tab 改为纯设置页（状态行/统计行/可变模版预览/补齐·重建·擦除按钮/逐楼层卡片全部移出）；故事历程 tab 顶部改为分组工具栏（虚线框分组：楼层范围查询 + 分层摘要操作 + 角色状态操作），楼层范围查询同时作用于历程条目与角色状态；天内按楼层统一卡片（`buildStoryFloorCard`：楼层号 + 历程条数 + 已追踪/已过期/缺失徽章 + 单楼层生成/重新生成按钮 + 楼层内历程条目 + 角色状态区仅在有变化时显示整对象单行 JSON（空/未追踪不显示，不树形格式化），角色状态单次轻量快照（只读 extra + hash，不走 LLM）只保留查询范围内楼层；“有追踪覆盖但条目去重后无新增历程”的楼层按 SubSummary 天→楼层映射归位所属天（orphanOnly 天保留展示，即使被上层合并吞掉）；`renderRoleTrackList`/`buildRoleTrackFloorCard`/`refreshRoleTrackPanel` 删除；`RoleTrack.onStatus` 完成态重绘条件由角色状态 tab 改为故事历程 tab。**文案带功能前缀**：角色状态不再独占专页，楼层卡片徽章（角色状态已追踪/已过期/角色状态未追踪）、单楼层按钮（生成/重新生成角色状态追踪）、两条状态行（分层摘要…/角色状态追踪…）、统计行（分层摘要统计…/角色状态追踪…/可变状态模版…）与空态文案均加功能前缀避免歧义，天摘要按钮明确为「生成/重新生成天摘要」。**模板 tab 并入基础设置**：故事历程/角色卡两个 JSON 模板块移入「基础设置」tab（`renderTemplatesTab` 删除，`TABS`/`TAB_RENDERERS` 去掉 `templates`，旧 `coo_active_tab=templates` 经存在性校验回退 settings），角色卡模板块标题改为「角色卡 JSON 模板(属性注释中加入<可变>开启该属性的状态追踪)」，去标记提示同步指向基础设置 tab |
 | 2.24.0 | **折叠优先序改为「先压高层、后折 L0」**：超预算时不再先把最旧 L0 逐个铺成 L1，而是优先把最旧侧完整的同层组并成父节点（`fanin` 个 L1 → L2，`fanin` 个 L2 → L3…，逐层上升），没有可合并的完整同层组才折最旧 L0 → L1；估算阶段与精确计数兜底统一为同一优先序（①上层合并 ②L0→L1 ③丢最旧槽位），使预算优先由高层摘要腾出，最大化保留较新天的 L0 原文。新增 `foldGuard` 迭代上限兜底终止；冒烟场景 C 深层压实出现 L2→L3 瀑布。**摘要伪条目地点字段限流**：不再全量拼接，改为按时间范围内出现次数取前 `SUMMARY_LOCATIONS_MAX`（默认 5）个地点（并列按首现顺序，跨天父摘要按 span 内各天计数求和）、用 `,` 连接、末尾追加 `等地点`，避免跨天父摘要地点铺开撑大 token |
 | 2.23.2 | **天摘要封天**：自动补齐跳过数字最大天（未封天），次日历程出现即转正；覆盖未封天的上层因子不齐备自然跳过。 Steady-state 同天回复零 LLM 调用（此前每条回复跟一次当天 L1＋祖先链）；强制重建与单天按钮不受限；冒烟新增 L 场景，B/I/J 断言按封天更新 |
 | 2.23.1 | **分层摘要稳定性修复**：`planUpperTree` 严格整组合并 + 只合并同层连续节点（不满 `fanin` 的尾巴全部晋升，如 7 天 fanin5 仅 `L2:1~5`；此前 `L2:6~7`/`L3:1~6=[L2:1~5,6]` 在装配层永不可用，还会在加天时变孤儿致 UI 出现又消失；代价是 L3 需 25 天、尾巴压缩延迟，极端预算靠 L1/丢弃顶）；L1 脏哈希只看语义字段（去 floor/index，删楼层不再误伤后续天）；批次结束 `pruneStore()` 清孤儿 + `fanin` 切换清空 upper（L1 保留）；`getMissingCount` 只计子齐备缺失；冒烟新增 I（删楼层不误伤）/J（整组合并 + fanin 切换）/K（断层跨洞父可用）场景，C 改 20 天 fanin3 为 6 个 L2 |

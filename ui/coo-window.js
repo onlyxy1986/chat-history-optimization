@@ -27,7 +27,6 @@
         { id: 'settings', label: '基础设置', icon: 'fa-solid fa-sliders' },
         { id: 'subsummary', label: '分层摘要', icon: 'fa-solid fa-compress' },
         { id: 'roletrack', label: '角色状态', icon: 'fa-solid fa-user-clock' },
-        { id: 'templates', label: '模板', icon: 'fa-solid fa-file-code' },
         { id: 'roles', label: '角色查看', icon: 'fa-solid fa-id-card' },
         { id: 'story', label: '故事历程', icon: 'fa-solid fa-route' },
         { id: 'preview', label: '发送预览', icon: 'fa-solid fa-paper-plane' },
@@ -400,22 +399,14 @@
         section.appendChild(createSwitchRow('启用角色卡', 'roleCardToggle'));
         section.appendChild(createNumberRow('正文深度', '（保留的AI最后回复的完整消息数量）', 'keepCount', { min: 0, max: 100, step: 1 }));
         section.appendChild(createNumberRow('Token 限制', '（超限时启用分层折叠注入）', 'tokenLimit', { min: 0, max: 2000000, step: 1024 }));
+        section.appendChild(createTemplateBlock('故事历程 JSON 模板', 'historyPrompt', 14, 40));
+        section.appendChild(createTemplateBlock('角色卡 JSON 模板(属性注释中加入<可变>开启该属性的状态追踪)', 'characterPrompt', 10, 60));
 
         const settings = Settings.getSettings();
         section.querySelector('[data-coo-field="extensionToggle"]').checked = Boolean(settings.extensionToggle);
         section.querySelector('[data-coo-field="roleCardToggle"]').checked = Boolean(settings.roleCardToggle);
         section.querySelector('[data-coo-field="keepCount"]').value = settings.keepCount;
         section.querySelector('[data-coo-field="tokenLimit"]').value = settings.tokenLimit;
-
-        panel.appendChild(section);
-    }
-
-    function renderTemplatesTab(panel) {
-        const section = createSection('fa-solid fa-file-code', '模板');
-        section.appendChild(createTemplateBlock('故事历程 JSON 模板', 'historyPrompt', 14, 40));
-        section.appendChild(createTemplateBlock('角色卡 JSON 模板', 'characterPrompt', 10, 60));
-
-        const settings = Settings.getSettings();
         section.querySelector('[data-coo-field="historyPrompt"]').value = settings.historyPrompt;
         section.querySelector('[data-coo-field="characterPrompt"]').value = settings.characterPrompt;
         updateValidityBadge(section, 'historyPrompt');
@@ -490,12 +481,12 @@
         if (dayText) {
             button.dataset.cooAction = 'dayRegenerate';
             button.appendChild(createIcon('fa-solid fa-rotate'));
-            button.appendChild(createText('span', 'coo-button-label', '重新生成'));
+            button.appendChild(createText('span', 'coo-button-label', '重新生成天摘要'));
             button.title = '重新生成该天的天摘要';
         } else {
             button.dataset.cooAction = 'dayGenerate';
             button.appendChild(createIcon('fa-solid fa-wand-magic-sparkles'));
-            button.appendChild(createText('span', 'coo-button-label', '生成摘要'));
+            button.appendChild(createText('span', 'coo-button-label', '生成天摘要'));
             button.title = '为该天生成天摘要';
         }
         head.appendChild(button);
@@ -510,24 +501,17 @@
         return box;
     }
 
-    function buildDayGroup(dayKey, label, entries, level, dayText) {
+    function buildDayGroup(dayKey, label, entryCount, level, dayText, floorCards) {
         const group = document.createElement('div');
         group.className = 'coo-story-item coo-story-day';
         const head = document.createElement('div');
         head.className = 'coo-story-item-head';
-        head.appendChild(createText('span', 'coo-story-floor', `${label}（${entries.length} 条）`));
+        head.appendChild(createText('span', 'coo-story-floor', `${label}（${entryCount} 条）`));
         head.appendChild(buildLevelBadge(level));
         group.appendChild(head);
         group.appendChild(buildDaySummaryBox(dayKey, dayText, level < 0 ? '该天已超出预算被丢弃' : null));
-        for (const entry of entries) {
-            const row = document.createElement('div');
-            row.className = 'coo-story-day-entry';
-            const meta = [`楼层 ${entry.floor}`, entry.时间段, entry.地点].filter(Boolean).join(' · ');
-            row.appendChild(createText('span', 'coo-story-item-meta', meta));
-            if (entry.历程) {
-                row.appendChild(createText('div', 'coo-story-item-body', entry.历程));
-            }
-            group.appendChild(row);
+        for (const floorCard of floorCards) {
+            group.appendChild(floorCard);
         }
         return group;
     }
@@ -544,7 +528,79 @@
         return card;
     }
 
-    // 按天分组渲染：天摘要来自 SubSummary 快照，本次装配的折叠层级来自 stats.hier
+    function isRoleTrackStaleFloor(floorInfo) {
+        return Boolean(!floorInfo.valid && (floorInfo.stale || (floorInfo.hasSlot && floorInfo.states)));
+    }
+
+    // 楼层卡片内角色状态区：有变化才显示，整对象单行 JSON（{ "角色名":{…}, "角色名2":{…} }）；空/未追踪返回 null
+    function buildRoleTrackFloorStates(floorInfo) {
+        const states = floorInfo.states;
+        if (!states || Object.keys(states).length === 0) return null;
+        const section = document.createElement('div');
+        section.className = 'coo-story-floor-roles';
+        if (isRoleTrackStaleFloor(floorInfo)) {
+            section.appendChild(createText('div', 'coo-subsummary-status', `${describeRoleTrackDirtyReason(floorInfo)}，以下角色状态为过期存档（仍参与最终合并），建议重新生成角色状态追踪`));
+        }
+        section.appendChild(createText('div', 'coo-story-item-body', JSON.stringify(states)));
+        return section;
+    }
+
+    // 统一楼层卡片：该楼层故事条目 + 角色状态（roleTracking=false 或无覆盖时仅故事条目）
+    function buildStoryFloorCard(floor, entries, floorInfo, roleTracking) {
+        const card = document.createElement('div');
+        card.className = 'coo-story-item coo-story-floor-card';
+        const head = document.createElement('div');
+        head.className = 'coo-story-item-head';
+        head.appendChild(createText('span', 'coo-story-floor', `楼层${floor}（${entries.length} 条历程）`));
+        if (roleTracking && floorInfo) {
+            if (floorInfo.valid) {
+                head.appendChild(createText('span', 'coo-rag-hit-score', '角色状态已追踪'));
+            } else if (isRoleTrackStaleFloor(floorInfo)) {
+                head.appendChild(createText('span', 'coo-rag-miss-score', '角色状态已过期'));
+            } else {
+                head.appendChild(createText('span', 'coo-rag-miss-score', '角色状态未追踪'));
+            }
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'coo-button coo-button-ghost coo-button-sm';
+            button.dataset.cooFloor = String(floor);
+            if (floorInfo.valid || isRoleTrackStaleFloor(floorInfo)) {
+                button.dataset.cooAction = 'roleTrackFloorRegenerate';
+                button.appendChild(createIcon('fa-solid fa-rotate'));
+                button.appendChild(createText('span', 'coo-button-label', '重新生成角色状态追踪'));
+                button.title = `重新生成楼层${floor}的角色状态追踪`;
+            } else {
+                button.dataset.cooAction = 'roleTrackFloorGenerate';
+                button.appendChild(createIcon('fa-solid fa-wand-magic-sparkles'));
+                button.appendChild(createText('span', 'coo-button-label', '生成角色状态追踪'));
+                button.title = `生成楼层${floor}的角色状态追踪`;
+            }
+            head.appendChild(button);
+        }
+        card.appendChild(head);
+        if (entries.length === 0) {
+            card.appendChild(createText('div', 'coo-story-item-meta', '本楼层无新增故事条目（条目与更早楼层重复，仅显示角色状态）'));
+        }
+        for (const entry of entries) {
+            const row = document.createElement('div');
+            row.className = 'coo-story-day-entry';
+            const meta = [`楼层 ${entry.floor}`, entry.时间段, entry.地点].filter(Boolean).join(' · ');
+            row.appendChild(createText('span', 'coo-story-item-meta', meta));
+            if (entry.历程) {
+                row.appendChild(createText('div', 'coo-story-item-body', entry.历程));
+            }
+            card.appendChild(row);
+        }
+        if (roleTracking && floorInfo) {
+            const roleSection = buildRoleTrackFloorStates(floorInfo);
+            if (roleSection) card.appendChild(roleSection);
+        }
+        return card;
+    }
+
+    // 按天分组 + 天内按楼层统一渲染：天摘要来自 SubSummary 快照，本次装配的折叠层级来自
+    // stats.hier，角色状态来自 RoleTrack 单次快照（轻量口径：只读 extra + hash，不走 LLM）。
+    // 楼层范围查询同时作用于历程条目与角色状态。
     function renderStoryList(scope) {
         const info = scope.querySelector('[data-coo-field="storyInfo"]');
         const list = scope.querySelector('[data-coo-field="storyList"]');
@@ -561,26 +617,76 @@
         }
         const textByDay = new Map();
         const validUpper = [];
+        const dayFloorsByDay = new Map();
         if (NS.SubSummary) {
             const cov = NS.SubSummary.getCoverage();
             for (const d of cov.days) {
                 if (d.text) textByDay.set(d.dayKey, d.text);
+                dayFloorsByDay.set(d.dayKey, d.floors || []);
             }
             for (const u of cov.upper) {
                 if (u.text) validUpper.push(u);
             }
         }
-        // 首现顺序按天分组
+        // 角色状态单次快照：只保留查询范围内的楼层（与历程范围同一 startFloor/endFloor 口径）
+        const roleByFloor = new Map();
+        const roleCov = (NS.RoleTrack && typeof NS.RoleTrack.getCoverage === 'function') ? NS.RoleTrack.getCoverage() : null;
+        const roleTracking = !!(roleCov && roleCov.hasVariable);
+        if (roleTracking) {
+            for (const floorInfo of roleCov.floors) {
+                if (floorInfo.floor < result.startFloor || floorInfo.floor > result.endFloor) continue;
+                roleByFloor.set(floorInfo.floor, floorInfo);
+            }
+        }
+        // 首现顺序按天分组；天内按楼层细分（楼层归属其首现天）
         const groups = new Map();
+        const dayGroupOf = (dk) => {
+            let g = groups.get(dk);
+            if (!g) {
+                g = { entries: [], floors: new Map(), orphanOnly: false };
+                groups.set(dk, g);
+            }
+            return g;
+        };
         for (const entry of result.entries) {
-            const dk = storyDayKey(entry);
-            if (!groups.has(dk)) groups.set(dk, []);
-            groups.get(dk).push(entry);
+            const g = dayGroupOf(storyDayKey(entry));
+            g.entries.push(entry);
+            let floorEntries = g.floors.get(entry.floor);
+            if (!floorEntries) {
+                floorEntries = [];
+                g.floors.set(entry.floor, floorEntries);
+            }
+            floorEntries.push(entry);
+        }
+        // 有角色追踪覆盖但范围内无新增历程的楼层（条目与更早楼层重复被去重）：
+        // 按自身所属天（SubSummary 天→楼层映射）放置楼层卡片，避免追踪结果在列表里消失
+        if (roleTracking) {
+            for (const [floor, floorInfo] of roleByFloor) {
+                let placed = false;
+                for (const g of groups.values()) {
+                    if (g.floors.has(floor)) {
+                        placed = true;
+                        break;
+                    }
+                }
+                if (placed) continue;
+                let dk = 'unknown';
+                for (const [dayKey, floors] of dayFloorsByDay) {
+                    if (floors.includes(floor)) {
+                        dk = dayKey;
+                        break;
+                    }
+                }
+                const g = dayGroupOf(dk);
+                if (g.entries.length === 0) g.orphanOnly = true;
+                g.floors.set(floor, []);
+            }
         }
         const folded = hier && hier.active ? hier.foldedDays : 0;
         const dropped = hier && hier.active ? hier.droppedDays : 0;
         info.textContent = `楼层 ${result.startFloor} - ${result.endFloor}，共 ${result.entries.length} 条历程，${groups.size} 天`
-            + (hier && hier.active ? `（折叠 ${folded} 天，丢弃 ${dropped} 天，上层 ${validUpper.length} 个）` : '（未折叠，全量原文）');
+            + (hier && hier.active ? `（折叠 ${folded} 天，丢弃 ${dropped} 天，上层 ${validUpper.length} 个）` : '（未折叠，全量原文）')
+            + (roleTracking ? `，已查角色状态追踪楼层 ${roleByFloor.size} 个` : '');
         list.textContent = '';
         if (groups.size === 0) {
             list.appendChild(createText('span', 'coo-role-empty', '该楼层范围内没有新的故事历程'));
@@ -589,11 +695,16 @@
         for (const u of validUpper) {
             list.appendChild(buildUpperCard(u));
         }
-        for (const [dayKey, entries] of groups) {
-            // 被上层合并吞掉的天不单独展示（内容见上层卡片）
-            if (mergedByDay.has(dayKey)) continue;
+        for (const [dayKey, g] of groups) {
+            // 被上层合并吞掉的天不单独展示（内容见上层卡片）；仅含孤儿楼层卡片的天保留展示
+            if (mergedByDay.has(dayKey) && !g.orphanOnly) continue;
             const level = levelByDay.has(dayKey) ? levelByDay.get(dayKey) : 0;
-            list.appendChild(buildDayGroup(dayKey, storyDayLabel(dayKey), entries, level, textByDay.get(dayKey) || null));
+            const floorCards = [];
+            const floorNumbers = [...g.floors.keys()].sort((a, b) => a - b);
+            for (const floor of floorNumbers) {
+                floorCards.push(buildStoryFloorCard(floor, g.floors.get(floor) || [], roleByFloor.get(floor), roleTracking));
+            }
+            list.appendChild(buildDayGroup(dayKey, storyDayLabel(dayKey), g.entries.length, level, textByDay.get(dayKey) || null, floorCards));
         }
     }
 
@@ -697,44 +808,86 @@
         });
     }
 
+    function createStoryToolbarGroup(label) {
+        const group = document.createElement('div');
+        group.className = 'coo-story-toolbar-group';
+        group.appendChild(createText('span', 'coo-story-toolbar-label', label));
+        return group;
+    }
+
     function renderStoryTab(panel) {
         const section = createSection('fa-solid fa-route', '故事历程');
 
         const toolbar = document.createElement('div');
         toolbar.className = 'coo-story-toolbar';
-        toolbar.appendChild(createStoryRangeField('起始楼层', 'storyStart'));
-        toolbar.appendChild(createStoryRangeField('结束楼层', 'storyEnd'));
+
+        const queryGroup = createStoryToolbarGroup('楼层范围');
+        queryGroup.appendChild(createStoryRangeField('起始楼层', 'storyStart'));
+        queryGroup.appendChild(createStoryRangeField('结束楼层', 'storyEnd'));
         const queryButton = createButton('查看', 'coo-button coo-button-sm', 'fa-solid fa-magnifying-glass');
         queryButton.dataset.cooAction = 'storyQuery';
-        queryButton.title = '查看指定楼层范围的故事历程';
+        queryButton.title = '查看指定楼层范围的故事历程与角色状态';
         const allButton = createButton('全部楼层', 'coo-button coo-button-ghost coo-button-sm', 'fa-solid fa-arrows-up-down');
         allButton.dataset.cooAction = 'storyAll';
-        allButton.title = '查看全部楼层的故事历程';
-        const subMissingButton = createButton('补齐缺失摘要', 'coo-button coo-button-ghost coo-button-sm', 'fa-solid fa-compress');
+        allButton.title = '查看全部楼层的故事历程与角色状态';
+        queryGroup.append(queryButton, allButton);
+        toolbar.appendChild(queryGroup);
+
+        const subGroup = createStoryToolbarGroup('分层摘要');
+        const subMissingButton = createButton('补齐缺失', 'coo-button coo-button-ghost coo-button-sm', 'fa-solid fa-compress');
         subMissingButton.dataset.cooAction = 'subGenerateMissing';
         subMissingButton.title = '后台补齐缺失的天摘要与上层合并摘要（不阻塞发送）';
-        toolbar.append(queryButton, allButton, subMissingButton);
+        const subForceButton = createButton('强制重建全部', 'coo-button coo-button-ghost coo-button-sm', 'fa-solid fa-bolt');
+        subForceButton.dataset.cooAction = 'subForceGenerateAll';
+        subForceButton.title = '清空现有层级摘要后全部重新生成';
+        const subEraseButton = createButton('擦除全部', 'coo-button coo-button-ghost coo-button-sm', 'fa-solid fa-eraser');
+        subEraseButton.dataset.cooAction = 'subEraseAll';
+        subEraseButton.title = '清空全部层级摘要（不影响故事历程原文）';
+        subGroup.append(subMissingButton, subForceButton, subEraseButton);
+        toolbar.appendChild(subGroup);
+
+        const rtGroup = createStoryToolbarGroup('角色状态');
+        const rtMissingButton = createButton('补齐缺失', 'coo-button coo-button-ghost coo-button-sm', 'fa-solid fa-wand-magic-sparkles');
+        rtMissingButton.dataset.cooAction = 'roleTrackGenerateMissing';
+        rtMissingButton.title = '后台补齐缺失的楼层状态追踪（已有有效的跳过）';
+        const rtForceButton = createButton('强制重建全部', 'coo-button coo-button-ghost coo-button-sm', 'fa-solid fa-bolt');
+        rtForceButton.dataset.cooAction = 'roleTrackForceRebuild';
+        rtForceButton.title = '清空现有楼层追踪后全部重新生成';
+        const rtEraseButton = createButton('擦除全部', 'coo-button coo-button-ghost coo-button-sm', 'fa-solid fa-eraser');
+        rtEraseButton.dataset.cooAction = 'roleTrackEraseAll';
+        rtEraseButton.title = '清空全部楼层的状态追踪（不影响故事历程原文与角色卡）';
+        rtGroup.append(rtMissingButton, rtForceButton, rtEraseButton);
+        toolbar.appendChild(rtGroup);
         section.appendChild(toolbar);
 
-        const subStatus = createText('div', 'coo-subsummary-status', '空闲');
+        const subStatus = createText('div', 'coo-subsummary-status', '分层摘要：空闲');
         subStatus.dataset.cooField = 'subSummaryStatus';
-        section.appendChild(subStatus);
+        const rtStatus = createText('div', 'coo-subsummary-status', '角色状态追踪：空闲');
+        rtStatus.dataset.cooField = 'roleTrackStatus';
 
         const ragInfo = createText('div', 'coo-rag-info', '');
         ragInfo.dataset.cooField = 'hierInfo';
+        const rtInfo = createText('div', 'coo-subsummary-status', '角色状态追踪：暂无数据');
+        rtInfo.dataset.cooField = 'roleTrackInfo';
+        const rtVarInfo = createText('div', 'coo-subsummary-status', '可变状态模版：检测中');
+        rtVarInfo.dataset.cooField = 'roleTrackVarInfo';
 
         const info = createText('div', 'coo-story-info', '—');
         info.dataset.cooField = 'storyInfo';
         const list = document.createElement('div');
         list.className = 'coo-story-list';
         list.dataset.cooField = 'storyList';
-        section.append(ragInfo, info, list);
+        section.append(subStatus, rtStatus, ragInfo, rtInfo, rtVarInfo, info, list);
         panel.appendChild(section);
 
         const startInput = section.querySelector('[data-coo-field="storyStart"]');
         const endInput = section.querySelector('[data-coo-field="storyEnd"]');
         startInput.value = '1';
         endInput.value = '';
+        updateSubSummaryStatus(section);
+        updateRoleTrackStatus(section);
+        updateRoleTrackInfo(section);
+        updateHierInfo(section);
         queryStoryRange(section, 1, '');
     }
 
@@ -760,19 +913,19 @@
         scope.querySelectorAll('[data-coo-field="subSummaryStatus"]').forEach((el) => {
             const status = NS.SubSummary ? NS.SubSummary.getStatus() : { running: false, current: '', done: 0, failed: 0, error: null, message: null };
             if (status.running) {
-                el.textContent = `生成中：${status.current}（成功 ${status.done} / 失败 ${status.failed}）`;
+                el.textContent = `分层摘要生成中：${status.current}（成功 ${status.done} / 失败 ${status.failed}）`;
                 el.className = 'coo-subsummary-status coo-subsummary-status-running';
             } else if (status.error) {
-                el.textContent = status.error;
+                el.textContent = `分层摘要：${status.error}`;
                 el.className = 'coo-subsummary-status coo-subsummary-status-error';
             } else if (status.done > 0 || status.failed > 0) {
-                el.textContent = `完成：成功 ${status.done}，失败 ${status.failed}`;
+                el.textContent = `分层摘要完成：成功 ${status.done}，失败 ${status.failed}`;
                 el.className = 'coo-subsummary-status';
             } else if (status.message) {
-                el.textContent = status.message;
+                el.textContent = `分层摘要：${status.message}`;
                 el.className = 'coo-subsummary-status';
             } else {
-                el.textContent = '空闲';
+                el.textContent = '分层摘要：空闲';
                 el.className = 'coo-subsummary-status';
             }
         });
@@ -844,28 +997,7 @@
         section.appendChild(createTemplateBlock('profile 附加参数（JSON 对象，仅 profile 模式生效；如 {"top_p": 0.9}，CUSTOM 源另支持 custom_include_body / custom_include_headers）', 'subSummaryExtraParams', 3, 0));
         section.appendChild(createTemplateBlock('天摘要模板（{{当天历程}} 为当天全部历程占位符，长度由模板措辞控制）', 'hierDayPrompt', 8, 10));
         section.appendChild(createTemplateBlock('合并摘要模板（{{子摘要列表}} 为连续子摘要占位符，L2 及以上复用）', 'hierMergePrompt', 8, 10));
-
-        const status = createText('div', 'coo-subsummary-status', '空闲');
-        status.dataset.cooField = 'subSummaryStatus';
-        section.appendChild(status);
-
-        const hierInfo = createText('div', 'coo-subsummary-status', '层级：暂无数据');
-        hierInfo.dataset.cooField = 'hierInfo';
-        section.appendChild(hierInfo);
-
-        const actions = document.createElement('div');
-        actions.className = 'coo-subsummary-actions';
-        const genMissingButton = createButton('补齐缺失', 'coo-button coo-button-sm', 'fa-solid fa-wand-magic-sparkles');
-        genMissingButton.dataset.cooAction = 'subGenerateMissing';
-        genMissingButton.title = '后台补齐缺失的天摘要与上层合并摘要（已有有效摘要的跳过）';
-        const forceGenButton = createButton('强制重建全部', 'coo-button coo-button-sm', 'fa-solid fa-bolt');
-        forceGenButton.dataset.cooAction = 'subForceGenerateAll';
-        forceGenButton.title = '清空现有层级摘要后全部重新生成';
-        const forceEraseButton = createButton('擦除全部', 'coo-button coo-button-ghost coo-button-sm', 'fa-solid fa-eraser');
-        forceEraseButton.dataset.cooAction = 'subEraseAll';
-        forceEraseButton.title = '清空全部层级摘要（不影响故事历程原文）';
-        actions.append(genMissingButton, forceGenButton, forceEraseButton);
-        section.appendChild(actions);
+        section.appendChild(createText('div', 'coo-preview-hint', '纯设置页：生成状态、层级统计、补齐/重建/擦除按钮与摘要结果均在「故事历程」选项卡'));
 
         const settings = Settings.getSettings();
         section.querySelector('[data-coo-field="subSummaryToggle"]').checked = Boolean(settings.subSummaryToggle);
@@ -887,8 +1019,6 @@
         section.querySelector('[data-coo-field="hierMergePrompt"]').value = settings.hierMergePrompt;
         applySubSummarySourceState(section);
         updateSubSummaryBadge(section);
-        updateSubSummaryStatus(section);
-        updateHierInfo(section);
 
         panel.appendChild(section);
     }
@@ -896,14 +1026,14 @@
     function updateHierInfo(scope) {
         scope.querySelectorAll('[data-coo-field="hierInfo"]').forEach((el) => {
             if (!NS.SubSummary || typeof NS.SubSummary.getCoverage !== 'function') {
-                el.textContent = '层级：模块未加载';
+                el.textContent = '分层摘要统计：模块未加载';
                 el.className = 'coo-subsummary-status';
                 return;
             }
             const cov = NS.SubSummary.getCoverage();
             const l1 = cov.days.filter((d) => d.text).length;
             const up = cov.upper.filter((u) => u.text).length;
-            el.textContent = `层级：${cov.days.length} 天（天摘要 ${l1}），上层合并 ${up} 个，扇入 ${cov.fanin}`;
+            el.textContent = `分层摘要统计：${cov.days.length} 天（天摘要 ${l1}），上层合并 ${up} 个，扇入 ${cov.fanin}`;
             el.className = 'coo-subsummary-status';
         });
     }
@@ -934,19 +1064,19 @@
         scope.querySelectorAll('[data-coo-field="roleTrackStatus"]').forEach((el) => {
             const status = NS.RoleTrack ? NS.RoleTrack.getStatus() : { running: false, current: '', done: 0, failed: 0, error: null, message: null };
             if (status.running) {
-                el.textContent = `追踪中：${status.current}（成功 ${status.done} / 失败 ${status.failed}）`;
+                el.textContent = `角色状态追踪中：${status.current}（成功 ${status.done} / 失败 ${status.failed}）`;
                 el.className = 'coo-subsummary-status coo-subsummary-status-running';
             } else if (status.error) {
-                el.textContent = status.error;
+                el.textContent = `角色状态追踪：${status.error}`;
                 el.className = 'coo-subsummary-status coo-subsummary-status-error';
             } else if (status.done > 0 || status.failed > 0) {
-                el.textContent = `完成：成功 ${status.done}，失败 ${status.failed}`;
+                el.textContent = `角色状态追踪完成：成功 ${status.done}，失败 ${status.failed}`;
                 el.className = 'coo-subsummary-status';
             } else if (status.message) {
-                el.textContent = status.message;
+                el.textContent = `角色状态追踪：${status.message}`;
                 el.className = 'coo-subsummary-status';
             } else {
-                el.textContent = '空闲';
+                el.textContent = '角色状态追踪：空闲';
                 el.className = 'coo-subsummary-status';
             }
         });
@@ -957,18 +1087,18 @@
         const cov = covOpt || ((NS.RoleTrack && typeof NS.RoleTrack.getCoverage === 'function') ? NS.RoleTrack.getCoverage() : null);
         scope.querySelectorAll('[data-coo-field="roleTrackInfo"]').forEach((el) => {
             if (!cov) {
-                el.textContent = '追踪：模块未加载';
+                el.textContent = '角色状态追踪：模块未加载';
                 el.className = 'coo-subsummary-status';
                 return;
             }
             if (!cov.hasVariable) {
-                el.textContent = '追踪：角色卡模板中未检测到 <可变> 标记（请在模板 tab 的属性行 // 注释中标记）';
+                el.textContent = '角色状态追踪：角色卡模板中未检测到 <可变> 标记（请在基础设置 tab 的角色卡 JSON 模板属性行 // 注释中标记）';
                 el.className = 'coo-subsummary-status coo-subsummary-status-error';
                 return;
             }
             const stale = (typeof cov.stale === 'number') ? cov.stale : 0;
             const untracked = (typeof cov.untracked === 'number') ? cov.untracked : Math.max(0, cov.missing - stale);
-            el.textContent = `追踪：已追踪 ${cov.tracked} / 共 ${cov.floors.length} 个有历程楼层（过期 ${stale}，从未追踪 ${untracked}），可变属性 ${cov.variableCount} 个`;
+            el.textContent = `角色状态追踪：已追踪 ${cov.tracked} / 共 ${cov.floors.length} 个有历程楼层（过期 ${stale}，从未追踪 ${untracked}），可变属性 ${cov.variableCount} 个`;
             el.className = 'coo-subsummary-status';
         });
         scope.querySelectorAll('[data-coo-field="roleTrackVarInfo"]').forEach((el) => {
@@ -991,86 +1121,6 @@
         if (floorInfo.dirtyReason === 'template') return '可变模板已变更';
         if (floorInfo.dirtyReason === 'story') return '本楼层历程已变更';
         return '模板或历程已变更';
-    }
-
-    function buildRoleTrackFloorCard(floorInfo) {
-        const card = document.createElement('div');
-        card.className = 'coo-story-item';
-        const head = document.createElement('div');
-        head.className = 'coo-story-item-head';
-        head.appendChild(createText('span', 'coo-story-floor', `楼层${floorInfo.floor}（${floorInfo.count} 条历程）`));
-        const isStale = Boolean(!floorInfo.valid && (floorInfo.stale || (floorInfo.hasSlot && floorInfo.states)));
-        if (floorInfo.valid) {
-            head.appendChild(createText('span', 'coo-rag-hit-score', '已追踪'));
-        } else if (isStale) {
-            head.appendChild(createText('span', 'coo-rag-miss-score', '已过期'));
-        } else {
-            head.appendChild(createText('span', 'coo-rag-miss-score', '缺失'));
-        }
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'coo-button coo-button-ghost coo-button-sm';
-        button.dataset.cooFloor = String(floorInfo.floor);
-        if (floorInfo.valid || isStale) {
-            button.dataset.cooAction = 'roleTrackFloorRegenerate';
-            button.appendChild(createIcon('fa-solid fa-rotate'));
-            button.appendChild(createText('span', 'coo-button-label', '重新生成'));
-            button.title = `重新追踪楼层${floorInfo.floor}的可变状态`;
-        } else {
-            button.dataset.cooAction = 'roleTrackFloorGenerate';
-            button.appendChild(createIcon('fa-solid fa-wand-magic-sparkles'));
-            button.appendChild(createText('span', 'coo-button-label', '生成追踪'));
-            button.title = `追踪楼层${floorInfo.floor}的可变状态`;
-        }
-        head.appendChild(button);
-        card.appendChild(head);
-        // 轻量口径：不再显示按历程文本匹配的“涉及角色”预览行。
-        // 已追踪楼层的角色名直接由下方 states 树标题给出；从未追踪的楼层只显示“尚未追踪”。
-        // 已过期的楼层保留存档展示（存档仍参与最终合并），并提示过期原因，避免
-        // “页面全缺失但合并仍生效”的困惑。
-        const states = floorInfo.states;
-        if (!floorInfo.valid && !isStale) {
-            card.appendChild(createText('div', 'coo-role-empty coo-story-summary-empty', '尚未追踪'));
-        } else if (!states) {
-            card.appendChild(createText('div', 'coo-role-empty coo-story-summary-empty', isStale ? '存档读取失败，建议重新生成' : '尚未追踪'));
-        } else if (Object.keys(states).length === 0) {
-            if (isStale) {
-                card.appendChild(createText('div', 'coo-subsummary-status', `${describeRoleTrackDirtyReason(floorInfo)}，存档为“本楼层无变化”（仍参与合并），可重新生成确认`));
-            } else {
-                card.appendChild(createText('div', 'coo-role-empty coo-story-summary-empty', '本楼层无角色状态变化'));
-            }
-        } else {
-            if (isStale) {
-                card.appendChild(createText('div', 'coo-subsummary-status', `${describeRoleTrackDirtyReason(floorInfo)}，以下为过期存档（仍参与最终合并），建议重新生成`));
-            }
-            for (const roleName of Object.keys(states)) {
-                card.appendChild(createText('div', 'coo-story-item-meta', roleName));
-                const tree = document.createElement('div');
-                tree.className = 'coo-role-info';
-                buildRoleTree(tree, states[roleName]);
-                card.appendChild(tree);
-            }
-        }
-        return card;
-    }
-
-    function renderRoleTrackList(scope, covOpt) {
-        const list = scope.querySelector('[data-coo-field="roleTrackList"]');
-        if (!list) return;
-        list.textContent = '';
-        if (!NS.RoleTrack || typeof NS.RoleTrack.getCoverage !== 'function') {
-            list.appendChild(createText('span', 'coo-role-empty', '模块未加载'));
-            return;
-        }
-        const cov = covOpt || NS.RoleTrack.getCoverage();
-        if (cov.floors.length === 0) {
-            list.appendChild(createText('span', 'coo-role-empty',
-                cov.hasVariable ? '暂无有历程的助手楼层' : '未检测到 <可变> 标记，无法追踪'));
-            return;
-        }
-        for (const floorInfo of cov.floors) {
-            list.appendChild(buildRoleTrackFloorCard(floorInfo));
-        }
     }
 
     function fillRoleTrackProfileSelect(select) {
@@ -1139,23 +1189,12 @@
         updateRoleTrackStatus(scope);
     }
 
-    // 角色状态面板一次快照刷完统计行 + 楼层卡片（打开/批次结束/擦除时调用；中间进度 tick 只刷状态行，不调此函数）。
-    function refreshRoleTrackPanel(scope) {
-        if (!NS.RoleTrack || typeof NS.RoleTrack.getCoverage !== 'function') {
-            updateRoleTrackInfo(scope, null);
-            renderRoleTrackList(scope, null);
-            return;
-        }
-        const cov = NS.RoleTrack.getCoverage();
-        updateRoleTrackInfo(scope, cov);
-        renderRoleTrackList(scope, cov);
-    }
-
     function handleRoleTrackEraseAll(scope) {
         showEraseAllConfirm('擦除全部角色状态追踪', '将清空全部楼层 extra 中的状态追踪，不影响故事历程原文与角色卡。此操作不可撤销。', '输入「确认全部擦除」以确认', () => {
             NS.RoleTrack.eraseAll();
             updateRoleTrackStatus(scope);
-            refreshRoleTrackPanel(scope);
+            updateRoleTrackInfo(scope);
+            renderStoryList(scope);
         });
     }
 
@@ -1177,37 +1216,7 @@
         section.appendChild(createNumberRow('超时（秒）', '（单次请求超时，超时按失败重试；本地慢模型调大）', 'roleTrackTimeoutSec', { min: 10, max: 600, step: 10 }));
         section.appendChild(createTemplateBlock('profile 附加参数（JSON 对象，仅 profile 模式生效）', 'roleTrackExtraParams', 3, 0));
         section.appendChild(createTemplateBlock('状态追踪模板（{{可变状态模版}} / {{角色列表}} / {{故事历程}} 三个占位符必填）', 'roleTrackPrompt', 10, 10));
-
-        const varInfo = createText('div', 'coo-subsummary-status', '可变状态模版：检测中');
-        varInfo.dataset.cooField = 'roleTrackVarInfo';
-        section.appendChild(varInfo);
-
-        const status = createText('div', 'coo-subsummary-status', '空闲');
-        status.dataset.cooField = 'roleTrackStatus';
-        section.appendChild(status);
-
-        const info = createText('div', 'coo-subsummary-status', '追踪：暂无数据');
-        info.dataset.cooField = 'roleTrackInfo';
-        section.appendChild(info);
-
-        const actions = document.createElement('div');
-        actions.className = 'coo-subsummary-actions';
-        const genMissingButton = createButton('补齐缺失', 'coo-button coo-button-sm', 'fa-solid fa-wand-magic-sparkles');
-        genMissingButton.dataset.cooAction = 'roleTrackGenerateMissing';
-        genMissingButton.title = '后台补齐缺失的楼层状态追踪（已有有效的跳过）';
-        const forceGenButton = createButton('强制重建全部', 'coo-button coo-button-sm', 'fa-solid fa-bolt');
-        forceGenButton.dataset.cooAction = 'roleTrackForceRebuild';
-        forceGenButton.title = '清空现有楼层追踪后全部重新生成';
-        const eraseButton = createButton('擦除全部', 'coo-button coo-button-ghost coo-button-sm', 'fa-solid fa-eraser');
-        eraseButton.dataset.cooAction = 'roleTrackEraseAll';
-        eraseButton.title = '清空全部楼层的状态追踪（不影响故事历程原文与角色卡）';
-        actions.append(genMissingButton, forceGenButton, eraseButton);
-        section.appendChild(actions);
-
-        const list = document.createElement('div');
-        list.className = 'coo-story-list';
-        list.dataset.cooField = 'roleTrackList';
-        section.appendChild(list);
+        section.appendChild(createText('div', 'coo-preview-hint', '纯设置页：追踪状态、统计、可变状态模版预览、补齐/重建/擦除按钮与逐楼层角色状态均在「故事历程」选项卡'));
 
         const settings = Settings.getSettings();
         section.querySelector('[data-coo-field="roleTrackToggle"]').checked = Boolean(settings.roleTrackToggle);
@@ -1227,8 +1236,6 @@
         section.querySelector('[data-coo-field="roleTrackPrompt"]').value = settings.roleTrackPrompt;
         applyRoleTrackSourceState(section);
         updateRoleTrackBadge(section);
-        updateRoleTrackStatus(section);
-        refreshRoleTrackPanel(section);
 
         panel.appendChild(section);
     }
@@ -1255,7 +1262,6 @@
 
     const TAB_RENDERERS = {
         settings: renderSettingsTab,
-        templates: renderTemplatesTab,
         roles: renderRolesTab,
         story: renderStoryTab,
         subsummary: renderSubSummaryTab,
@@ -1692,7 +1698,7 @@
     }
 
     // 角色状态追踪状态变化：中间进度 tick 只原地更新状态行文本（零扫描）；
-    // 批次结束或单楼层完成时才做一次快照刷统计行 + 楼层卡片列表。
+    // 批次结束或单楼层完成时才做一次快照刷统计行 + 故事历程列表（楼层卡片在故事历程 tab 内）。
     function onRoleTrackStatusChanged(snapshot) {
         const root = document.getElementById(ROOT_ID);
         const shell = root ? root.querySelector('.coo-shell') : null;
@@ -1700,10 +1706,11 @@
         updateRoleTrackStatus(shell);
         const finished = (snapshot && snapshot.running === false) || (snapshot && snapshot.lastDone);
         if (!finished) return;
-        if (activeTabId !== 'roletrack') return;
+        if (activeTabId !== 'story') return;
         const workspace = shell.querySelector('.coo-workspace');
         if (!workspace) return;
-        refreshRoleTrackPanel(workspace);
+        updateRoleTrackInfo(workspace);
+        renderStoryList(workspace);
     }
 
     // ------------------------------------------------------------------
