@@ -1152,6 +1152,19 @@
     font-variant-numeric: tabular-nums;
 }
 
+/* 被上层摘要吞并的天的标注徽章（完整楼层时间线模式下不再隐藏该天） */
+#coo-root .coo-story-merged {
+    flex: 0 0 auto;
+    font-size: 11px;
+    line-height: 1;
+    padding: 4px 8px;
+    border-radius: 999px;
+    color: var(--coo-muted);
+    background: var(--coo-row-bg);
+    border: 1px dashed var(--coo-border-soft);
+    font-variant-numeric: tabular-nums;
+}
+
 #coo-root .coo-story-item-meta {
     min-width: 0;
     font-size: 12px;

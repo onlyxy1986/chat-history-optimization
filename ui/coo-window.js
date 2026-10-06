@@ -501,13 +501,19 @@
         return box;
     }
 
-    function buildDayGroup(dayKey, label, entryCount, level, dayText, floorCards) {
+    // mergedInto 非空：该天已被上层摘要吞并，徽章改为「已并入 Lx:… 合并摘要」标注，
+    // 但天与楼层卡片照常展示（完整楼层时间线，楼层序号不出现断层）
+    function buildDayGroup(dayKey, label, entryCount, level, dayText, floorCards, mergedInto) {
         const group = document.createElement('div');
         group.className = 'coo-story-item coo-story-day';
         const head = document.createElement('div');
         head.className = 'coo-story-item-head';
         head.appendChild(createText('span', 'coo-story-floor', `${label}（${entryCount} 条）`));
-        head.appendChild(buildLevelBadge(level));
+        if (mergedInto) {
+            head.appendChild(createText('span', 'coo-story-merged', `已并入 ${mergedInto} 合并摘要`));
+        } else {
+            head.appendChild(buildLevelBadge(level));
+        }
         group.appendChild(head);
         group.appendChild(buildDaySummaryBox(dayKey, dayText, level < 0 ? '该天已超出预算被丢弃' : null));
         for (const floorCard of floorCards) {
@@ -643,7 +649,7 @@
         const dayGroupOf = (dk) => {
             let g = groups.get(dk);
             if (!g) {
-                g = { entries: [], floors: new Map(), orphanOnly: false };
+                g = { entries: [], floors: new Map() };
                 groups.set(dk, g);
             }
             return g;
@@ -678,7 +684,6 @@
                     }
                 }
                 const g = dayGroupOf(dk);
-                if (g.entries.length === 0) g.orphanOnly = true;
                 g.floors.set(floor, []);
             }
         }
@@ -696,15 +701,16 @@
             list.appendChild(buildUpperCard(u));
         }
         for (const [dayKey, g] of groups) {
-            // 被上层合并吞掉的天不单独展示（内容见上层卡片）；仅含孤儿楼层卡片的天保留展示
-            if (mergedByDay.has(dayKey) && !g.orphanOnly) continue;
+            // 完整楼层时间线：被上层合并吞掉的天不再隐藏（仅加「已并入 Lx:…」标注），
+            // 所有天的楼层卡片均展示，楼层序号连续无断层
             const level = levelByDay.has(dayKey) ? levelByDay.get(dayKey) : 0;
+            const mergedInto = mergedByDay.get(dayKey) || null;
             const floorCards = [];
             const floorNumbers = [...g.floors.keys()].sort((a, b) => a - b);
             for (const floor of floorNumbers) {
                 floorCards.push(buildStoryFloorCard(floor, g.floors.get(floor) || [], roleByFloor.get(floor), roleTracking));
             }
-            list.appendChild(buildDayGroup(dayKey, storyDayLabel(dayKey), g.entries.length, level, textByDay.get(dayKey) || null, floorCards));
+            list.appendChild(buildDayGroup(dayKey, storyDayLabel(dayKey), g.entries.length, level, textByDay.get(dayKey) || null, floorCards, mergedInto));
         }
     }
 
