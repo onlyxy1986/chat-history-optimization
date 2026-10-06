@@ -1,5 +1,6 @@
 // 角色状态追踪冒烟测试：可变模版解析 + 逐楼层 LLM 追踪 + extra 存储 + 顺序合并
 // 输出为单个 JSON 对象（键为角色名），{{角色列表}} 为完整角色卡 JSON
+// （v2.26.0 起叠加本楼层之前追踪状态合成后的最终状态基线，场景 L 验证）
 // node test/smoke-roletrack.cjs
 const fs = require('fs');
 const path = require('path');
@@ -272,4 +273,21 @@ function sleep(ms) {
     const lastMsg = NS.Engine.getStats().lastMessage;
     check('K: 发送消息含合并后的追踪状态', lastMsg.indexOf('地点3') !== -1, lastMsg.slice(0, 300));
     check('K: 发送消息保留不可变设定', lastMsg.indexOf('爱丽丝') !== -1, lastMsg.slice(0, 300));
+
+    // 场景 L（生成基线：{{角色列表}} 的角色卡 = 本楼层之前追踪状态合成后的最终状态）
+    buildChat3();
+    NS.bridge.extensionSettings['chat-optimization-v2'] = baseSettings({ characterPrompt: TRACK_CHARACTER_PROMPT });
+    fetchCallCount = 0;
+    await quiet(NS.RoleTrack.generateForFloor(1));
+    const promptL1 = lastPrompt;
+    check('L: 首楼层基线为原始卡值', promptL1.indexOf('"地点": "未知"') !== -1, promptL1.slice(0, 400));
+    await quiet(NS.RoleTrack.generateForFloor(3));
+    const promptL3 = lastPrompt;
+    check('L: 楼层3基线含楼层1合并状态', promptL3.indexOf('"地点": "地点1"') !== -1, promptL3.slice(0, 400));
+    check('L: 楼层3基线不含自身状态', promptL3.indexOf('"地点": "地点2"') === -1, promptL3);
+    await quiet(NS.RoleTrack.generateForFloor(5));
+    const promptL5 = lastPrompt;
+    check('L: 楼层5基线含楼层1+3合并状态', promptL5.indexOf('"地点": "地点2"') !== -1, promptL5.slice(0, 400));
+    check('L: 楼层5基线不含自身状态', promptL5.indexOf('"地点": "地点3"') === -1, promptL5);
+    check('L: 基线只改 LLM 输入，槽位仍按楼层输出', fetchCallCount === 3, fetchCallCount);
 })().catch(e => { console.error('TEST ERROR', e); process.exit(1); });

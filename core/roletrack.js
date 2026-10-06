@@ -8,7 +8,9 @@
 //   2. 本次故事历程：本楼层 L0（该助手回复 NEW_HISTORY 的故事历程条目）；
 //   3. 角色卡：本楼层历程文本中出现的角色的完整角色卡
 //      {角色名: 角色卡}（Engine.getKnownRoleCards 全集经
-//      Engine.nameMatches 过滤，含消歧义）。
+//      Engine.nameMatches 过滤，含消歧义），并叠加本楼层之前各楼层追踪状态
+//      合成后的最终状态（getMergedStates 排他上界=当前楼层；本楼层自身存档与
+//      后续楼层不参与，避免自我引用与未来信息泄漏）；基线合并失败时回退原始卡。
 // 输出：一个 JSON 对象，以可变状态模版为树形参考：键为有状态变化的角色名，
 //   值为该角色的可变状态子树，无变化时为 {}。
 //
@@ -21,7 +23,8 @@
 //   UI 以“已过期”展示存档与原因，而非“尚未追踪”。
 // 合并：Engine.buildPromptData 在角色卡淘汰后调 applyToCharacterData，
 //   按楼层顺序把各楼层 states 对象合并为最终可变状态并覆盖（追踪赢；淘汰掉的
-//   角色不复活；未知键按模板校验跳过）。
+//   角色不复活；未知键按模板校验跳过）。生成路径 runOne 发 LLM 前另以
+//   applyToCharacterData(cards, null, floor) 取“本楼层之前的最终状态”覆盖角色卡基线。
 // 连接：独立于分层摘要的配置（roleTrackSource/Profile/BaseUrl/ApiKey/
 //   Model/ExtraParams/Temperature/MaxTokens/Concurrency/TimeoutSec），
 //   fetch / profile 双通道、超时、重试口径与 subsummary 一致。
@@ -903,7 +906,20 @@
             writeFloorSlot(floor, {}, hash, hashes);
             return 'ok';
         }
-        const content = buildPromptContent(promptVariableText(variableInfo), roleCards, journeyText);
+        // 基线：把本楼层之前各楼层的追踪状态合并为“本楼层之前的当前最终状态”，
+        // 覆盖到角色卡可变子树（与最终装配同口径：后楼层赢、未知键跳过），使 LLM
+        // 基于合成后的最终状态推断变化，而非角色卡原始值。本楼层自身存档与后续楼层
+        // 不参与基线（避免自我引用与未来信息泄漏）。clone 后合并，不动全集快照。
+        let promptRoleCards = null;
+        try {
+            promptRoleCards = {};
+            for (const name of Object.keys(roleCards)) promptRoleCards[name] = clone(roleCards[name]);
+            applyToCharacterData(promptRoleCards, null, floor);
+        } catch (e) {
+            console.error('[Chat History Optimization] 角色状态追踪基线合并失败，使用原始角色卡', e);
+            promptRoleCards = null;
+        }
+        const content = buildPromptContent(promptVariableText(variableInfo), promptRoleCards || roleCards, journeyText);
         const raw = await callLlm(content);
         const states = extractStates(raw);
         writeFloorSlot(floor, states, hash, hashes);
@@ -1221,11 +1237,13 @@
     }
 
     // chatRef 缺省读实时 chat；Engine.buildPromptData 传入其深拷贝以保证一致性。
+    // maxFloor 为可选排他上界（只合并 < maxFloor 的楼层）：生成路径传当前楼层取
+    // “本楼层之前的当前最终状态”作 LLM 基线；缺省合并全部楼层（最终装配语义）。
     // 注意：此处有意合并全部存档（含哈希过期的 stale）：过期存档是“需要重追”的
     // 提示信号，不是“已丢弃”——丢弃只由 eraseAll/forceRebuild 显式执行。
     // UI 的 getCoverage 用 valid/stale/untracked 三分展示，stale 卡片会明确提示
     // “存档仍参与最终合并”，避免“页面全缺失但合并仍生效”的困惑。
-    function getMergedStates(chatRef) {
+    function getMergedStates(chatRef, maxFloor) {
         const acc = {};
         const chat = chatRef || getChat();
         if (!chat || !Array.isArray(chat)) return acc;
@@ -1234,7 +1252,9 @@
         const characterTemplate = EngineRef && typeof EngineRef.parseTemplate === 'function'
             ? EngineRef.parseTemplate(typeof raw === 'string' ? raw : '')
             : null;
-        for (let floor = 1; floor < chat.length; floor++) {
+        const limit = (typeof maxFloor === 'number' && !isNaN(maxFloor) && maxFloor >= 1)
+            ? Math.min(Math.floor(maxFloor), chat.length) : chat.length;
+        for (let floor = 1; floor < limit; floor++) {
             const slot = readFloorSlot(floor, chat);
             const states = slotStates(slot);
             if (!states) continue;
@@ -1250,11 +1270,12 @@
     }
 
     // Engine.buildPromptData 在淘汰后调用：追踪赢，但不复活已淘汰角色。
-    function applyToCharacterData(characterData, chatRef) {
+    // maxFloor 透传给 getMergedStates（生成路径取本楼层之前的基线；缺省全楼层）。
+    function applyToCharacterData(characterData, chatRef, maxFloor) {
         if (!characterData || typeof characterData !== 'object' || Array.isArray(characterData)) return characterData;
         let states = null;
         try {
-            states = getMergedStates(chatRef);
+            states = getMergedStates(chatRef, maxFloor);
         } catch (e) {
             console.error('[Chat History Optimization] 角色状态合并读取失败', e);
             return characterData;
